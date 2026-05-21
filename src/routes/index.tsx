@@ -1,13 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useRef, useState } from "react";
+import { useState } from "react";
+import { Menu, Wallet, RefreshCw } from "lucide-react";
+import { Sidebar, type Page } from "@/components/kaw/Sidebar";
+import { Dashboard } from "@/components/kaw/Dashboard";
+import { AccountPage } from "@/components/kaw/AccountPage";
+import { SettingsPage } from "@/components/kaw/SettingsPage";
+import { AuthGate } from "@/components/kaw/AuthGate";
 import { usePortfolioStore } from "@/lib/kaw/store";
-import { ACCOUNT_IDS, ACCOUNT_LABELS, PROFILE_LABELS, type AccountId } from "@/lib/kaw/constants";
-import { ProfilePanel } from "@/components/kaw/ProfilePanel";
-import { AccountTab } from "@/components/kaw/AccountTab";
-import { HistorySection } from "@/components/kaw/HistorySection";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Button } from "@/components/ui/button";
-import { Download, Upload, RotateCcw, Wallet } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -20,74 +19,65 @@ export const Route = createFileRoute("/")({
 });
 
 function Index() {
-  const { state, resetAll, importJson } = usePortfolioStore();
-  const [active, setActive] = useState<AccountId>("retirement");
-  const fileRef = useRef<HTMLInputElement>(null);
+  const { familyCode, dbLoading } = usePortfolioStore();
+  const [page, setPage] = useState<Page>("dashboard");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  function exportJson() {
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `kaw-portfolio-${new Date().toISOString().slice(0,10)}.json`;
-    a.click(); URL.revokeObjectURL(url);
+  // ── 라우팅 가드: 인증 전 ────────────────────────────────────────────────
+  // 앱 최초 로드 시 (familyCode 없고 로딩 중) → 로딩 스피너
+  // familyCode 없고 로딩 아닐 때 → AuthGate
+  if (!familyCode) {
+    if (dbLoading) {
+      return (
+        <div className="min-h-screen bg-background flex flex-col items-center justify-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 grid place-items-center shadow">
+            <Wallet className="w-6 h-6 text-white" />
+          </div>
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <RefreshCw className="w-4 h-4 animate-spin" />
+            데이터를 불러오는 중…
+          </div>
+        </div>
+      );
+    }
+    return <AuthGate />;
   }
 
-  function onImport(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0]; if (!f) return;
-    f.text().then((t) => { try { importJson(JSON.parse(t)); } catch { alert("잘못된 JSON 파일입니다."); } });
-    e.target.value = "";
+  // ── 메인 앱 ─────────────────────────────────────────────────────────────
+  function navigate(p: Page) {
+    setPage(p);
+    setSidebarOpen(false);
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      <header className="border-b sticky top-0 z-10 bg-background/80 backdrop-blur">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between flex-wrap gap-2">
+    <div className="flex h-screen bg-background overflow-hidden">
+      {/* 모바일 오버레이 */}
+      {sidebarOpen && (
+        <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      <Sidebar active={page} onNavigate={navigate} mobileOpen={sidebarOpen} onMobileClose={() => setSidebarOpen(false)} />
+
+      <main className="flex-1 overflow-y-auto min-w-0">
+        {/* 모바일 상단 헤더 */}
+        <div className="md:hidden flex items-center gap-3 px-4 py-3 border-b bg-card sticky top-0 z-30">
+          <button onClick={() => setSidebarOpen(true)} className="p-2 rounded-lg hover:bg-muted transition-colors" aria-label="메뉴 열기">
+            <Menu className="w-5 h-5" />
+          </button>
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-primary text-primary-foreground grid place-items-center">
-              <Wallet className="w-4 h-4" />
+            <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 grid place-items-center">
+              <Wallet className="w-3.5 h-3.5 text-white" />
             </div>
-            <div>
-              <h1 className="font-semibold leading-tight">K-올웨더 포트폴리오</h1>
-              <p className="text-xs text-muted-foreground">리밸런싱 & 수익률 트래커 · {PROFILE_LABELS[state.profile]}</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-1">
-            <input ref={fileRef} type="file" accept="application/json" hidden onChange={onImport} />
-            <Button variant="ghost" size="sm" onClick={() => fileRef.current?.click()}>
-              <Upload className="w-4 h-4 mr-1.5" /> 가져오기
-            </Button>
-            <Button variant="ghost" size="sm" onClick={exportJson}>
-              <Download className="w-4 h-4 mr-1.5" /> 내보내기
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => { if (confirm("모든 데이터를 초기화할까요?")) resetAll(); }}>
-              <RotateCcw className="w-4 h-4 mr-1.5" /> 초기화
-            </Button>
+            <span className="font-bold text-sm">K-올웨더</span>
           </div>
         </div>
-      </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
-        <ProfilePanel />
-
-        <div>
-          <Tabs value={active} onValueChange={(v) => setActive(v as AccountId)}>
-            <TabsList className="grid grid-cols-5 w-full sm:w-auto">
-              {ACCOUNT_IDS.map((id) => (
-                <TabsTrigger key={id} value={id}>{ACCOUNT_LABELS[id]}</TabsTrigger>
-              ))}
-            </TabsList>
-            {ACCOUNT_IDS.map((id) => (
-              <TabsContent key={id} value={id} className="space-y-6 mt-4">
-                <AccountTab accountId={id} />
-                <HistorySection accountId={id} />
-              </TabsContent>
-            ))}
-          </Tabs>
-        </div>
-
-        <footer className="text-xs text-muted-foreground text-center py-4">
-          모든 데이터는 브라우저 localStorage에만 저장됩니다. UH: 환노출 · H: 환헤지
-        </footer>
+        {page === "dashboard"  && <Dashboard />}
+        {page === "retirement" && <AccountPage accountId="retirement" />}
+        {page === "isa"        && <AccountPage accountId="isa" />}
+        {page === "pension"    && <AccountPage accountId="pension" />}
+        {page === "irp"        && <AccountPage accountId="irp" />}
+        {page === "settings"   && <SettingsPage />}
       </main>
     </div>
   );

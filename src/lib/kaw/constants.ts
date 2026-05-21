@@ -2,14 +2,14 @@ export type AssetKey =
   | "us" | "kr" | "cn" | "in" | "gold" | "ust10" | "ust30" | "ktb30" | "cash";
 
 export const ASSET_GROUPS: Record<AssetKey, { group: string; label: string; defaultEtf: string }> = {
-  us:    { group: "주식",     label: "미국 주식(UH)",   defaultEtf: "KODEX 미국S&P500TR" },
-  kr:    { group: "주식",     label: "한국 주식",        defaultEtf: "KOSEF 200TR" },
+  us:    { group: "주식",     label: "미국 주식(UH)",   defaultEtf: "TIGER 미국S&P500" },
+  kr:    { group: "주식",     label: "한국 주식",        defaultEtf: "KIWOOM 200TR" },
   cn:    { group: "주식",     label: "중국 주식(UH)",   defaultEtf: "KODEX 차이나CSI300" },
   in:    { group: "주식",     label: "인도(UH)",         defaultEtf: "KODEX 인도Nifty50" },
-  gold:  { group: "대체투자", label: "금(UH)",           defaultEtf: "ACE KRX 금현물" },
-  ust10: { group: "국채",     label: "미국채 10년(UH)",  defaultEtf: "KODEX 미국채 10년선물" },
-  ust30: { group: "국채",     label: "미국채 30년(H)",   defaultEtf: "ACE 미국30년국채액티브(H)" },
-  ktb30: { group: "국채",     label: "국고채 30년",      defaultEtf: "KBSTAR KIS국고채30년 Enhanced" },
+  gold:  { group: "대체투자", label: "금(UH)",           defaultEtf: "TIGER KRX 금현물" },
+  ust10: { group: "국채",     label: "미국채 10년(UH)",  defaultEtf: "ACE 미국10년국채액티브" },
+  ust30: { group: "국채",     label: "미국채 30년(H)",   defaultEtf: "KODEX 미국30년국채액티브(H)" },
+  ktb30: { group: "국채",     label: "국고채 30년",      defaultEtf: "RISE KIS국고채30년Enhanced" },
   cash:  { group: "현금성자산", label: "현금성자산",     defaultEtf: "TIGER KOFR금리액티브(합성)" },
 };
 
@@ -28,10 +28,13 @@ export const PROFILE_PRESETS: Record<ProfileKey, Record<AssetKey, number>> = {
   stable:  { us:15,   kr:5, cn:5,   in:5,   gold:12, ust10:4.5, ust30:4.5, ktb30:9,  cash:40 },
 };
 
-export const ACCOUNT_IDS = ["retirement","isa","pension","irp","etc"] as const;
+export const ACCOUNT_IDS = ["retirement","isa","pension","irp"] as const;
 export type AccountId = typeof ACCOUNT_IDS[number];
 export const ACCOUNT_LABELS: Record<AccountId,string> = {
-  retirement: "퇴직연금", isa: "ISA", pension: "연금저축", irp: "IRP", etc: "기타",
+  retirement: "퇴직연금", isa: "ISA계좌", pension: "연금저축펀드", irp: "IRP계좌",
+};
+export const ACCOUNT_LABELS_SHORT: Record<AccountId,string> = {
+  retirement: "퇴직연금", isa: "ISA", pension: "연금저축", irp: "IRP",
 };
 
 export const GROUP_COLORS: Record<string,string> = {

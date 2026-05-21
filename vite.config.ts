@@ -12,4 +12,9 @@ export default defineConfig({
   tanstackStart: {
     server: { entry: "server" },
   },
+  vite: {
+    server: {
+      watch: { usePolling: true, interval: 300 },
+    },
+  },
 });
