@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Wallet, Shield, RefreshCw, Wifi, HardDrive, AlertCircle, ArrowRight, CheckCircle2 } from "lucide-react";
 import { loginWithCode } from "@/lib/kaw/store";
-import { hasSupabase } from "@/lib/kaw/supabase";
 
 export function AuthGate() {
   const [code, setCode] = useState("");
@@ -21,9 +20,7 @@ export function AuthGate() {
     try {
       const result = await loginWithCode(trimmed);
       setJoined(result);
-      // Small delay for user to see the success message
-      await new Promise((r) => setTimeout(r, 900));
-      // The store update will re-render the parent (Index) which will unmount AuthGate
+      await new Promise((r) => setTimeout(r, 800));
     } catch (err: unknown) {
       setError((err as { message?: string })?.message ?? "오류가 발생했습니다. 다시 시도해주세요.");
       setLoading(false);
@@ -78,7 +75,7 @@ export function AuthGate() {
             {joined && (
               <div className="flex items-center gap-2 text-emerald-500 text-xs bg-emerald-500/10 rounded-lg px-3 py-2">
                 <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                {joined === "new" ? "새로운 방이 생성됐습니다! 대시보드로 이동 중…" : "기존 데이터를 불러오는 중…"}
+                {joined === "new" ? "새로운 방이 생성됐습니다! 프로필 선택으로 이동 중…" : "기존 데이터를 불러오는 중…"}
               </div>
             )}
 
@@ -95,7 +92,6 @@ export function AuthGate() {
             </button>
           </form>
 
-          {/* Info */}
           <div className="space-y-2 pt-1">
             <div className="flex items-start gap-2.5 text-xs text-muted-foreground">
               <Wifi className="w-3.5 h-3.5 shrink-0 mt-0.5 text-violet-400" />
@@ -106,13 +102,6 @@ export function AuthGate() {
               <p>처음 입력하면 새 방이 생성되고, 기존 코드 입력 시 저장된 데이터를 불러옵니다.</p>
             </div>
           </div>
-
-          {/* Supabase status */}
-          {!hasSupabase && (
-            <div className="border-t pt-3 text-xs text-amber-500 bg-amber-500/10 rounded-lg px-3 py-2">
-              ⚠ Supabase 미설정 — 로컬 전용 모드로 실행 중. 기기 간 동기화를 위해 .env 파일에 VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY를 입력하세요.
-            </div>
-          )}
         </div>
 
         <p className="text-center text-xs text-muted-foreground">

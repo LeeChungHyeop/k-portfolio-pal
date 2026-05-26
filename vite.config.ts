@@ -13,6 +13,14 @@ export default defineConfig({
     server: { entry: "server" },
   },
   vite: {
+    // Explicitly bake Supabase env vars into the client bundle.
+    // Cloudflare Pages injects them as process.env at build time.
+    define: {
+      "import.meta.env.VITE_SUPABASE_URL":
+        JSON.stringify(process.env.VITE_SUPABASE_URL ?? ""),
+      "import.meta.env.VITE_SUPABASE_ANON_KEY":
+        JSON.stringify(process.env.VITE_SUPABASE_ANON_KEY ?? ""),
+    },
     server: {
       watch: { usePolling: true, interval: 300 },
     },

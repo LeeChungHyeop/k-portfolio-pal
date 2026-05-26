@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, Moon, X, LogOut, RefreshCw } from "lucide-react";
+import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, Moon, X, LogOut, RefreshCw, Users } from "lucide-react";
 import { usePortfolioStore } from "@/lib/kaw/store";
-import { USER_PROFILES } from "@/lib/kaw/supabase";
+import { type FamilyData } from "@/lib/kaw/auth";
 
 export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
@@ -18,10 +18,12 @@ interface Props {
   onNavigate: (p: Page) => void;
   mobileOpen?: boolean;
   onMobileClose?: () => void;
+  familyData?: FamilyData | null;
+  onFamilyUpdate?: (fd: FamilyData) => void;
 }
 
 export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose }: Props) {
-  const { familyCode, currentUser, dbLoading, switchProfile, logoutCode } = usePortfolioStore();
+  const { familyCode, currentUser, dbLoading, deactivateProfile, logoutCode } = usePortfolioStore();
 
   const [dark, setDark] = useState(() => {
     if (typeof document === "undefined") return true;
@@ -33,6 +35,8 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
     document.documentElement.classList.toggle("dark", dark);
     localStorage.setItem("kaw.theme", dark ? "dark" : "light");
   }, [dark]);
+
+  const profileLabel = currentUser || "—";
 
   return (
     <aside className={[
@@ -57,33 +61,22 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
         </button>
       </div>
 
-      {/* 프로필 스위처 */}
+      {/* 현재 프로필 */}
       <div className="px-3 py-3 border-b">
-        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-2 px-1">프로필</p>
-        <div className="flex gap-1 bg-muted/60 rounded-xl p-1">
-          {USER_PROFILES.map(({ id, label }) => {
-            const isActive = currentUser === id;
-            return (
-              <button
-                key={id}
-                onClick={() => { if (!dbLoading) switchProfile(id); }}
-                disabled={dbLoading}
-                className={[
-                  "flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all select-none",
-                  isActive
-                    ? "bg-gradient-to-r from-violet-500 to-blue-500 text-white shadow-sm"
-                    : "text-muted-foreground hover:text-foreground hover:bg-muted",
-                  dbLoading ? "opacity-60 cursor-wait" : "",
-                ].join(" ")}
-              >
-                {dbLoading && isActive
-                  ? <RefreshCw className="w-3 h-3 animate-spin mx-auto" />
-                  : label
-                }
-              </button>
-            );
-          })}
+        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-2 px-1">현재 프로필</p>
+        <div className="flex items-center gap-2 px-2 py-2 rounded-xl bg-gradient-to-r from-violet-500/10 to-blue-500/10 border border-violet-200/50 dark:border-violet-800/50">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shrink-0">
+            <span className="text-xs font-bold text-white">{profileLabel.charAt(0).toUpperCase()}</span>
+          </div>
+          <span className="text-sm font-semibold flex-1 truncate">{profileLabel}</span>
+          {dbLoading && <RefreshCw className="w-3 h-3 animate-spin text-violet-500 shrink-0" />}
         </div>
+        <button
+          onClick={() => { deactivateProfile(); onMobileClose?.(); }}
+          className="w-full mt-1.5 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+        >
+          <Users className="w-3.5 h-3.5" /> 프로필 전환
+        </button>
       </div>
 
       {/* 메뉴 */}
@@ -120,7 +113,6 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
           {active === "settings" && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-slate-500" />}
         </button>
 
-        {/* 다크/라이트 토글 */}
         <button
           onClick={() => setDark(!dark)}
           className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-all"
@@ -134,7 +126,6 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
           </div>
         </button>
 
-        {/* 로그아웃 */}
         <button
           onClick={() => { logoutCode(); onMobileClose?.(); }}
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-all"

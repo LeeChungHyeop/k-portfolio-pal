@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from "react";
 import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, type AccountId, type AssetKey, type ProfileKey } from "./constants";
-import { supabase, hasSupabase, type UserProfile } from "./supabase";
+import { supabase, hasSupabase } from "./supabase";
+import { defaultFamilyData, saveFamilyData, SESSION_AUTH_KEY } from "./auth";
 
-export type { UserProfile };
+export type { UserProfile } from "./supabase";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface Holding { assetKey: AssetKey; etfName: string; value: number; }
@@ -32,7 +33,7 @@ export interface StoreState {
 const AUTH_CODE_KEY = "kaw.family_code";
 const AUTH_USER_KEY = "kaw.user_profile";
 const LEGACY_STORE_KEY = "kaw.v2";
-const storeKey = (code: string, u: UserProfile) => `kaw.v2.${code}.${u}`;
+const storeKey = (code: string, u: string) => `kaw.v2.${code}.${u}`;
 
 // ── Seed History ───────────────────────────────────────────────────────────
 type SeedEntry = { date: string; totalValue: number; baseAmount: number; deposit: number; holdings: Partial<Record<AssetKey, number>> };
@@ -102,7 +103,6 @@ function recalcReturns(history: HistoryEntry[]): HistoryEntry[] {
   });
 }
 
-// ── Migration helper ───────────────────────────────────────────────────────
 function migrateState(parsed: StoreState): StoreState {
   const seed = seedState();
   for (const id of ACCOUNT_IDS) {
@@ -124,9 +124,9 @@ function migrateState(parsed: StoreState): StoreState {
   return parsed;
 }
 
-// ── Module-level state (sync init from localStorage) ──────────────────────
+// ── Module-level state ─────────────────────────────────────────────────────
 let familyCode: string | null = typeof window !== "undefined" ? localStorage.getItem(AUTH_CODE_KEY) : null;
-let currentUser: UserProfile = typeof window !== "undefined" ? ((localStorage.getItem(AUTH_USER_KEY) as UserProfile) || "hyeobi") : "hyeobi";
+let currentUser: string = typeof window !== "undefined" ? (localStorage.getItem(AUTH_USER_KEY) ?? "") : "";
 let dbLoading = false;
 let dbError: string | null = null;
 let initialized = false;
@@ -143,13 +143,13 @@ function notify() { listeners.forEach((l) => l()); }
 
 // ── Local storage helpers ──────────────────────────────────────────────────
 function saveLocal(state: StoreState) {
-  if (typeof window === "undefined") return;
+  if (typeof window === "undefined" || !currentUser) return;
   const key = familyCode ? storeKey(familyCode, currentUser) : LEGACY_STORE_KEY;
   try { localStorage.setItem(key, JSON.stringify(state)); } catch {}
 }
 
 function loadLocal(): StoreState {
-  if (typeof window === "undefined") return seedState();
+  if (typeof window === "undefined" || !currentUser) return emptyState();
   if (familyCode) {
     try {
       const raw = localStorage.getItem(storeKey(familyCode, currentUser));
@@ -165,9 +165,9 @@ function loadLocal(): StoreState {
 }
 
 // ── DB operations ──────────────────────────────────────────────────────────
-interface DbRow { family_code: string; profile: UserProfile; account_type: string; data: unknown; updated_at?: string; }
+interface DbRow { family_code: string; profile: string; account_type: string; data: unknown; updated_at?: string; }
 
-async function dbLoad(code: string, user: UserProfile): Promise<StoreState | null> {
+async function dbLoad(code: string, user: string): Promise<StoreState | null> {
   if (!supabase) return null;
   try {
     const { data, error } = await supabase
@@ -204,8 +204,8 @@ async function dbLoad(code: string, user: UserProfile): Promise<StoreState | nul
   }
 }
 
-async function dbSave(code: string, user: UserProfile, state: StoreState) {
-  if (!supabase || isReceivingRealtime) return;
+async function dbSave(code: string, user: string, state: StoreState) {
+  if (!supabase || isReceivingRealtime || !user) return;
   const now = new Date().toISOString();
   const rows: DbRow[] = [
     { family_code: code, profile: user, account_type: "_meta", data: { profile: state.profile, allocations: state.allocations }, updated_at: now },
@@ -216,10 +216,10 @@ async function dbSave(code: string, user: UserProfile, state: StoreState) {
 }
 
 function scheduleSave() {
-  if (!familyCode) return;
+  if (!familyCode || !currentUser) return;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    if (familyCode && memState) dbSave(familyCode, currentUser, memState).catch(console.error);
+    if (familyCode && memState && currentUser) dbSave(familyCode, currentUser, memState).catch(console.error);
   }, 800);
 }
 
@@ -258,7 +258,7 @@ function unsubscribeRealtime() {
   }
 }
 
-// ── Auth actions (exported for AuthGate) ───────────────────────────────────
+// ── Auth actions ───────────────────────────────────────────────────────────
 export async function loginWithCode(code: string): Promise<"new" | "existing"> {
   if (typeof window === "undefined") throw new Error("Client only");
   code = code.trim();
@@ -269,7 +269,6 @@ export async function loginWithCode(code: string): Promise<"new" | "existing"> {
 
   try {
     let isNew = false;
-    let state: StoreState | null = null;
 
     if (supabase) {
       const { data, error } = await supabase
@@ -280,15 +279,15 @@ export async function loginWithCode(code: string): Promise<"new" | "existing"> {
       if (error) throw error;
       isNew = !data?.length;
     } else {
-      // Local-only mode: code is just a local password
       isNew = !localStorage.getItem(storeKey(code, "hyeobi")) && !localStorage.getItem(LEGACY_STORE_KEY + ".auth." + code);
     }
 
     familyCode = code;
-    currentUser = "hyeobi";
+    localStorage.setItem(AUTH_CODE_KEY, code);
 
     if (isNew) {
       // Migrate legacy data if exists
+      let state: StoreState | null = null;
       try {
         const legacyRaw = localStorage.getItem(LEGACY_STORE_KEY);
         if (legacyRaw) state = migrateState(JSON.parse(legacyRaw) as StoreState);
@@ -296,22 +295,13 @@ export async function loginWithCode(code: string): Promise<"new" | "existing"> {
       if (!state) state = seedState();
 
       if (supabase) {
+        await saveFamilyData(code, defaultFamilyData());
         await dbSave(code, "hyeobi", state);
-        await dbSave(code, "dayoung", emptyState());
       } else {
-        // Mark code as valid locally
         localStorage.setItem(LEGACY_STORE_KEY + ".auth." + code, "1");
+        localStorage.setItem(storeKey(code, "hyeobi"), JSON.stringify(state));
       }
-    } else {
-      state = (await dbLoad(code, "hyeobi")) ?? seedState();
     }
-
-    memState = state;
-    saveLocal(memState);
-    localStorage.setItem(AUTH_CODE_KEY, code);
-    localStorage.setItem(AUTH_USER_KEY, "hyeobi");
-
-    subscribeRealtime(code);
 
     dbLoading = false;
     notify();
@@ -324,44 +314,57 @@ export async function loginWithCode(code: string): Promise<"new" | "existing"> {
   }
 }
 
-export function logoutCode() {
-  if (typeof window === "undefined") return;
-  unsubscribeRealtime();
-  localStorage.removeItem(AUTH_CODE_KEY);
-  localStorage.removeItem(AUTH_USER_KEY);
-  familyCode = null;
-  currentUser = "hyeobi";
-  memState = null;
-  dbError = null;
-  notify();
-}
-
-export async function switchProfile(user: UserProfile) {
-  if (!familyCode || user === currentUser) return;
-
-  // Save current before switching
-  if (memState) await dbSave(familyCode, currentUser, memState).catch(() => {});
+export async function activateProfile(profileId: string): Promise<void> {
+  if (!familyCode) return;
 
   dbLoading = true;
   notify();
 
   try {
-    const loaded = await dbLoad(familyCode, user);
-    const newState = loaded ?? (user === "hyeobi" ? seedState() : emptyState());
+    if (memState && currentUser && currentUser !== profileId) {
+      await dbSave(familyCode, currentUser, memState).catch(() => {});
+    }
 
-    currentUser = user;
+    const loaded = await dbLoad(familyCode, profileId);
+    const newState = loaded ?? (profileId === "hyeobi" ? seedState() : emptyState());
+
+    currentUser = profileId;
     memState = newState;
     saveLocal(memState);
-    localStorage.setItem(AUTH_USER_KEY, user);
+    localStorage.setItem(AUTH_USER_KEY, profileId);
+
+    subscribeRealtime(familyCode);
   } catch {}
 
   dbLoading = false;
   notify();
 }
 
+export function deactivateProfile(): void {
+  unsubscribeRealtime();
+  localStorage.removeItem(AUTH_USER_KEY);
+  if (typeof window !== "undefined") sessionStorage.removeItem(SESSION_AUTH_KEY);
+  currentUser = "";
+  memState = null;
+  notify();
+}
+
+export function logoutCode() {
+  if (typeof window === "undefined") return;
+  unsubscribeRealtime();
+  localStorage.removeItem(AUTH_CODE_KEY);
+  localStorage.removeItem(AUTH_USER_KEY);
+  sessionStorage.removeItem(SESSION_AUTH_KEY);
+  familyCode = null;
+  currentUser = "";
+  memState = null;
+  dbError = null;
+  notify();
+}
+
 // ── State management ───────────────────────────────────────────────────────
 function getState(): StoreState {
-  if (!memState) memState = loadLocal();
+  if (!memState) memState = currentUser ? loadLocal() : emptyState();
   return memState;
 }
 
@@ -372,32 +375,37 @@ function setState(updater: (s: StoreState) => StoreState) {
   notify();
 }
 
-// ── Async init (DB sync + realtime) ───────────────────────────────────────
+// ── Async init ─────────────────────────────────────────────────────────────
 async function initFromStorage() {
   if (typeof window === "undefined") return;
   const code = localStorage.getItem(AUTH_CODE_KEY);
   if (!code) { notify(); return; }
 
   familyCode = code;
-  currentUser = (localStorage.getItem(AUTH_USER_KEY) as UserProfile) || "hyeobi";
+  notify(); // trigger ProfileSelect
 
-  // Show local data instantly
-  memState = loadLocal();
-  notify();
+  // Restore session-level profile auth (within same tab session)
+  const sessionProfile = sessionStorage.getItem(SESSION_AUTH_KEY);
+  if (sessionProfile) {
+    const savedUser = localStorage.getItem(AUTH_USER_KEY);
+    if (savedUser === sessionProfile) {
+      memState = loadLocal();
+      currentUser = sessionProfile;
+      notify();
 
-  // Sync from DB in background
-  if (hasSupabase) {
-    dbLoading = true;
-    notify();
-    try {
-      const dbState = await dbLoad(code, currentUser);
-      if (dbState) { memState = dbState; saveLocal(memState); notify(); }
-    } catch {}
-    dbLoading = false;
-    notify();
+      if (hasSupabase) {
+        dbLoading = true;
+        notify();
+        try {
+          const dbState = await dbLoad(code, sessionProfile);
+          if (dbState) { memState = dbState; saveLocal(memState); notify(); }
+        } catch {}
+        dbLoading = false;
+        notify();
+      }
+      subscribeRealtime(code);
+    }
   }
-
-  subscribeRealtime(code);
 }
 
 // ── React Hook ─────────────────────────────────────────────────────────────
@@ -457,7 +465,8 @@ export function usePortfolioStore() {
     updateAccount, updateHolding,
     addHistory, removeHistory,
     resetAll, importJson,
-    switchProfile: useCallback((u: UserProfile) => switchProfile(u), []),
+    activateProfile: useCallback((id: string) => activateProfile(id), []),
+    deactivateProfile: useCallback(() => deactivateProfile(), []),
     logoutCode:    useCallback(() => logoutCode(), []),
   };
 }
