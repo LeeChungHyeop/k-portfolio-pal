@@ -569,8 +569,8 @@ export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
           <div className="flex items-center gap-2">
             <Shield className="w-5 h-5 text-amber-500" />
             <div>
-              <h3 className="font-semibold">마스터 코드 변경</h3>
-              <p className="text-xs text-muted-foreground">관리자 프로필에서만 변경 가능합니다.</p>
+              <h3 className="font-semibold">액세스 코드(마스터) 변경</h3>
+              <p className="text-xs text-muted-foreground">관리자 프로필 전용 · 기본값은 앱 액세스 코드와 동일</p>
             </div>
           </div>
           <form onSubmit={handleMcChange} className="space-y-3 max-w-sm">

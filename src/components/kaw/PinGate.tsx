@@ -177,7 +177,7 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
     setMasterError(null);
     const ok = await verifyMasterCode(masterInput, familyData, familyCode);
     setMasterLoading(false);
-    if (!ok) { setMasterError("마스터 코드가 일치하지 않습니다."); return; }
+    if (!ok) { setMasterError("액세스 코드가 일치하지 않습니다."); return; }
     setStep("reset_pin");
     setMasterInput(""); setPinConfirm(""); setError(null);
   }
@@ -205,14 +205,14 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
         {/* Master code verify step */}
         {step === "forgot_master" && (
           <div className="mt-6">
-            <p className="text-center text-sm text-muted-foreground mb-4">마스터 패스코드를 입력하면<br />비밀번호를 초기화할 수 있습니다.</p>
+            <p className="text-center text-sm text-muted-foreground mb-4">액세스 코드를 입력하면<br />비밀번호를 초기화할 수 있습니다.</p>
             <form onSubmit={handleMasterVerify} className="space-y-3">
               <input
                 ref={masterRef}
                 type="password"
                 value={masterInput}
                 onChange={(e) => { setMasterInput(e.target.value); setMasterError(null); }}
-                placeholder="마스터 패스코드"
+                placeholder="액세스 코드를 입력하세요"
                 className="w-full h-11 px-4 rounded-xl border bg-background text-sm outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500 transition-all"
               />
               {masterError && (

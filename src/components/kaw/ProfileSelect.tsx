@@ -41,7 +41,7 @@ export function ProfileSelect({ familyCode, familyData, onSelect, onFamilyUpdate
     setMasterError(null);
     const ok = await verifyMasterCode(masterInput, familyData, familyCode);
     setMasterLoading(false);
-    if (!ok) { setMasterError("마스터 코드가 일치하지 않습니다."); return; }
+    if (!ok) { setMasterError("액세스 코드가 일치하지 않습니다."); return; }
     setStep("create");
     setMasterInput("");
   }
@@ -71,15 +71,16 @@ export function ProfileSelect({ familyCode, familyData, onSelect, onFamilyUpdate
           className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors">
           <ArrowLeft className="w-4 h-4" /> 돌아가기
         </button>
-        <h2 className="text-xl font-bold mb-1">마스터 코드 확인</h2>
-        <p className="text-sm text-muted-foreground mb-6">새 프로필을 만들려면 공유 패스코드를 입력하세요.</p>
+        <h2 className="text-xl font-bold mb-1">액세스 코드 확인</h2>
+        <p className="text-sm text-muted-foreground mb-6">새 프로필을 만들려면 액세스 코드를 입력하세요.</p>
         <form onSubmit={handleMasterVerify} className="space-y-3">
           <input
             type="password"
             value={masterInput}
             onChange={(e) => { setMasterInput(e.target.value); setMasterError(null); }}
-            placeholder="마스터 패스코드"
+            placeholder="액세스 코드를 입력하세요"
             autoFocus
+            autoComplete="off"
             className="w-full h-11 px-4 rounded-xl border bg-background text-sm outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500 transition-all"
           />
           {masterError && (
@@ -199,7 +200,7 @@ export function ProfileSelect({ familyCode, familyData, onSelect, onFamilyUpdate
         </div>
 
         <p className="text-center text-xs text-muted-foreground">
-          K-올웨더 · 공유 코드: <span className="font-mono font-semibold">{familyCode}</span>
+          K-올웨더 · 액세스 코드로 연결됨
         </p>
       </div>
     </div>

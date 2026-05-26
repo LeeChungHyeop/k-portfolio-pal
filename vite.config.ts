@@ -20,6 +20,8 @@ export default defineConfig({
         JSON.stringify(process.env.VITE_SUPABASE_URL ?? ""),
       "import.meta.env.VITE_SUPABASE_ANON_KEY":
         JSON.stringify(process.env.VITE_SUPABASE_ANON_KEY ?? ""),
+      "import.meta.env.VITE_ACCESS_CODE":
+        JSON.stringify(process.env.VITE_ACCESS_CODE ?? "soye"),
     },
     server: {
       watch: { usePolling: true, interval: 300 },

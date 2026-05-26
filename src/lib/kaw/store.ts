@@ -3,6 +3,9 @@ import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, type AccountId
 import { supabase, hasSupabase } from "./supabase";
 import { defaultFamilyData, saveFamilyData, SESSION_AUTH_KEY } from "./auth";
 
+// 액세스 코드: 환경변수에 없으면 "soye" 고정
+export const ACCESS_CODE: string = import.meta.env.VITE_ACCESS_CODE || "soye";
+
 export type { UserProfile } from "./supabase";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -262,6 +265,11 @@ function unsubscribeRealtime() {
 export async function loginWithCode(code: string): Promise<"new" | "existing"> {
   if (typeof window === "undefined") throw new Error("Client only");
   code = code.trim();
+
+  // 액세스 코드 검증
+  if (code !== ACCESS_CODE) {
+    throw new Error("액세스 코드가 올바르지 않습니다.");
+  }
 
   dbLoading = true;
   dbError = null;

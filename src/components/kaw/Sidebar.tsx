@@ -54,7 +54,7 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
         </div>
         <div className="min-w-0 flex-1">
           <p className="font-bold text-sm leading-tight">K-올웨더</p>
-          <p className="text-xs text-muted-foreground truncate">{familyCode ?? "포트폴리오 트래커"}</p>
+          <p className="text-xs text-muted-foreground truncate">포트폴리오 트래커</p>
         </div>
         <button onClick={onMobileClose} className="md:hidden p-1.5 rounded-lg hover:bg-muted text-muted-foreground">
           <X className="w-4 h-4" />
@@ -131,7 +131,7 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-all"
         >
           <LogOut className="w-3.5 h-3.5 shrink-0" />
-          <span>코드 변경 / 로그아웃</span>
+          <span>로그아웃</span>
         </button>
       </div>
     </aside>
