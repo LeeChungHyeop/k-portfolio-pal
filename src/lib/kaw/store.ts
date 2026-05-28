@@ -190,8 +190,10 @@ function migrateState(parsed: StoreState): StoreState {
 
 // ── Module-level state ─────────────────────────────────────────────────────
 let familyCode: string | null = typeof window !== "undefined" ? localStorage.getItem(AUTH_CODE_KEY) : null;
-let currentUser: string = typeof window !== "undefined" ? (localStorage.getItem(AUTH_USER_KEY) ?? "") : "";
-let dbLoading = false;
+// currentUser는 sessionStorage 인증 후에만 설정 — localStorage에서 직접 초기화하면 PIN 인증이 우회됨
+let currentUser: string = "";
+// 가족 코드가 있으면 initFromStorage가 끝날 때까지 로딩 상태로 시작
+let dbLoading = typeof window !== "undefined" && !!localStorage.getItem(AUTH_CODE_KEY);
 let dbError: string | null = null;
 let initialized = false;
 
@@ -448,33 +450,30 @@ function setState(updater: (s: StoreState) => StoreState) {
 async function initFromStorage() {
   if (typeof window === "undefined") return;
   const code = localStorage.getItem(AUTH_CODE_KEY);
-  if (!code) { notify(); return; }
+  if (!code) { dbLoading = false; notify(); return; }
 
   familyCode = code;
-  notify(); // trigger ProfileSelect
 
-  // Restore session-level profile auth (within same tab session)
+  // sessionStorage에 프로필 인증 기록이 있으면 세션 복원 (같은 탭 새로고침)
   const sessionProfile = sessionStorage.getItem(SESSION_AUTH_KEY);
-  if (sessionProfile) {
-    const savedUser = localStorage.getItem(AUTH_USER_KEY);
-    if (savedUser === sessionProfile) {
-      memState = loadLocal();
-      currentUser = sessionProfile;
-      notify();
+  const savedUser      = localStorage.getItem(AUTH_USER_KEY);
+  if (sessionProfile && savedUser === sessionProfile) {
+    // currentUser를 먼저 설정해야 loadLocal()이 올바른 키로 읽음
+    currentUser = sessionProfile;
+    memState    = loadLocal();
+    notify();
 
-      if (hasSupabase) {
-        dbLoading = true;
-        notify();
-        try {
-          const dbState = await dbLoad(code, sessionProfile);
-          if (dbState) { memState = dbState; saveLocal(memState); notify(); }
-        } catch {}
-        dbLoading = false;
-        notify();
-      }
-      subscribeRealtime(code);
+    if (hasSupabase) {
+      try {
+        const dbState = await dbLoad(code, sessionProfile);
+        if (dbState) { memState = dbState; saveLocal(memState); }
+      } catch {}
     }
+    subscribeRealtime(code);
   }
+
+  dbLoading = false;
+  notify();
 }
 
 // ── React Hook ─────────────────────────────────────────────────────────────
