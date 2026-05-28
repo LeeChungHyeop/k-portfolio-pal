@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS, ACCOUNT_LABELS, type AccountId, type AssetKey } from "@/lib/kaw/constants";
-import { usePortfolioStore, formatKRW, formatPct, type HistoryEntry } from "@/lib/kaw/store";
+import { usePortfolioStore, formatKRW, formatPct, getAccountAlloc, getAccountEnabledAssets, type HistoryEntry } from "@/lib/kaw/store";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -68,20 +68,21 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
 function RebalanceTab({ accountId }: { accountId: AccountId }) {
   const { state, updateAccount, updateHolding, addHistory } = usePortfolioStore();
   const account = state.accounts[accountId];
-  const alloc = state.allocations[state.profile];
+  const alloc = getAccountAlloc(state, accountId);
+  const enabledAssets = getAccountEnabledAssets(account);
   const [saved, setSaved] = useState(false);
 
   const lastHistory: HistoryEntry | null =
     account.history.length > 0 ? account.history[account.history.length - 1] : null;
 
-  const rows = useMemo(() => ASSET_ORDER.map((k) => {
-    const h = account.holdings.find((x) => x.assetKey === k)!;
+  const rows = useMemo(() => enabledAssets.map((k) => {
+    const h = account.holdings.find((x) => x.assetKey === k) ?? { assetKey: k, etfName: account.etfNames?.[k] ?? ASSET_GROUPS[k].defaultEtf, value: 0 };
     const pct = alloc[k] || 0;
     const target = (account.baseAmount * pct) / 100;
     const diff = target - h.value;
     const prevValue = lastHistory?.holdings?.[k] ?? null;
     return { key: k, holding: h, pct, target, diff, prevValue };
-  }), [account, alloc, lastHistory]);
+  }), [account, alloc, enabledAssets, lastHistory]);
 
   const totalValue = rows.reduce((s, r) => s + r.holding.value, 0);
 
@@ -169,9 +170,9 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                     <div className="text-xs text-muted-foreground mt-0.5">{ASSET_GROUPS[r.key].label}</div>
                   </TableCell>
                   <TableCell>
-                    <Input value={r.holding.etfName}
-                      onChange={(e) => updateHolding(accountId, r.key, { etfName: e.target.value })}
-                      className="h-8 text-sm" />
+                    <span className="text-sm text-muted-foreground leading-tight block truncate max-w-[180px]" title={r.holding.etfName}>
+                      {r.holding.etfName}
+                    </span>
                   </TableCell>
                   <TableCell className="text-right text-sm tabular-nums">{r.pct}%</TableCell>
                   <TableCell className="text-right text-sm tabular-nums text-muted-foreground">{formatKRW(r.target)}</TableCell>

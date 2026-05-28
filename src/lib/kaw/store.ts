@@ -20,6 +20,13 @@ export interface HistoryEntry {
   holdings?: Partial<Record<AssetKey, number>>;
 }
 export interface AccountState {
+  // Per-account settings
+  active: boolean;
+  profile: ProfileKey;
+  accountAllocations: Record<ProfileKey, Record<AssetKey, number>>;
+  etfNames: Record<AssetKey, string>;
+  enabledAssets: AssetKey[];
+  // Data
   baseAmount: number;
   deposit: number;
   rebalanceDate: string;
@@ -27,9 +34,24 @@ export interface AccountState {
   history: HistoryEntry[];
 }
 export interface StoreState {
+  // Global fallback (used for migration only)
   profile: ProfileKey;
   allocations: Record<ProfileKey, Record<AssetKey, number>>;
   accounts: Record<AccountId, AccountState>;
+}
+
+// ── Per-account helpers (exported) ─────────────────────────────────────────
+export function getAccountAlloc(state: StoreState, id: AccountId): Record<AssetKey, number> {
+  const acc = state.accounts[id];
+  const profile = acc.profile ?? state.profile;
+  const allocs = acc.accountAllocations ?? state.allocations;
+  return allocs[profile] ?? state.allocations[profile] ?? PROFILE_PRESETS[profile];
+}
+export function getAccountEnabledAssets(acc: AccountState): AssetKey[] {
+  return acc.enabledAssets?.length ? acc.enabledAssets : [...ASSET_ORDER];
+}
+export function getAccountEtfName(acc: AccountState, key: AssetKey): string {
+  return acc.etfNames?.[key] ?? ASSET_GROUPS[key].defaultEtf;
 }
 
 // ── Storage Keys ───────────────────────────────────────────────────────────
@@ -86,17 +108,29 @@ function calcReturn(entries: SeedEntry[], i: number) {
 function makeHistory(entries: SeedEntry[]): HistoryEntry[] {
   return entries.map((e, i) => ({ ...e, id: `seed-${e.date}`, returnPct: calcReturn(entries, i) }));
 }
+function defaultEtfNames(): Record<AssetKey, string> {
+  return Object.fromEntries(ASSET_ORDER.map((k) => [k, ASSET_GROUPS[k].defaultEtf])) as Record<AssetKey, string>;
+}
 function seedHoldings(): Holding[] {
   return ASSET_ORDER.map((k) => ({ assetKey: k, etfName: ASSET_GROUPS[k].defaultEtf, value: 0 }));
 }
+function baseAccountSettings() {
+  return {
+    active: true,
+    profile: "growth" as ProfileKey,
+    accountAllocations: structuredClone(PROFILE_PRESETS),
+    etfNames: defaultEtfNames(),
+    enabledAssets: [...ASSET_ORDER] as AssetKey[],
+  };
+}
 function seedAccount(id: AccountId): AccountState {
-  return { baseAmount: 0, deposit: 0, rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: makeHistory(SEED_HISTORY[id] ?? []) };
+  return { ...baseAccountSettings(), baseAmount: 0, deposit: 0, rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: makeHistory(SEED_HISTORY[id] ?? []) };
 }
 function seedState(): StoreState {
   return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, seedAccount(id)])) as Record<AccountId, AccountState> };
 }
 function emptyState(): StoreState {
-  return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, { baseAmount: 0, deposit: 0, rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: [] as HistoryEntry[] }])) as Record<AccountId, AccountState> };
+  return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, { ...baseAccountSettings(), baseAmount: 0, deposit: 0, rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: [] as HistoryEntry[] }])) as Record<AccountId, AccountState> };
 }
 function recalcReturns(history: HistoryEntry[]): HistoryEntry[] {
   return history.map((h, i) => {
@@ -108,21 +142,48 @@ function recalcReturns(history: HistoryEntry[]): HistoryEntry[] {
 
 function migrateState(parsed: StoreState): StoreState {
   const seed = seedState();
+  // Migrate global MP → growth if leftover
+  if ((parsed.profile as string) === "MP") parsed.profile = "growth";
+
   for (const id of ACCOUNT_IDS) {
     if (!parsed.accounts[id]) { parsed.accounts[id] = seed.accounts[id]; continue; }
-    const existing = new Map(parsed.accounts[id].holdings.map((h) => [h.assetKey, h]));
-    parsed.accounts[id].holdings = ASSET_ORDER.map((k) => existing.get(k) ?? { assetKey: k, etfName: ASSET_GROUPS[k].defaultEtf, value: 0 });
-    if (!parsed.accounts[id].history?.length) {
-      parsed.accounts[id].history = seed.accounts[id].history;
+    const acc = parsed.accounts[id];
+
+    // Inject per-account settings defaults if missing
+    if (acc.active === undefined) acc.active = true;
+    if (!acc.profile || (acc.profile as string) === "MP") acc.profile = parsed.profile ?? "growth";
+    if (!acc.accountAllocations) {
+      acc.accountAllocations = structuredClone(PROFILE_PRESETS);
+      // Merge legacy global allocations if available
+      if (parsed.allocations) {
+        for (const pk of Object.keys(parsed.allocations) as ProfileKey[]) {
+          if (pk !== "MP" as string) acc.accountAllocations[pk] = { ...PROFILE_PRESETS[pk], ...parsed.allocations[pk] };
+        }
+      }
+    }
+    if (!acc.etfNames) acc.etfNames = defaultEtfNames();
+    if (!acc.enabledAssets?.length) acc.enabledAssets = [...ASSET_ORDER];
+
+    const existing = new Map(acc.holdings.map((h) => [h.assetKey, h]));
+    // Sync ETF names from holdings if etfNames not yet set from DB
+    for (const [key, h] of existing) {
+      if (h.etfName && h.etfName !== ASSET_GROUPS[key].defaultEtf) {
+        acc.etfNames[key] = h.etfName;
+      }
+    }
+    acc.holdings = ASSET_ORDER.map((k) => existing.get(k) ?? { assetKey: k, etfName: acc.etfNames[k], value: 0 });
+
+    if (!acc.history?.length) {
+      acc.history = seed.accounts[id].history;
     } else {
       const seedMap = new Map(seed.accounts[id].history.map((h) => [h.id, h]));
-      parsed.accounts[id].history = parsed.accounts[id].history.map((h) => {
+      acc.history = acc.history.map((h) => {
         const s = seedMap.get(h.id);
         if (s && !h.holdings) return { ...s, returnPct: h.returnPct };
         return { ...h, baseAmount: (h as HistoryEntry & { baseAmount?: number }).baseAmount ?? 0 };
       });
     }
-    if (!parsed.accounts[id].rebalanceDate) parsed.accounts[id].rebalanceDate = new Date().toISOString().slice(0, 10);
+    if (!acc.rebalanceDate) acc.rebalanceDate = new Date().toISOString().slice(0, 10);
   }
   return parsed;
 }
@@ -462,6 +523,45 @@ export function usePortfolioStore() {
   }, []);
   const importJson      = useCallback((data: StoreState) => setState(() => data), []);
 
+  // ── Per-account settings actions ──────────────────────────────────────────
+  const setAccountActive = useCallback((id: AccountId, v: boolean) =>
+    setState((s) => ({ ...s, accounts: { ...s.accounts, [id]: { ...s.accounts[id], active: v } } })), []);
+
+  const setAccountProfile = useCallback((id: AccountId, p: ProfileKey) =>
+    setState((s) => ({ ...s, accounts: { ...s.accounts, [id]: { ...s.accounts[id], profile: p } } })), []);
+
+  const setAccountAllocation = useCallback((id: AccountId, p: ProfileKey, k: AssetKey, pct: number) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      const allocs = acc.accountAllocations ?? structuredClone(PROFILE_PRESETS);
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, accountAllocations: { ...allocs, [p]: { ...allocs[p], [k]: pct } } } } };
+    }), []);
+
+  const resetAccountAllocations = useCallback((id: AccountId, p: ProfileKey) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      const allocs = acc.accountAllocations ?? structuredClone(PROFILE_PRESETS);
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, accountAllocations: { ...allocs, [p]: p === "custom" ? {} as Record<AssetKey,number> : { ...PROFILE_PRESETS[p] } } } } };
+    }), []);
+
+  const setAccountEtfName = useCallback((id: AccountId, key: AssetKey, name: string) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      const etfNames = { ...acc.etfNames, [key]: name };
+      const holdings = acc.holdings.map((h) => h.assetKey === key ? { ...h, etfName: name } : h);
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, etfNames, holdings } } };
+    }), []);
+
+  const toggleAccountAsset = useCallback((id: AccountId, key: AssetKey, enabled: boolean) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      const current = acc.enabledAssets ?? [...ASSET_ORDER];
+      const enabledAssets = enabled
+        ? [...new Set([...current, key])].sort((a, b) => ASSET_ORDER.indexOf(a) - ASSET_ORDER.indexOf(b))
+        : current.filter((k) => k !== key);
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, enabledAssets } } };
+    }), []);
+
   return {
     state,
     familyCode,
@@ -473,6 +573,9 @@ export function usePortfolioStore() {
     updateAccount, updateHolding,
     addHistory, removeHistory,
     resetAll, importJson,
+    setAccountActive, setAccountProfile,
+    setAccountAllocation, resetAccountAllocations,
+    setAccountEtfName, toggleAccountAsset,
     activateProfile: useCallback((id: string) => activateProfile(id), []),
     deactivateProfile: useCallback(() => deactivateProfile(), []),
     logoutCode:    useCallback(() => logoutCode(), []),
