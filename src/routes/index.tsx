@@ -8,11 +8,12 @@ import { SettingsPage } from "@/components/kaw/SettingsPage";
 import { AuthGate } from "@/components/kaw/AuthGate";
 import { ProfileSelect } from "@/components/kaw/ProfileSelect";
 import { PinGate } from "@/components/kaw/PinGate";
-import { usePortfolioStore, activateProfile } from "@/lib/kaw/store";
+import { usePortfolioStore, activateProfile, deactivateProfile, logoutCode } from "@/lib/kaw/store";
 import {
   type ProfileConfig, type FamilyData,
   loadFamilyData, defaultFamilyData, setSessionProfile,
 } from "@/lib/kaw/auth";
+import { useIdleTimer } from "@/lib/kaw/useIdleTimer";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -62,6 +63,13 @@ function Index() {
   useEffect(() => {
     if (!currentUser) setSelectedProfile(null);
   }, [currentUser]);
+
+  // 자동 세션 종료: 10분 무입력 → 프로필 선택, 60분 무입력 → 액세스 코드
+  useIdleTimer({
+    active:           !!familyCode,
+    onProfileTimeout: deactivateProfile,
+    onLogoutTimeout:  logoutCode,
+  });
 
   // Phase 1: No family code
   if (!familyCode) {
