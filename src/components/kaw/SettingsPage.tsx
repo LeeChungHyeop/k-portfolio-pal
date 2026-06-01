@@ -6,21 +6,27 @@ import {
   type ProfileKey, type AccountId, type AssetKey,
 } from "@/lib/kaw/constants";
 import {
-  usePortfolioStore, formatKRW, getAccountAlloc, getAccountEnabledAssets,
+  usePortfolioStore, formatKRW, getAccountAlloc,
   type HistoryEntry, type AccountState,
 } from "@/lib/kaw/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import {
   RotateCcw, Download, Upload, FileSpreadsheet, Trash2,
   KeyRound, Shield, CheckCircle2, AlertCircle, RefreshCw,
-  Plus, X,
+  Plus, X, Save,
 } from "lucide-react";
 import {
   type FamilyData,
   verifyPin, updatePin, verifyMasterCode, updateMasterCode,
 } from "@/lib/kaw/auth";
+import {
+  SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, type SQIndex,
+} from "@/lib/kaw/secretQuestions";
 
 // ── Main tab types ─────────────────────────────────────────────────────────
 type MainTab = "investment" | "data" | "security";
@@ -174,28 +180,119 @@ export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
   );
 }
 
+// ── Draft type & helpers ───────────────────────────────────────────────────
+interface DraftSettings {
+  active: boolean;
+  profile: ProfileKey;
+  accountAllocations: Record<ProfileKey, Record<AssetKey, number>>;
+  etfNames: Record<AssetKey, string>;
+  enabledAssets: AssetKey[];
+}
+
+function makeDraft(acc: AccountState): DraftSettings {
+  return {
+    active: acc.active !== false,
+    profile: acc.profile ?? "growth",
+    accountAllocations: structuredClone(acc.accountAllocations ?? PROFILE_PRESETS),
+    etfNames: { ...(acc.etfNames ?? (Object.fromEntries(ASSET_ORDER.map((k) => [k, ASSET_GROUPS[k].defaultEtf])) as Record<AssetKey, string>)) },
+    enabledAssets: [...(acc.enabledAssets?.length ? acc.enabledAssets : [...ASSET_ORDER])],
+  };
+}
+
+const ORDERED_GROUPS = ["주식", "국채", "대체투자", "현금성자산"] as const;
+
 // ══════════════════════════════════════════════════════════════════════════════
 // 투자성향 탭
 // ══════════════════════════════════════════════════════════════════════════════
 function InvestmentTab() {
-  const {
-    state,
-    setAccountActive, setAccountProfile,
-    setAccountAllocation, resetAccountAllocations,
-    setAccountEtfName, toggleAccountAsset,
-  } = usePortfolioStore();
+  const { state, updateAccount } = usePortfolioStore();
 
   const [selectedAccount, setSelectedAccount] = useState<AccountId>("retirement");
-  const account = state.accounts[selectedAccount];
-  const profile: ProfileKey = account.profile ?? "growth";
-  const allocs = account.accountAllocations ?? structuredClone(PROFILE_PRESETS);
-  const currentAlloc = allocs[profile] ?? PROFILE_PRESETS[profile];
-  const enabledAssets = getAccountEnabledAssets(account);
-  const disabledAssets = ASSET_ORDER.filter((k) => !enabledAssets.includes(k));
-  const total = enabledAssets.reduce((s, k) => s + (currentAlloc[k] || 0), 0);
+  const [draft, setDraft] = useState<DraftSettings>(() => makeDraft(state.accounts["retirement"]));
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [addGroup, setAddGroup] = useState("");
+  const [addAsset, setAddAsset] = useState<AssetKey | "">("");
+  const [addEtfName, setAddEtfName] = useState("");
+
+  const storeAccount = state.accounts[selectedAccount];
+  const hasChanges = JSON.stringify(draft) !== JSON.stringify(makeDraft(storeAccount));
+  const currentAlloc = draft.accountAllocations[draft.profile] ?? PROFILE_PRESETS[draft.profile];
+  const total = draft.enabledAssets.reduce((s, k) => s + (currentAlloc[k] || 0), 0);
+  const hasAnyDisabled = ASSET_ORDER.some((k) => !draft.enabledAssets.includes(k));
+
+  function selectAccount(id: AccountId) {
+    setSelectedAccount(id);
+    setDraft(makeDraft(state.accounts[id]));
+    setShowAddForm(false);
+    setAddGroup(""); setAddAsset(""); setAddEtfName("");
+  }
+
+  function handleSave() {
+    updateAccount(selectedAccount, {
+      active: draft.active,
+      profile: draft.profile,
+      accountAllocations: draft.accountAllocations,
+      etfNames: draft.etfNames,
+      enabledAssets: draft.enabledAssets,
+    });
+  }
 
   function handleAllocChange(k: AssetKey, v: string) {
-    setAccountAllocation(selectedAccount, profile, k, parseFloat(v) || 0);
+    const p = draft.profile;
+    setDraft((d) => ({
+      ...d,
+      accountAllocations: { ...d.accountAllocations, [p]: { ...d.accountAllocations[p], [k]: parseFloat(v) || 0 } },
+    }));
+  }
+
+  function handleResetAlloc() {
+    const p = draft.profile;
+    setDraft((d) => ({
+      ...d,
+      accountAllocations: {
+        ...d.accountAllocations,
+        [p]: p === "custom" ? ({} as Record<AssetKey, number>) : { ...PROFILE_PRESETS[p] },
+      },
+    }));
+  }
+
+  function handleToggleAsset(k: AssetKey, enabled: boolean) {
+    setDraft((d) => {
+      const current = d.enabledAssets;
+      const enabledAssets = enabled
+        ? [...new Set([...current, k])].sort((a, b) => ASSET_ORDER.indexOf(a) - ASSET_ORDER.indexOf(b))
+        : current.filter((a) => a !== k);
+      return { ...d, enabledAssets };
+    });
+  }
+
+  function getDisabledInGroup(group: string): AssetKey[] {
+    return ASSET_ORDER.filter((k) => ASSET_GROUPS[k].group === group && !draft.enabledAssets.includes(k));
+  }
+
+  function handleGroupChange(g: string) {
+    setAddGroup(g);
+    const opts = getDisabledInGroup(g);
+    const first = (opts[0] ?? "") as AssetKey | "";
+    setAddAsset(first);
+    setAddEtfName(first ? (draft.etfNames[first] || ASSET_GROUPS[first].defaultEtf) : "");
+  }
+
+  function handleAddAssetSelect(k: AssetKey) {
+    setAddAsset(k);
+    setAddEtfName(draft.etfNames[k] || ASSET_GROUPS[k].defaultEtf);
+  }
+
+  function handleAddAsset() {
+    if (!addAsset) return;
+    const k = addAsset as AssetKey;
+    setDraft((d) => ({
+      ...d,
+      enabledAssets: [...new Set([...d.enabledAssets, k])].sort((a, b) => ASSET_ORDER.indexOf(a) - ASSET_ORDER.indexOf(b)),
+      etfNames: { ...d.etfNames, [k]: addEtfName || ASSET_GROUPS[k].defaultEtf },
+    }));
+    setShowAddForm(false);
+    setAddGroup(""); setAddAsset(""); setAddEtfName("");
   }
 
   return (
@@ -211,7 +308,7 @@ function InvestmentTab() {
             return (
               <button
                 key={id}
-                onClick={() => setSelectedAccount(id)}
+                onClick={() => selectAccount(id)}
                 className={[
                   "px-4 py-2 rounded-xl text-sm font-semibold border transition-all",
                   isSelected
@@ -231,22 +328,22 @@ function InvestmentTab() {
         {/* 이 계좌 사용 체크박스 */}
         <label className="flex items-center gap-2.5 cursor-pointer group w-fit">
           <div
-            onClick={() => setAccountActive(selectedAccount, !(account.active !== false))}
+            onClick={() => setDraft((d) => ({ ...d, active: !d.active }))}
             className={[
               "w-5 h-5 rounded border-2 flex items-center justify-center transition-all cursor-pointer",
-              account.active !== false
+              draft.active
                 ? "bg-violet-500 border-violet-500"
                 : "border-muted-foreground/40 hover:border-violet-400",
             ].join(" ")}
           >
-            {account.active !== false && <CheckCircle2 className="w-3.5 h-3.5 text-white" strokeWidth={3} />}
+            {draft.active && <CheckCircle2 className="w-3.5 h-3.5 text-white" strokeWidth={3} />}
           </div>
           <span className="text-sm font-medium select-none">이 계좌를 사용합니다</span>
         </label>
       </Card>
 
       {/* 투자성향 설정 (활성 계좌만) */}
-      {account.active !== false && (
+      {draft.active && (
         <>
           {/* 성향 프리셋 선택 */}
           <Card className="p-5 space-y-3">
@@ -255,10 +352,10 @@ function InvestmentTab() {
               {(Object.keys(PROFILE_LABELS) as ProfileKey[]).map((p) => (
                 <button
                   key={p}
-                  onClick={() => setAccountProfile(selectedAccount, p)}
+                  onClick={() => setDraft((d) => ({ ...d, profile: p }))}
                   className={[
                     "px-4 py-1.5 text-sm rounded-lg transition-all font-medium",
-                    profile === p
+                    draft.profile === p
                       ? "bg-background shadow-sm text-foreground"
                       : "text-muted-foreground hover:text-foreground",
                   ].join(" ")}
@@ -271,19 +368,47 @@ function InvestmentTab() {
 
           {/* 자산별 설정 테이블 */}
           <Card className="overflow-hidden">
-            <div className="px-5 py-4 border-b flex items-center justify-between">
-              <div>
+            <div className="px-5 py-4 border-b flex items-center justify-between gap-3">
+              <div className="shrink-0">
                 <h3 className="font-semibold">자산별 ETF 및 비중 설정</h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  합계 <span className={Math.abs(total - 100) > 0.1 ? "text-rose-500 font-bold" : "text-emerald-500 font-bold"}>{total.toFixed(1)}%</span>
+                  합계{" "}
+                  <span className={Math.abs(total - 100) > 0.1 ? "text-rose-500 font-bold" : "text-emerald-500 font-bold"}>
+                    {total.toFixed(1)}%
+                  </span>
                 </p>
               </div>
-              <div className="flex gap-2">
-                {profile !== "custom" && (
-                  <Button variant="outline" size="sm" onClick={() => resetAccountAllocations(selectedAccount, profile)}>
+              <div className="flex gap-2 items-center flex-wrap justify-end">
+                {draft.profile !== "custom" && (
+                  <Button variant="outline" size="sm" onClick={handleResetAlloc}>
                     <RotateCcw className="w-3.5 h-3.5 mr-1" /> 기본값
                   </Button>
                 )}
+                {hasAnyDisabled && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (showAddForm) {
+                        setShowAddForm(false);
+                        setAddGroup(""); setAddAsset(""); setAddEtfName("");
+                      } else {
+                        setShowAddForm(true);
+                      }
+                    }}
+                  >
+                    <Plus className="w-3.5 h-3.5 mr-1" /> 자산 추가
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  disabled={!hasChanges}
+                  onClick={handleSave}
+                  className="min-w-[64px]"
+                >
+                  <Save className="w-3.5 h-3.5 mr-1" />
+                  저장
+                </Button>
               </div>
             </div>
 
@@ -298,7 +423,7 @@ function InvestmentTab() {
                   </tr>
                 </thead>
                 <tbody className="divide-y">
-                  {enabledAssets.map((k) => (
+                  {draft.enabledAssets.map((k) => (
                     <tr key={k} className="hover:bg-muted/20 transition-colors group">
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-1.5">
@@ -311,8 +436,8 @@ function InvestmentTab() {
                       </td>
                       <td className="px-4 py-2">
                         <Input
-                          value={account.etfNames?.[k] ?? ASSET_GROUPS[k].defaultEtf}
-                          onChange={(e) => setAccountEtfName(selectedAccount, k, e.target.value)}
+                          value={draft.etfNames[k] ?? ASSET_GROUPS[k].defaultEtf}
+                          onChange={(e) => setDraft((d) => ({ ...d, etfNames: { ...d.etfNames, [k]: e.target.value } }))}
                           className="h-8 text-sm max-w-[260px]"
                         />
                       </td>
@@ -327,7 +452,7 @@ function InvestmentTab() {
                       </td>
                       <td className="px-2 py-2">
                         <button
-                          onClick={() => toggleAccountAsset(selectedAccount, k, false)}
+                          onClick={() => handleToggleAsset(k, false)}
                           title="이 자산 비활성화"
                           className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 opacity-0 group-hover:opacity-100 transition-all"
                         >
@@ -340,21 +465,79 @@ function InvestmentTab() {
               </table>
             </div>
 
-            {/* 비활성화된 자산 (재활성화 가능) */}
-            {disabledAssets.length > 0 && (
-              <div className="px-5 py-3 border-t bg-muted/20">
-                <p className="text-xs font-semibold text-muted-foreground mb-2 uppercase tracking-wide">비활성화된 자산</p>
-                <div className="flex flex-wrap gap-2">
-                  {disabledAssets.map((k) => (
-                    <button
-                      key={k}
-                      onClick={() => toggleAccountAsset(selectedAccount, k, true)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-dashed text-xs text-muted-foreground hover:text-foreground hover:border-violet-400 hover:bg-violet-500/5 transition-all"
+            {/* 자산 추가 폼 */}
+            {showAddForm && (
+              <div className="px-5 py-4 border-t bg-muted/20 space-y-3">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">자산 추가</p>
+                <div className="flex gap-2 items-end flex-wrap">
+                  {/* 큰 카테고리 */}
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">카테고리</label>
+                    <Select value={addGroup} onValueChange={handleGroupChange}>
+                      <SelectTrigger className="h-8 w-32 text-sm">
+                        <SelectValue placeholder="선택" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {ORDERED_GROUPS.map((g) => (
+                          <SelectItem key={g} value={g} disabled={getDisabledInGroup(g).length === 0}>
+                            {g}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* 작은 카테고리 */}
+                  {addGroup && (
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">자산</label>
+                      <Select value={addAsset} onValueChange={(v) => handleAddAssetSelect(v as AssetKey)}>
+                        <SelectTrigger className="h-8 w-44 text-sm">
+                          <SelectValue placeholder="선택" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {getDisabledInGroup(addGroup).map((k) => (
+                            <SelectItem key={k} value={k}>
+                              {ASSET_GROUPS[k].label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+
+                  {/* ETF 종목명 직접 입력 */}
+                  {addAsset && (
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground">ETF 종목명</label>
+                      <Input
+                        value={addEtfName}
+                        onChange={(e) => setAddEtfName(e.target.value)}
+                        placeholder="ETF 종목명 입력"
+                        className="h-8 text-sm w-52"
+                      />
+                    </div>
+                  )}
+
+                  <div className="flex gap-1.5">
+                    <Button
+                      size="sm"
+                      onClick={handleAddAsset}
+                      disabled={!addAsset || !addEtfName.trim()}
                     >
-                      <Plus className="w-3 h-3" />
-                      {ASSET_GROUPS[k].label}
-                    </button>
-                  ))}
+                      <Plus className="w-3.5 h-3.5 mr-1" /> 추가
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setShowAddForm(false);
+                        setAddGroup(""); setAddAsset(""); setAddEtfName("");
+                      }}
+                    >
+                      취소
+                    </Button>
+                  </div>
                 </div>
               </div>
             )}
@@ -362,7 +545,7 @@ function InvestmentTab() {
         </>
       )}
 
-      {!account.active && (
+      {!draft.active && (
         <Card className="p-8 text-center text-muted-foreground">
           <p className="text-sm">이 계좌를 사용하려면 위에서 체크박스를 선택하세요.</p>
         </Card>
@@ -563,6 +746,50 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
   const [mcMsg, setMcMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [mcLoading, setMcLoading] = useState(false);
 
+  // Master code reset via secret question
+  type ResetStep = "idle" | "question" | "new_code";
+  const [resetStep, setResetStep] = useState<ResetStep>("idle");
+  const [resetQIdx, setResetQIdx] = useState<SQIndex>(0);
+  const [resetAnswer, setResetAnswer] = useState("");
+  const [resetAnswerErr, setResetAnswerErr] = useState<string | null>(null);
+  const [resetNewCode, setResetNewCode] = useState("");
+  const [resetNewCodeConfirm, setResetNewCodeConfirm] = useState("");
+  const [resetMsg, setResetMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [resetLoading, setResetLoading] = useState(false);
+
+  function startReset() {
+    setResetQIdx(pickRandomSQIndex());
+    setResetAnswer(""); setResetAnswerErr(null);
+    setResetNewCode(""); setResetNewCodeConfirm(""); setResetMsg(null);
+    setResetStep("question");
+  }
+
+  function handleResetAnswerVerify(e: React.FormEvent) {
+    e.preventDefault();
+    if (!verifySQAnswer(resetQIdx, resetAnswer)) {
+      setResetAnswerErr("정답이 맞지 않습니다. 다시 시도해주세요.");
+      setResetAnswer("");
+      return;
+    }
+    setResetStep("new_code");
+  }
+
+  async function handleResetMasterCode(e: React.FormEvent) {
+    e.preventDefault();
+    if (!familyCode) return;
+    if (!resetNewCode.trim()) { setResetMsg({ type: "err", text: "새 마스터 코드를 입력해주세요." }); return; }
+    if (resetNewCode !== resetNewCodeConfirm) { setResetMsg({ type: "err", text: "새 마스터 코드가 일치하지 않습니다." }); return; }
+    setResetLoading(true);
+    try {
+      const updated = await updateMasterCode(resetNewCode, familyData, familyCode);
+      onFamilyUpdate(updated);
+      setResetMsg({ type: "ok", text: "마스터 코드가 재설정되었습니다." });
+      setResetNewCode(""); setResetNewCodeConfirm("");
+      setTimeout(() => { setResetStep("idle"); setResetMsg(null); }, 2000);
+    } catch { setResetMsg({ type: "err", text: "저장 중 오류가 발생했습니다." }); }
+    setResetLoading(false);
+  }
+
   async function handlePinChange(e: React.FormEvent) {
     e.preventDefault();
     if (!familyCode || !currentUser) return;
@@ -667,6 +894,89 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
               마스터 코드 변경
             </Button>
           </form>
+
+          {/* 마스터 코드 초기화 (비밀 질문) */}
+          <div className="border-t pt-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium text-muted-foreground">마스터 코드를 잊으셨나요?</p>
+              {resetStep === "idle" && (
+                <button
+                  onClick={startReset}
+                  className="text-xs text-violet-500 hover:text-violet-600 font-medium transition-colors"
+                >
+                  비밀 질문으로 초기화 →
+                </button>
+              )}
+              {resetStep !== "idle" && (
+                <button
+                  onClick={() => { setResetStep("idle"); setResetAnswer(""); setResetAnswerErr(null); setResetMsg(null); }}
+                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  취소
+                </button>
+              )}
+            </div>
+
+            {/* 비밀 질문 입력 */}
+            {resetStep === "question" && (
+              <form onSubmit={handleResetAnswerVerify} className="space-y-3 max-w-sm">
+                <div className="bg-muted/50 border rounded-xl px-4 py-3">
+                  <p className="text-sm font-medium">{SECRET_QUESTIONS[resetQIdx].question}</p>
+                </div>
+                <input
+                  type="text"
+                  value={resetAnswer}
+                  onChange={(e) => { setResetAnswer(e.target.value); setResetAnswerErr(null); }}
+                  placeholder="정답을 입력하세요"
+                  autoFocus
+                  autoComplete="off"
+                  className="w-full h-10 px-3 rounded-lg border bg-background text-sm outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500 transition-all"
+                />
+                {resetAnswerErr && (
+                  <div className="flex items-center gap-2 text-xs text-rose-500 bg-rose-500/10 rounded-lg px-3 py-2">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />{resetAnswerErr}
+                  </div>
+                )}
+                <Button type="submit" size="sm" disabled={!resetAnswer.trim()}>
+                  확인
+                </Button>
+              </form>
+            )}
+
+            {/* 새 마스터 코드 설정 */}
+            {resetStep === "new_code" && (
+              <form onSubmit={handleResetMasterCode} className="space-y-3 max-w-sm">
+                <div className="flex items-center gap-2 text-xs text-emerald-500 bg-emerald-500/10 rounded-lg px-3 py-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> 인증 완료! 새 마스터 코드를 설정하세요.
+                </div>
+                {[
+                  { label: "새 마스터 코드", value: resetNewCode, set: setResetNewCode },
+                  { label: "새 마스터 코드 확인", value: resetNewCodeConfirm, set: setResetNewCodeConfirm },
+                ].map(({ label, value, set }) => (
+                  <div key={label} className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">{label}</label>
+                    <input
+                      type="password"
+                      value={value}
+                      onChange={(e) => { set(e.target.value); setResetMsg(null); }}
+                      placeholder="마스터 코드"
+                      className="w-full h-10 px-3 rounded-lg border bg-background text-sm outline-none focus:ring-2 focus:ring-amber-500/40 focus:border-amber-500 transition-all"
+                    />
+                  </div>
+                ))}
+                {resetMsg && (
+                  <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${resetMsg.type === "ok" ? "text-emerald-500 bg-emerald-500/10" : "text-rose-500 bg-rose-500/10"}`}>
+                    {resetMsg.type === "ok" ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
+                    {resetMsg.text}
+                  </div>
+                )}
+                <Button type="submit" size="sm" variant="outline" disabled={resetLoading || !resetNewCode || !resetNewCodeConfirm}>
+                  {resetLoading ? <RefreshCw className="w-3.5 h-3.5 mr-1 animate-spin" /> : <Shield className="w-3.5 h-3.5 mr-1" />}
+                  마스터 코드 재설정
+                </Button>
+              </form>
+            )}
+          </div>
         </Card>
       )}
     </div>
