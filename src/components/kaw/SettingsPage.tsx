@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import {
   PROFILE_LABELS, ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS,
@@ -7,7 +7,7 @@ import {
 } from "@/lib/kaw/constants";
 import {
   usePortfolioStore, formatKRW, getAccountAlloc,
-  type HistoryEntry, type AccountState,
+  type HistoryEntry, type AccountState, type AssetDef, type ProfileRowDef,
 } from "@/lib/kaw/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,9 +16,13 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
   RotateCcw, Download, Upload, FileSpreadsheet, Trash2,
   KeyRound, Shield, CheckCircle2, AlertCircle, RefreshCw,
-  Plus, X, Save,
+  Plus, X, Save, Settings,
 } from "lucide-react";
 import {
   type FamilyData,
@@ -137,6 +141,19 @@ function parseExcelWorkbook(wb: XLSX.WorkBook): Record<AccountId, AccountState> 
 // ══════════════════════════════════════════════════════════════════════════════
 export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
   const [mainTab, setMainTab] = useState<MainTab>("investment");
+  const [unsavedWarning, setUnsavedWarning] = useState<AccountId[]>([]);
+  const investTabRef = useRef<{ getUnsavedAccounts: () => AccountId[] }>(null);
+
+  function handleTabChange(newTab: MainTab) {
+    if (mainTab === "investment" && newTab !== "investment") {
+      const unsaved = investTabRef.current?.getUnsavedAccounts() ?? [];
+      if (unsaved.length > 0) {
+        setUnsavedWarning(unsaved);
+        setTimeout(() => setUnsavedWarning([]), 5000);
+      }
+    }
+    setMainTab(newTab);
+  }
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -151,7 +168,7 @@ export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
               return (
                 <button
                   key={id}
-                  onClick={() => setMainTab(id)}
+                  onClick={() => handleTabChange(id)}
                   className={[
                     "px-6 py-2.5 text-sm font-semibold rounded-t-lg border-x border-t transition-all select-none",
                     isActive
@@ -168,10 +185,22 @@ export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
         </div>
       </div>
 
+      {/* 미저장 경고 배너 */}
+      {unsavedWarning.length > 0 && (
+        <div className="mx-4 md:mx-6 mt-2 px-4 py-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl shrink-0">
+          {unsavedWarning.map((id) => (
+            <p key={id} className="text-xs text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              {ACCOUNT_LABELS_SHORT[id]}계좌에서의 변동사항이 저장되지 않았습니다.
+            </p>
+          ))}
+        </div>
+      )}
+
       {/* 탭 콘텐츠 */}
       <div className="flex-1 overflow-y-auto px-4 md:px-6 py-6">
         <div className="max-w-4xl mx-auto space-y-6">
-          {mainTab === "investment" && <InvestmentTab />}
+          {mainTab === "investment" && <InvestmentTab ref={investTabRef} />}
           {mainTab === "data"       && <DataTab />}
           {mainTab === "security"   && <SecurityTab familyData={familyData} onFamilyUpdate={onFamilyUpdate} />}
         </div>
@@ -180,88 +209,335 @@ export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
   );
 }
 
-// ── Draft type & helpers ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// Draft types for InvestmentTab
+// ══════════════════════════════════════════════════════════════════════════════
 interface DraftRow {
   id: string;
-  assetKey: AssetKey;
+  assetId: string;
   etfName: string;
 }
 
-interface DraftSettings {
+interface DraftProfileData {
+  rows: DraftRow[];
+  allocations: Record<string, number>;
+}
+
+interface DraftAccountState {
   active: boolean;
   profile: ProfileKey;
-  rows: DraftRow[];
-  rowAllocations: Record<ProfileKey, Record<string, number>>;
+  profileData: Record<ProfileKey, DraftProfileData>;
 }
 
 const MAX_ROWS = 10;
 const MAX_PER_KEY = 3;
-const ORDERED_GROUPS = ["주식", "국채", "대체투자", "현금성자산"] as const;
+const ORDERED_GROUPS = ["주식", "대체투자", "안전자산", "현금성자산"] as const;
 
-function makeDraft(acc: AccountState): DraftSettings {
-  const rows: DraftRow[] = acc.assetRows?.length
-    ? acc.assetRows.map((r) => ({ id: r.id, assetKey: r.assetKey, etfName: r.etfName }))
-    : (acc.enabledAssets?.length ? acc.enabledAssets : [...ASSET_ORDER]).map((k) => ({
-        id: k,
-        assetKey: k,
-        etfName: acc.etfNames?.[k] ?? ASSET_GROUPS[k].defaultEtf,
-      }));
+function getDefaultLibrary(): AssetDef[] {
+  return ASSET_ORDER.map((k) => ({
+    id: k,
+    group: ASSET_GROUPS[k].group,
+    label: ASSET_GROUPS[k].label,
+    defaultEtf: ASSET_GROUPS[k].defaultEtf,
+    isBuiltIn: true,
+  }));
+}
 
-  const rowAllocations: Record<ProfileKey, Record<string, number>> = {} as Record<ProfileKey, Record<string, number>>;
+function makeDraft(acc: AccountState, library: AssetDef[]): DraftAccountState {
+  const validIds = new Set(library.map((d) => d.id));
+  const profileData = {} as Record<ProfileKey, DraftProfileData>;
+
   for (const p of Object.keys(PROFILE_LABELS) as ProfileKey[]) {
-    if (acc.rowAllocations?.[p]) {
-      rowAllocations[p] = { ...acc.rowAllocations[p] };
-      for (const r of rows) {
-        if (!(r.id in rowAllocations[p])) {
-          rowAllocations[p][r.id] = acc.accountAllocations?.[p]?.[r.assetKey] ?? 0;
-        }
-      }
+    let rows: DraftRow[];
+
+    if (acc.profileRows?.[p]?.length) {
+      rows = acc.profileRows[p]
+        .filter((r) => validIds.has(r.assetId))
+        .map((r) => {
+          const def = library.find((d) => d.id === r.assetId)!;
+          return { id: r.id, assetId: r.assetId, etfName: r.etfName ?? def?.defaultEtf ?? "" };
+        });
+    } else if (acc.assetRows?.length) {
+      rows = acc.assetRows
+        .filter((r) => validIds.has(r.assetKey))
+        .map((r) => ({ id: r.id, assetId: r.assetKey, etfName: r.etfName }));
     } else {
-      const base = acc.accountAllocations?.[p] ?? PROFILE_PRESETS[p] ?? {};
-      rowAllocations[p] = Object.fromEntries(rows.map((r) => [r.id, base[r.assetKey] ?? 0]));
+      const srcKeys = acc.enabledAssets?.length ? acc.enabledAssets : [...ASSET_ORDER];
+      rows = srcKeys
+        .filter((k) => validIds.has(k))
+        .map((k) => ({
+          id: k, assetId: k,
+          etfName: acc.etfNames?.[k] ?? ASSET_GROUPS[k as AssetKey]?.defaultEtf ?? k,
+        }));
     }
+
+    const baseAlloc = acc.profileAllocations?.[p] ?? acc.rowAllocations?.[p] ?? {};
+    const allocations: Record<string, number> = {};
+    for (const r of rows) {
+      allocations[r.id] =
+        baseAlloc[r.id]
+        ?? acc.accountAllocations?.[p]?.[r.assetId as AssetKey]
+        ?? PROFILE_PRESETS[p]?.[r.assetId as AssetKey]
+        ?? 0;
+    }
+
+    profileData[p] = { rows, allocations };
   }
 
-  return {
-    active: acc.active !== false,
-    profile: acc.profile ?? "growth",
-    rows,
-    rowAllocations,
-  };
+  return { active: acc.active !== false, profile: acc.profile ?? "growth", profileData };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 종목 설정 모달
+// ══════════════════════════════════════════════════════════════════════════════
+interface AssetLibraryModalProps {
+  open: boolean;
+  library: AssetDef[];
+  onSave: (lib: AssetDef[]) => void;
+  onClose: () => void;
+}
+
+function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModalProps) {
+  const [draftLib, setDraftLib] = useState<AssetDef[]>([]);
+  const [activeGroup, setActiveGroup] = useState<string>("주식");
+  const [showAddFor, setShowAddFor] = useState<string | null>(null);
+  const [addLabel, setAddLabel] = useState("");
+  const [addEtf, setAddEtf] = useState("");
+
+  useEffect(() => {
+    if (open) {
+      setDraftLib([...library]);
+      setActiveGroup("주식");
+      setShowAddFor(null); setAddLabel(""); setAddEtf("");
+    }
+  }, [open, library]);
+
+  function handleEtfChange(id: string, v: string) {
+    setDraftLib((prev) => prev.map((d) => d.id === id ? { ...d, defaultEtf: v } : d));
+  }
+  function handleLabelChange(id: string, v: string) {
+    setDraftLib((prev) => prev.map((d) => d.id === id ? { ...d, label: v } : d));
+  }
+  function handleDelete(id: string) {
+    setDraftLib((prev) => prev.filter((d) => d.id !== id));
+  }
+  function handleAdd() {
+    if (!addLabel.trim() || !showAddFor) return;
+    const newDef: AssetDef = {
+      id: `custom_${Date.now()}`,
+      group: showAddFor,
+      label: addLabel.trim(),
+      defaultEtf: addEtf.trim() || addLabel.trim(),
+      isBuiltIn: false,
+    };
+    setDraftLib((prev) => [...prev, newDef]);
+    setAddLabel(""); setAddEtf(""); setShowAddFor(null);
+  }
+
+  const grouped = Object.fromEntries(
+    ORDERED_GROUPS.map((g) => [g, draftLib.filter((d) => d.group === g)])
+  );
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-xl flex flex-col max-h-[85vh]">
+        <DialogHeader>
+          <DialogTitle>종목 설정</DialogTitle>
+        </DialogHeader>
+
+        {/* 카테고리 탭 */}
+        <div className="flex gap-1 bg-muted p-1 rounded-xl shrink-0">
+          {ORDERED_GROUPS.map((g) => (
+            <button
+              key={g}
+              onClick={() => { setActiveGroup(g); setShowAddFor(null); setAddLabel(""); setAddEtf(""); }}
+              className={[
+                "flex-1 py-1.5 text-xs rounded-lg font-medium transition-all",
+                activeGroup === g
+                  ? "bg-background shadow-sm text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              ].join(" ")}
+            >
+              {g}
+            </button>
+          ))}
+        </div>
+
+        {/* 자산 목록 헤더 */}
+        <div className="flex items-center px-1 shrink-0">
+          <p className="text-xs font-semibold text-muted-foreground flex-1">자산명</p>
+          <p className="text-xs font-semibold text-muted-foreground w-48 mr-7">기본 ETF 종목명</p>
+        </div>
+
+        {/* 자산 목록 */}
+        <ScrollArea className="flex-1 min-h-0 -mx-1 px-1">
+          <div className="space-y-1.5 pb-2">
+            {(grouped[activeGroup] ?? []).map((def) => (
+              <div key={def.id} className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  {def.isBuiltIn ? (
+                    <div className="flex items-center gap-1.5 h-8 px-3 rounded-lg bg-muted/50 border border-transparent">
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ background: GROUP_COLORS[def.group] }}
+                      />
+                      <span className="text-sm truncate">{def.label}</span>
+                    </div>
+                  ) : (
+                    <Input
+                      value={def.label}
+                      onChange={(e) => handleLabelChange(def.id, e.target.value)}
+                      className="h-8 text-sm"
+                      placeholder="자산명"
+                    />
+                  )}
+                </div>
+                <Input
+                  value={def.defaultEtf}
+                  onChange={(e) => handleEtfChange(def.id, e.target.value)}
+                  className="h-8 text-sm w-48"
+                  placeholder="ETF 종목명"
+                />
+                {def.isBuiltIn ? (
+                  <div className="w-7 shrink-0" />
+                ) : (
+                  <button
+                    onClick={() => handleDelete(def.id)}
+                    className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-all shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            ))}
+
+            {/* 추가 폼 */}
+            {showAddFor === activeGroup ? (
+              <div className="flex items-center gap-2 pt-2 border-t mt-2">
+                <Input
+                  value={addLabel}
+                  onChange={(e) => setAddLabel(e.target.value)}
+                  placeholder="자산명 입력"
+                  className="h-8 text-sm flex-1"
+                  autoFocus
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); if (e.key === "Escape") { setShowAddFor(null); setAddLabel(""); setAddEtf(""); } }}
+                />
+                <Input
+                  value={addEtf}
+                  onChange={(e) => setAddEtf(e.target.value)}
+                  placeholder="ETF 종목명"
+                  className="h-8 text-sm w-48"
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }}
+                />
+                <Button size="sm" className="h-8 px-3 shrink-0" onClick={handleAdd} disabled={!addLabel.trim()}>
+                  추가
+                </Button>
+                <button
+                  onClick={() => { setShowAddFor(null); setAddLabel(""); setAddEtf(""); }}
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-foreground transition-all shrink-0"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setShowAddFor(activeGroup); setAddLabel(""); setAddEtf(""); }}
+                className="w-full mt-2 py-2 flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-violet-500 border border-dashed rounded-lg transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> {activeGroup} 자산 추가
+              </button>
+            )}
+          </div>
+        </ScrollArea>
+
+        <DialogFooter className="shrink-0 gap-2">
+          <Button variant="outline" onClick={onClose}>취소</Button>
+          <Button onClick={() => onSave(draftLib)}>
+            <Save className="w-3.5 h-3.5 mr-1" /> 저장
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 투자성향 탭
 // ══════════════════════════════════════════════════════════════════════════════
-function InvestmentTab() {
-  const { state, updateAccount } = usePortfolioStore();
+interface InvestmentTabHandle {
+  getUnsavedAccounts: () => AccountId[];
+}
+
+const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, ref) {
+  const { state, updateAccount, updateAssetLibrary } = usePortfolioStore();
+  const library = useMemo(
+    () => (state.assetLibrary?.length ? state.assetLibrary : getDefaultLibrary()),
+    [state.assetLibrary]
+  );
 
   const [selectedAccount, setSelectedAccount] = useState<AccountId>("retirement");
-  const [draft, setDraft] = useState<DraftSettings>(() => makeDraft(state.accounts["retirement"]));
+  const [draft, setDraft] = useState<DraftAccountState>(() =>
+    makeDraft(state.accounts.retirement, library)
+  );
+  const [perAccountDrafts, setPerAccountDrafts] = useState<Partial<Record<AccountId, DraftAccountState>>>({});
   const [showAddForm, setShowAddForm] = useState(false);
-  const [addGroup, setAddGroup] = useState("");
-  const [addAsset, setAddAsset] = useState<AssetKey | "">("");
+  const [addGroup, setAddGroup] = useState<string>("");
+  const [addAsset, setAddAsset] = useState<string>("");
   const [addEtfName, setAddEtfName] = useState("");
+  const [showLibraryModal, setShowLibraryModal] = useState(false);
 
+  // ── Expose unsaved accounts to parent ──────────────────────────────────
+  useImperativeHandle(ref, () => ({
+    getUnsavedAccounts: () => {
+      const result: AccountId[] = [];
+      for (const id of ACCOUNT_IDS) {
+        const d = id === selectedAccount ? draft : perAccountDrafts[id];
+        if (!d) continue;
+        const baseline = JSON.stringify(makeDraft(state.accounts[id], library));
+        if (JSON.stringify(d) !== baseline) result.push(id);
+      }
+      return result;
+    },
+  }), [draft, perAccountDrafts, state.accounts, selectedAccount, library]);
+
+  // ── Derived state ───────────────────────────────────────────────────────
   const storeAccount = state.accounts[selectedAccount];
-  const hasChanges = JSON.stringify(draft) !== JSON.stringify(makeDraft(storeAccount));
-  const currentRowAlloc = draft.rowAllocations[draft.profile] ?? {};
-  const total = draft.rows.reduce((s, r) => s + (currentRowAlloc[r.id] ?? 0), 0);
-  const atLimit = draft.rows.length >= MAX_ROWS;
+  const hasChanges = JSON.stringify(draft) !== JSON.stringify(makeDraft(storeAccount, library));
+  const currentProfile = draft.profile;
+  const currentPD = draft.profileData[currentProfile];
+  const currentAlloc = currentPD.allocations;
+  const total = currentPD.rows.reduce((s, r) => s + (currentAlloc[r.id] ?? 0), 0);
+  const atLimit = currentPD.rows.length >= MAX_ROWS;
 
+  // ── Account switching ───────────────────────────────────────────────────
   function selectAccount(id: AccountId) {
+    setPerAccountDrafts((prev) => ({ ...prev, [selectedAccount]: draft }));
+    const next = perAccountDrafts[id] ?? makeDraft(state.accounts[id], library);
+    setDraft(next);
     setSelectedAccount(id);
-    setDraft(makeDraft(state.accounts[id]));
     setShowAddForm(false);
     setAddGroup(""); setAddAsset(""); setAddEtfName("");
   }
 
+  // ── Save ────────────────────────────────────────────────────────────────
   function handleSave() {
-    // 하위 호환성을 위해 기존 필드들도 동기화
-    const enabledAssets = [...new Set(draft.rows.map((r) => r.assetKey))];
+    const profileRows: Record<ProfileKey, ProfileRowDef[]> = {} as Record<ProfileKey, ProfileRowDef[]>;
+    const profileAllocations: Record<ProfileKey, Record<string, number>> = {} as Record<ProfileKey, Record<string, number>>;
+
+    for (const p of Object.keys(PROFILE_LABELS) as ProfileKey[]) {
+      const pd = draft.profileData[p];
+      profileRows[p] = pd.rows.map((r) => ({ id: r.id, assetId: r.assetId, etfName: r.etfName }));
+      profileAllocations[p] = { ...pd.allocations };
+    }
+
+    // Backwards-compat: reconstruct legacy fields from current profile's rows
+    const refPd = draft.profileData[draft.profile];
+    const enabledAssets = [...new Set(
+      refPd.rows.map((r) => r.assetId).filter((id) => ASSET_ORDER.includes(id as AssetKey))
+    )] as AssetKey[];
     const etfNames = Object.fromEntries(
       ASSET_ORDER.map((k) => {
-        const row = draft.rows.find((r) => r.assetKey === k);
+        const row = refPd.rows.find((r) => r.assetId === k);
         return [k, row?.etfName ?? ASSET_GROUPS[k].defaultEtf];
       })
     ) as Record<AssetKey, string>;
@@ -271,9 +547,9 @@ function InvestmentTab() {
         Object.fromEntries(
           ASSET_ORDER.map((k) => [
             k,
-            draft.rows
-              .filter((r) => r.assetKey === k)
-              .reduce((s, r) => s + (draft.rowAllocations[p]?.[r.id] ?? 0), 0),
+            draft.profileData[p].rows
+              .filter((r) => r.assetId === k)
+              .reduce((s, r) => s + (draft.profileData[p].allocations[r.id] ?? 0), 0),
           ])
         ),
       ])
@@ -282,93 +558,159 @@ function InvestmentTab() {
     updateAccount(selectedAccount, {
       active: draft.active,
       profile: draft.profile,
-      assetRows: draft.rows,
-      rowAllocations: draft.rowAllocations,
+      profileRows,
+      profileAllocations,
       enabledAssets,
       etfNames,
       accountAllocations,
+      assetRows: profileRows[draft.profile].map((r) => ({
+        id: r.id, assetKey: r.assetId as AssetKey, etfName: r.etfName ?? "",
+      })),
+      rowAllocations: profileAllocations,
+    });
+
+    // Remove from temp saves once saved
+    setPerAccountDrafts((prev) => {
+      const next = { ...prev };
+      delete next[selectedAccount];
+      return next;
     });
   }
 
+  // ── Allocation change ───────────────────────────────────────────────────
   function handleAllocChange(rowId: string, v: string) {
-    const p = draft.profile;
+    const p = currentProfile;
     setDraft((d) => ({
       ...d,
-      rowAllocations: { ...d.rowAllocations, [p]: { ...d.rowAllocations[p], [rowId]: parseFloat(v) || 0 } },
+      profileData: {
+        ...d.profileData,
+        [p]: {
+          ...d.profileData[p],
+          allocations: { ...d.profileData[p].allocations, [rowId]: parseFloat(v) || 0 },
+        },
+      },
     }));
   }
 
+  // ── ETF name change ─────────────────────────────────────────────────────
+  function handleEtfChange(rowId: string, v: string) {
+    const p = currentProfile;
+    setDraft((d) => ({
+      ...d,
+      profileData: {
+        ...d.profileData,
+        [p]: {
+          ...d.profileData[p],
+          rows: d.profileData[p].rows.map((r) => r.id === rowId ? { ...r, etfName: v } : r),
+        },
+      },
+    }));
+  }
+
+  // ── Reset to preset ─────────────────────────────────────────────────────
   function handleResetAlloc() {
-    const p = draft.profile;
+    const p = currentProfile;
     if (p === "custom") return;
     const preset = PROFILE_PRESETS[p];
-    setDraft((d) => {
-      const seen: Record<string, boolean> = {};
-      const newAlloc: Record<string, number> = {};
-      for (const r of d.rows) {
-        newAlloc[r.id] = seen[r.assetKey] ? 0 : (preset[r.assetKey] ?? 0);
-        seen[r.assetKey] = true;
-      }
-      return { ...d, rowAllocations: { ...d.rowAllocations, [p]: newAlloc } };
-    });
+    // Reset rows back to all built-in assets + reset allocations
+    const defaultRows: DraftRow[] = library
+      .filter((d) => d.isBuiltIn && ASSET_ORDER.includes(d.id as AssetKey))
+      .sort((a, b) => ASSET_ORDER.indexOf(a.id as AssetKey) - ASSET_ORDER.indexOf(b.id as AssetKey))
+      .map((d) => ({
+        id: d.id,
+        assetId: d.id,
+        etfName: storeAccount.etfNames?.[d.id as AssetKey] ?? d.defaultEtf,
+      }));
+    const newAlloc: Record<string, number> = {};
+    for (const r of defaultRows) {
+      newAlloc[r.id] = preset[r.assetId as AssetKey] ?? 0;
+    }
+    setDraft((d) => ({
+      ...d,
+      profileData: { ...d.profileData, [p]: { rows: defaultRows, allocations: newAlloc } },
+    }));
   }
 
+  // ── Remove row ──────────────────────────────────────────────────────────
   function handleRemoveRow(id: string) {
-    setDraft((d) => ({ ...d, rows: d.rows.filter((r) => r.id !== id) }));
+    const p = currentProfile;
+    setDraft((d) => ({
+      ...d,
+      profileData: {
+        ...d.profileData,
+        [p]: {
+          rows: d.profileData[p].rows.filter((r) => r.id !== id),
+          allocations: Object.fromEntries(
+            Object.entries(d.profileData[p].allocations).filter(([k]) => k !== id)
+          ),
+        },
+      },
+    }));
   }
 
-  function countForKey(k: AssetKey): number {
-    return draft.rows.filter((r) => r.assetKey === k).length;
+  // ── Count for asset ID in current profile ───────────────────────────────
+  function countForAsset(assetId: string): number {
+    return currentPD.rows.filter((r) => r.assetId === assetId).length;
   }
 
-  function getAssetsForGroup(group: string) {
-    return ASSET_ORDER
-      .filter((k) => ASSET_GROUPS[k].group === group)
-      .map((k) => ({ key: k, count: countForKey(k), canAdd: countForKey(k) < MAX_PER_KEY }));
-  }
-
+  // ── Add asset handlers ──────────────────────────────────────────────────
   function handleGroupChange(g: string) {
     setAddGroup(g);
-    const first = getAssetsForGroup(g).find((a) => a.canAdd)?.key ?? ("" as AssetKey | "");
-    setAddAsset(first);
-    setAddEtfName(first ? ASSET_GROUPS[first].defaultEtf : "");
+    const firstAvail = library.find((d) => d.group === g && countForAsset(d.id) < MAX_PER_KEY);
+    setAddAsset(firstAvail?.id ?? "");
+    setAddEtfName(firstAvail?.defaultEtf ?? "");
   }
 
-  function handleAddAssetSelect(k: AssetKey) {
-    setAddAsset(k);
-    setAddEtfName(ASSET_GROUPS[k].defaultEtf);
+  function handleAssetSelect(assetId: string) {
+    setAddAsset(assetId);
+    const def = library.find((d) => d.id === assetId);
+    setAddEtfName(def?.defaultEtf ?? "");
   }
 
-  function handleAddAsset() {
-    if (!addAsset || atLimit || countForKey(addAsset as AssetKey) >= MAX_PER_KEY) return;
-    const k = addAsset as AssetKey;
-    const newId = `${k}_${Date.now()}`;
-    const newRow: DraftRow = { id: newId, assetKey: k, etfName: addEtfName || ASSET_GROUPS[k].defaultEtf };
+  function handleAddRow() {
+    if (!addAsset || atLimit || countForAsset(addAsset) >= MAX_PER_KEY) return;
+    const def = library.find((d) => d.id === addAsset);
+    if (!def) return;
+    const newId = `${addAsset}_${Date.now()}`;
+    const newRow: DraftRow = { id: newId, assetId: addAsset, etfName: addEtfName || def.defaultEtf };
+    const p = currentProfile;
     setDraft((d) => {
-      const newRowAllocs = { ...d.rowAllocations };
-      for (const p of Object.keys(PROFILE_LABELS) as ProfileKey[]) {
-        newRowAllocs[p] = { ...newRowAllocs[p], [newId]: 0 };
-      }
-      return { ...d, rows: [...d.rows, newRow], rowAllocations: newRowAllocs };
+      const newAlloc = { ...d.profileData[p].allocations, [newId]: 0 };
+      return {
+        ...d,
+        profileData: {
+          ...d.profileData,
+          [p]: { rows: [...d.profileData[p].rows, newRow], allocations: newAlloc },
+        },
+      };
     });
     setShowAddForm(false);
     setAddGroup(""); setAddAsset(""); setAddEtfName("");
   }
 
-  // 중복 행 표시 번호 계산
+  // ── Duplicate row display numbers ───────────────────────────────────────
   const keyCounts: Record<string, number> = {};
-  for (const r of draft.rows) keyCounts[r.assetKey] = (keyCounts[r.assetKey] ?? 0) + 1;
+  for (const r of currentPD.rows) keyCounts[r.assetId] = (keyCounts[r.assetId] ?? 0) + 1;
   const keyProgress: Record<string, number> = {};
   const rowDisplayNum: Record<string, number | null> = {};
-  for (const r of draft.rows) {
-    keyProgress[r.assetKey] = (keyProgress[r.assetKey] ?? 0) + 1;
-    rowDisplayNum[r.id] = keyCounts[r.assetKey] > 1 ? keyProgress[r.assetKey] : null;
+  for (const r of currentPD.rows) {
+    keyProgress[r.assetId] = (keyProgress[r.assetId] ?? 0) + 1;
+    rowDisplayNum[r.id] = keyCounts[r.assetId] > 1 ? keyProgress[r.assetId] : null;
   }
 
-  const canAddAsset = addAsset && !atLimit && countForKey(addAsset as AssetKey) < MAX_PER_KEY;
+  const canAddRow = addAsset && !atLimit && countForAsset(addAsset) < MAX_PER_KEY;
+  const assetsInGroup = library.filter((d) => d.group === addGroup);
 
   return (
     <div className="space-y-5">
+      {/* 종목 설정 모달 */}
+      <AssetLibraryModal
+        open={showLibraryModal}
+        library={library}
+        onSave={(lib) => { updateAssetLibrary(lib); setShowLibraryModal(false); }}
+        onClose={() => setShowLibraryModal(false)}
+      />
+
       {/* 계좌 선택 */}
       <Card className="p-5 space-y-4">
         <h3 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">계좌 선택</h3>
@@ -377,6 +719,8 @@ function InvestmentTab() {
             const acc = state.accounts[id];
             const isActive = acc.active !== false;
             const isSelected = selectedAccount === id;
+            const hasTempChanges = perAccountDrafts[id] !== undefined &&
+              JSON.stringify(perAccountDrafts[id]) !== JSON.stringify(makeDraft(state.accounts[id], library));
             return (
               <button
                 key={id}
@@ -392,12 +736,12 @@ function InvestmentTab() {
               >
                 {ACCOUNT_LABELS_SHORT[id]}
                 {!isActive && <span className="ml-1.5 text-[10px] opacity-60">미사용</span>}
+                {hasTempChanges && <span className="ml-1.5 text-[10px] text-amber-400">●</span>}
               </button>
             );
           })}
         </div>
 
-        {/* 이 계좌 사용 체크박스 */}
         <label className="flex items-center gap-2.5 cursor-pointer group w-fit">
           <div
             onClick={() => setDraft((d) => ({ ...d, active: !d.active }))}
@@ -414,10 +758,9 @@ function InvestmentTab() {
         </label>
       </Card>
 
-      {/* 투자성향 설정 (활성 계좌만) */}
       {draft.active && (
         <>
-          {/* 성향 프리셋 선택 */}
+          {/* 투자성향 프리셋 */}
           <Card className="p-5 space-y-3">
             <h3 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">투자성향</h3>
             <div className="flex gap-1.5 bg-muted p-1 rounded-xl w-fit">
@@ -427,7 +770,7 @@ function InvestmentTab() {
                   onClick={() => setDraft((d) => ({ ...d, profile: p }))}
                   className={[
                     "px-4 py-1.5 text-sm rounded-lg transition-all font-medium",
-                    draft.profile === p
+                    currentProfile === p
                       ? "bg-background shadow-sm text-foreground"
                       : "text-muted-foreground hover:text-foreground",
                   ].join(" ")}
@@ -440,11 +783,13 @@ function InvestmentTab() {
 
           {/* 자산별 설정 테이블 */}
           <Card className="overflow-hidden">
-            <div className="px-5 py-4 border-b flex items-center justify-between gap-3">
+            <div className="px-5 py-4 border-b flex items-center justify-between gap-3 flex-wrap">
               <div className="shrink-0">
                 <h3 className="font-semibold">자산별 ETF 및 비중 설정</h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  <span className={atLimit ? "text-amber-500 font-semibold" : ""}>{draft.rows.length}/10</span>
+                  <span className={atLimit ? "text-amber-500 font-semibold" : ""}>
+                    {currentPD.rows.length}/10
+                  </span>
                   {" · "}합계{" "}
                   <span className={Math.abs(total - 100) > 0.1 ? "text-rose-500 font-bold" : "text-emerald-500 font-bold"}>
                     {total.toFixed(1)}%
@@ -452,7 +797,10 @@ function InvestmentTab() {
                 </p>
               </div>
               <div className="flex gap-2 items-center flex-wrap justify-end">
-                {draft.profile !== "custom" && (
+                <Button variant="outline" size="sm" onClick={() => setShowLibraryModal(true)}>
+                  <Settings className="w-3.5 h-3.5 mr-1" /> 종목 설정
+                </Button>
+                {currentProfile !== "custom" && (
                   <Button variant="outline" size="sm" onClick={handleResetAlloc}>
                     <RotateCcw className="w-3.5 h-3.5 mr-1" /> 기본값
                   </Button>
@@ -484,24 +832,30 @@ function InvestmentTab() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-muted/40 border-b">
-                    <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground w-32">자산군</th>
+                    <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground w-36">자산</th>
                     <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">ETF 종목명</th>
                     <th className="text-right px-4 py-2.5 text-xs font-semibold text-muted-foreground w-24">비중 (%)</th>
                     <th className="w-10 px-2" />
                   </tr>
                 </thead>
                 <tbody className="divide-y">
-                  {draft.rows.map((row) => {
+                  {currentPD.rows.map((row) => {
+                    const def = library.find((d) => d.id === row.assetId);
+                    const group = def?.group ?? "";
+                    const label = def?.label ?? row.assetId;
                     const num = rowDisplayNum[row.id];
                     return (
                       <tr key={row.id} className="hover:bg-muted/20 transition-colors group">
                         <td className="px-4 py-2.5">
                           <div className="flex items-center gap-1.5">
-                            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GROUP_COLORS[ASSET_GROUPS[row.assetKey].group] }} />
+                            <span
+                              className="w-2 h-2 rounded-full shrink-0"
+                              style={{ background: GROUP_COLORS[group] ?? "#888" }}
+                            />
                             <div>
-                              <div className="text-[11px] text-muted-foreground">{ASSET_GROUPS[row.assetKey].group}</div>
+                              <div className="text-[11px] text-muted-foreground">{group}</div>
                               <div className="font-medium text-xs">
-                                {ASSET_GROUPS[row.assetKey].label}
+                                {label}
                                 {num !== null && (
                                   <span className="ml-1 text-[10px] text-muted-foreground font-normal">({num})</span>
                                 )}
@@ -512,12 +866,7 @@ function InvestmentTab() {
                         <td className="px-4 py-2">
                           <Input
                             value={row.etfName}
-                            onChange={(e) =>
-                              setDraft((d) => ({
-                                ...d,
-                                rows: d.rows.map((r) => r.id === row.id ? { ...r, etfName: e.target.value } : r),
-                              }))
-                            }
+                            onChange={(e) => handleEtfChange(row.id, e.target.value)}
                             className="h-8 text-sm max-w-[260px]"
                           />
                         </td>
@@ -525,7 +874,7 @@ function InvestmentTab() {
                           <Input
                             type="number"
                             step="0.5"
-                            value={currentRowAlloc[row.id] ?? 0}
+                            value={currentAlloc[row.id] ?? 0}
                             onChange={(e) => handleAllocChange(row.id, e.target.value)}
                             className="h-8 text-right w-20 ml-auto"
                           />
@@ -552,11 +901,11 @@ function InvestmentTab() {
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
                   자산 추가
                   <span className="ml-2 normal-case font-normal text-muted-foreground/70">
-                    · 세부자산 중복 최대 3개
+                    · 종목 설정에서 자산을 먼저 등록해두세요
                   </span>
                 </p>
                 <div className="flex gap-2 items-end flex-wrap">
-                  {/* 큰 카테고리 — 항상 모두 표시 */}
+                  {/* 카테고리 */}
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground">카테고리</label>
                     <Select value={addGroup} onValueChange={handleGroupChange}>
@@ -571,33 +920,43 @@ function InvestmentTab() {
                     </Select>
                   </div>
 
-                  {/* 작은 카테고리 — 모두 표시, 3개 도달 시 disabled */}
+                  {/* 자산 */}
                   {addGroup && (
                     <div className="space-y-1">
                       <label className="text-xs text-muted-foreground">자산</label>
-                      <Select value={addAsset} onValueChange={(v) => handleAddAssetSelect(v as AssetKey)}>
-                        <SelectTrigger className="h-8 w-48 text-sm">
+                      <Select value={addAsset} onValueChange={handleAssetSelect}>
+                        <SelectTrigger className="h-8 w-52 text-sm">
                           <SelectValue placeholder="선택" />
                         </SelectTrigger>
                         <SelectContent>
-                          {getAssetsForGroup(addGroup).map(({ key, count, canAdd }) => (
-                            <SelectItem key={key} value={key} disabled={!canAdd}>
-                              <span className="flex items-center gap-1.5">
-                                {ASSET_GROUPS[key].label}
-                                {count > 0 && (
-                                  <span className={`text-[10px] ${canAdd ? "text-muted-foreground" : "text-rose-400"}`}>
-                                    {canAdd ? `(${count}/3)` : "(최대)"}
+                          {assetsInGroup.length === 0 ? (
+                            <div className="px-3 py-2 text-xs text-muted-foreground">
+                              등록된 자산이 없습니다.<br />종목 설정에서 추가하세요.
+                            </div>
+                          ) : (
+                            assetsInGroup.map((def) => {
+                              const count = countForAsset(def.id);
+                              const canAdd = count < MAX_PER_KEY;
+                              return (
+                                <SelectItem key={def.id} value={def.id} disabled={!canAdd}>
+                                  <span className="flex items-center gap-1.5">
+                                    {def.label}
+                                    {count > 0 && (
+                                      <span className={`text-[10px] ${canAdd ? "text-muted-foreground" : "text-rose-400"}`}>
+                                        {canAdd ? `(${count}/3)` : "(최대)"}
+                                      </span>
+                                    )}
                                   </span>
-                                )}
-                              </span>
-                            </SelectItem>
-                          ))}
+                                </SelectItem>
+                              );
+                            })
+                          )}
                         </SelectContent>
                       </Select>
                     </div>
                   )}
 
-                  {/* ETF 종목명 직접 입력 */}
+                  {/* ETF 종목명 */}
                   {addAsset && (
                     <div className="space-y-1">
                       <label className="text-xs text-muted-foreground">ETF 종목명</label>
@@ -613,8 +972,8 @@ function InvestmentTab() {
                   <div className="flex gap-1.5 pb-0.5">
                     <Button
                       size="sm"
-                      onClick={handleAddAsset}
-                      disabled={!canAddAsset || !addEtfName.trim()}
+                      onClick={handleAddRow}
+                      disabled={!canAddRow || !addEtfName.trim()}
                     >
                       <Plus className="w-3.5 h-3.5 mr-1" /> 추가
                     </Button>
@@ -643,7 +1002,7 @@ function InvestmentTab() {
       )}
     </div>
   );
-}
+});
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 데이터 관리 탭
@@ -1008,7 +1367,6 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
               )}
             </div>
 
-            {/* 비밀 질문 입력 */}
             {resetStep === "question" && (
               <form onSubmit={handleResetAnswerVerify} className="space-y-3 max-w-sm">
                 <div className="bg-muted/50 border rounded-xl px-4 py-3">
@@ -1034,7 +1392,6 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
               </form>
             )}
 
-            {/* 새 마스터 코드 설정 */}
             {resetStep === "new_code" && (
               <form onSubmit={handleResetMasterCode} className="space-y-3 max-w-sm">
                 <div className="flex items-center gap-2 text-xs text-emerald-500 bg-emerald-500/10 rounded-lg px-3 py-2">

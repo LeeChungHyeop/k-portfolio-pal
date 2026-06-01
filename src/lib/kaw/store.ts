@@ -24,6 +24,20 @@ export interface AssetRowDef {
   assetKey: AssetKey;
   etfName: string;
 }
+// Global asset library entry
+export interface AssetDef {
+  id: string;
+  group: string;
+  label: string;
+  defaultEtf: string;
+  isBuiltIn: boolean;
+}
+// Per-profile, per-account row
+export interface ProfileRowDef {
+  id: string;
+  assetId: string;
+  etfName?: string;
+}
 export interface AccountState {
   // Per-account settings
   active: boolean;
@@ -31,9 +45,12 @@ export interface AccountState {
   accountAllocations: Record<ProfileKey, Record<AssetKey, number>>;
   etfNames: Record<AssetKey, string>;
   enabledAssets: AssetKey[];
-  // Row-based asset management (supports duplicate assetKeys)
+  // Legacy row-based (kept for backwards compat)
   assetRows?: AssetRowDef[];
   rowAllocations?: Record<ProfileKey, Record<string, number>>;
+  // Per-profile rows (new)
+  profileRows?: Record<ProfileKey, ProfileRowDef[]>;
+  profileAllocations?: Record<ProfileKey, Record<string, number>>;
   // Data
   baseAmount: number;
   deposit: number;
@@ -46,6 +63,7 @@ export interface StoreState {
   profile: ProfileKey;
   allocations: Record<ProfileKey, Record<AssetKey, number>>;
   accounts: Record<AccountId, AccountState>;
+  assetLibrary?: AssetDef[];
 }
 
 // ── Per-account helpers (exported) ─────────────────────────────────────────
@@ -193,7 +211,7 @@ function migrateState(parsed: StoreState): StoreState {
     }
     if (!acc.rebalanceDate) acc.rebalanceDate = new Date().toISOString().slice(0, 10);
 
-    // Migrate to row-based asset management
+    // Migrate to row-based asset management (legacy)
     if (!acc.assetRows?.length) {
       acc.assetRows = acc.enabledAssets.map((k) => ({
         id: k,
@@ -210,7 +228,45 @@ function migrateState(parsed: StoreState): StoreState {
         ])
       ) as Record<ProfileKey, Record<string, number>>;
     }
+    // Migrate to profile-specific rows (new)
+    if (!acc.profileRows) {
+      const baseRows: ProfileRowDef[] = acc.assetRows.map((r) => ({
+        id: r.id,
+        assetId: r.assetKey,
+        etfName: r.etfName,
+      }));
+      acc.profileRows = {
+        growth:  baseRows.map((r) => ({ ...r })),
+        neutral: baseRows.map((r) => ({ ...r })),
+        stable:  baseRows.map((r) => ({ ...r })),
+        custom:  baseRows.map((r) => ({ ...r })),
+      };
+    }
+    if (!acc.profileAllocations) {
+      const rAllocs = acc.rowAllocations;
+      acc.profileAllocations = {} as Record<ProfileKey, Record<string, number>>;
+      for (const p of Object.keys(PROFILE_PRESETS) as ProfileKey[]) {
+        acc.profileAllocations[p] = rAllocs?.[p] ? { ...rAllocs[p] } : {};
+      }
+    }
   }
+
+  // Initialize global asset library
+  if (!parsed.assetLibrary?.length) {
+    parsed.assetLibrary = ASSET_ORDER.map((k) => ({
+      id: k,
+      group: ASSET_GROUPS[k].group,
+      label: ASSET_GROUPS[k].label,
+      defaultEtf: ASSET_GROUPS[k].defaultEtf,
+      isBuiltIn: true,
+    }));
+  } else {
+    // Migrate 국채 → 안전자산 in stored library
+    for (const d of parsed.assetLibrary) {
+      if (d.group === "국채") d.group = "안전자산";
+    }
+  }
+
   return parsed;
 }
 
@@ -272,13 +328,15 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
 
     let profileKey: ProfileKey = "growth";
     let allocations = structuredClone(PROFILE_PRESETS);
+    let assetLibrary: AssetDef[] | undefined;
     const accounts: Partial<Record<AccountId, AccountState>> = {};
 
     for (const row of data) {
       if (row.account_type === "_meta") {
-        const m = row.data as { profile: ProfileKey; allocations: typeof allocations };
+        const m = row.data as { profile: ProfileKey; allocations: typeof allocations; assetLibrary?: AssetDef[] };
         profileKey = m.profile ?? "growth";
         allocations = m.allocations ?? allocations;
+        assetLibrary = m.assetLibrary;
       } else if (ACCOUNT_IDS.includes(row.account_type as AccountId)) {
         accounts[row.account_type as AccountId] = row.data as AccountState;
       }
@@ -288,6 +346,7 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
     return {
       profile: profileKey,
       allocations,
+      assetLibrary,
       accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, accounts[id] ?? fallback.accounts[id]])) as Record<AccountId, AccountState>,
     };
   } catch (e) {
@@ -300,7 +359,7 @@ async function dbSave(code: string, user: string, state: StoreState) {
   if (!supabase || isReceivingRealtime || !user) return;
   const now = new Date().toISOString();
   const rows: DbRow[] = [
-    { family_code: code, profile: user, account_type: "_meta", data: { profile: state.profile, allocations: state.allocations }, updated_at: now },
+    { family_code: code, profile: user, account_type: "_meta", data: { profile: state.profile, allocations: state.allocations, assetLibrary: state.assetLibrary }, updated_at: now },
     ...ACCOUNT_IDS.map((id) => ({ family_code: code, profile: user, account_type: id, data: state.accounts[id], updated_at: now })),
   ];
   const { error } = await supabase.from("kaw_data").upsert(rows, { onConflict: "family_code,profile,account_type" });
@@ -546,7 +605,9 @@ export function usePortfolioStore() {
     memState = null;
     setState(() => currentUser === "hyeobi" ? seedState() : emptyState());
   }, []);
-  const importJson      = useCallback((data: StoreState) => setState(() => data), []);
+  const importJson           = useCallback((data: StoreState) => setState(() => data), []);
+  const updateAssetLibrary   = useCallback((lib: AssetDef[]) =>
+    setState((s) => ({ ...s, assetLibrary: lib })), []);
 
   // ── Per-account settings actions ──────────────────────────────────────────
   const setAccountActive = useCallback((id: AccountId, v: boolean) =>
@@ -601,6 +662,7 @@ export function usePortfolioStore() {
     setAccountActive, setAccountProfile,
     setAccountAllocation, resetAccountAllocations,
     setAccountEtfName, toggleAccountAsset,
+    updateAssetLibrary,
     activateProfile: useCallback((id: string) => activateProfile(id), []),
     deactivateProfile: useCallback(() => deactivateProfile(), []),
     logoutCode:    useCallback(() => logoutCode(), []),
