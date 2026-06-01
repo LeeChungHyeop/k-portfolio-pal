@@ -6,7 +6,7 @@ import {
   type ProfileKey, type AccountId, type AssetKey,
 } from "@/lib/kaw/constants";
 import {
-  usePortfolioStore, formatKRW, getAccountAlloc,
+  usePortfolioStore, formatKRW, getAccountAlloc, getOrDefaultLibrary,
   type HistoryEntry, type AccountState, type AssetDef, type ProfileRowDef,
 } from "@/lib/kaw/store";
 import { Button } from "@/components/ui/button";
@@ -232,16 +232,6 @@ interface DraftAccountState {
 const MAX_ROWS = 10;
 const MAX_PER_KEY = 3;
 const ORDERED_GROUPS = ["주식", "대체투자", "안전자산", "현금성자산"] as const;
-
-function getDefaultLibrary(): AssetDef[] {
-  return ASSET_ORDER.map((k) => ({
-    id: k,
-    group: ASSET_GROUPS[k].group,
-    label: ASSET_GROUPS[k].label,
-    defaultEtf: ASSET_GROUPS[k].defaultEtf,
-    isBuiltIn: true,
-  }));
-}
 
 function makeDraft(acc: AccountState, library: AssetDef[]): DraftAccountState {
   const validIds = new Set(library.map((d) => d.id));
@@ -470,10 +460,7 @@ interface InvestmentTabHandle {
 
 const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, ref) {
   const { state, updateAccount, updateAssetLibrary } = usePortfolioStore();
-  const library = useMemo(
-    () => (state.assetLibrary?.length ? state.assetLibrary : getDefaultLibrary()),
-    [state.assetLibrary]
-  );
+  const library = useMemo(() => getOrDefaultLibrary(state), [state.assetLibrary]);
 
   const [selectedAccount, setSelectedAccount] = useState<AccountId>("retirement");
   const [draft, setDraft] = useState<DraftAccountState>(() =>

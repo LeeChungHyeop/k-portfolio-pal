@@ -56,6 +56,7 @@ export interface AccountState {
   deposit: number;
   rebalanceDate: string;
   holdings: Holding[];
+  rowHoldings?: Record<string, number>;  // row instance ID → current market value
   history: HistoryEntry[];
 }
 export interface StoreState {
@@ -64,6 +65,18 @@ export interface StoreState {
   allocations: Record<ProfileKey, Record<AssetKey, number>>;
   accounts: Record<AccountId, AccountState>;
   assetLibrary?: AssetDef[];
+}
+
+// ── Global asset library helper ────────────────────────────────────────────
+export function getOrDefaultLibrary(state: StoreState): AssetDef[] {
+  if (state.assetLibrary?.length) return state.assetLibrary;
+  return ASSET_ORDER.map((k) => ({
+    id: k,
+    group: ASSET_GROUPS[k].group,
+    label: ASSET_GROUPS[k].label,
+    defaultEtf: ASSET_GROUPS[k].defaultEtf,
+    isBuiltIn: true,
+  }));
 }
 
 // ── Per-account helpers (exported) ─────────────────────────────────────────
@@ -608,6 +621,13 @@ export function usePortfolioStore() {
   const importJson           = useCallback((data: StoreState) => setState(() => data), []);
   const updateAssetLibrary   = useCallback((lib: AssetDef[]) =>
     setState((s) => ({ ...s, assetLibrary: lib })), []);
+  const updateRowHolding     = useCallback((id: AccountId, rowId: string, value: number) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      return { ...s, accounts: { ...s.accounts, [id]: {
+        ...acc, rowHoldings: { ...(acc.rowHoldings ?? {}), [rowId]: value },
+      }}};
+    }), []);
 
   // ── Per-account settings actions ──────────────────────────────────────────
   const setAccountActive = useCallback((id: AccountId, v: boolean) =>
@@ -663,6 +683,7 @@ export function usePortfolioStore() {
     setAccountAllocation, resetAccountAllocations,
     setAccountEtfName, toggleAccountAsset,
     updateAssetLibrary,
+    updateRowHolding,
     activateProfile: useCallback((id: string) => activateProfile(id), []),
     deactivateProfile: useCallback(() => deactivateProfile(), []),
     logoutCode:    useCallback(() => logoutCode(), []),

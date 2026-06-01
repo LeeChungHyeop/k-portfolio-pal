@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS, ACCOUNT_LABELS, type AccountId, type AssetKey } from "@/lib/kaw/constants";
-import { usePortfolioStore, formatKRW, formatPct, getAccountAlloc, getAccountEnabledAssets, type HistoryEntry } from "@/lib/kaw/store";
+import { usePortfolioStore, formatKRW, formatPct, getOrDefaultLibrary, type HistoryEntry } from "@/lib/kaw/store";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -66,29 +66,54 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
    리밸런싱 탭
 ───────────────────────────────────────────── */
 function RebalanceTab({ accountId }: { accountId: AccountId }) {
-  const { state, updateAccount, updateHolding, addHistory } = usePortfolioStore();
+  const { state, updateAccount, updateRowHolding, addHistory } = usePortfolioStore();
   const account = state.accounts[accountId];
-  const alloc = getAccountAlloc(state, accountId);
-  const enabledAssets = getAccountEnabledAssets(account);
+  const library = getOrDefaultLibrary(state);
   const [saved, setSaved] = useState(false);
+
+  const profile = account.profile ?? "growth";
+  const profileRows = account.profileRows?.[profile] ?? [];
+  const profileAlloc = account.profileAllocations?.[profile] ?? {};
 
   const lastHistory: HistoryEntry | null =
     account.history.length > 0 ? account.history[account.history.length - 1] : null;
 
-  const rows = useMemo(() => enabledAssets.map((k) => {
-    const h = account.holdings.find((x) => x.assetKey === k) ?? { assetKey: k, etfName: account.etfNames?.[k] ?? ASSET_GROUPS[k].defaultEtf, value: 0 };
-    const pct = alloc[k] || 0;
-    const target = (account.baseAmount * pct) / 100;
-    const diff = target - h.value;
-    const prevValue = lastHistory?.holdings?.[k] ?? null;
-    return { key: k, holding: h, pct, target, diff, prevValue };
-  }), [account, alloc, enabledAssets, lastHistory]);
+  const rows = useMemo(() => {
+    if (!profileRows.length) return [];
+    return profileRows.map((row) => {
+      const def = library.find((d) => d.id === row.assetId);
+      const etfName = row.etfName ?? def?.defaultEtf ?? row.assetId;
+      const group = def?.group ?? "";
+      const label = def?.label ?? row.assetId;
+      const alloc = profileAlloc[row.id] ?? 0;
 
-  const totalValue = rows.reduce((s, r) => s + r.holding.value, 0);
+      // rowHoldings is source of truth; fall back to legacy holdings for standard assets
+      const legacyValue = ASSET_ORDER.includes(row.assetId as AssetKey)
+        ? (account.holdings.find((h) => h.assetKey === row.assetId)?.value ?? 0)
+        : 0;
+      const value = account.rowHoldings?.[row.id] ?? legacyValue;
+
+      const target = (account.baseAmount * alloc) / 100;
+      const diff = target - value;
+      const prevValue = ASSET_ORDER.includes(row.assetId as AssetKey)
+        ? (lastHistory?.holdings?.[row.assetId as AssetKey] ?? null)
+        : null;
+
+      return { rowId: row.id, assetId: row.assetId, etfName, group, label, alloc, value, target, diff, prevValue };
+    });
+  }, [account, profileRows, profileAlloc, library, lastHistory]);
+
+  const totalValue = rows.reduce((s, r) => s + r.value, 0);
 
   function snapshotNow() {
+    // Aggregate values by assetId for history (standard assets only, for backwards compat)
     const holdingsSnap: Partial<Record<AssetKey, number>> = {};
-    rows.forEach(r => { if (r.holding.value > 0) holdingsSnap[r.key] = r.holding.value; });
+    rows.forEach((r) => {
+      if (r.value > 0 && ASSET_ORDER.includes(r.assetId as AssetKey)) {
+        const k = r.assetId as AssetKey;
+        holdingsSnap[k] = (holdingsSnap[k] ?? 0) + r.value;
+      }
+    });
     addHistory(accountId, {
       id: crypto.randomUUID(),
       date: account.rebalanceDate,
@@ -150,7 +175,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           <Table>
             <TableHeader>
               <TableRow className="bg-muted/50">
-                <TableHead className="w-28">자산군</TableHead>
+                <TableHead className="w-28">자산</TableHead>
                 <TableHead>ETF 종목명</TableHead>
                 <TableHead className="text-right w-12">비중</TableHead>
                 <TableHead className="text-right">기준금액</TableHead>
@@ -160,33 +185,46 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.map((r) => (
-                <TableRow key={r.key} className="hover:bg-muted/30">
-                  <TableCell>
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: GROUP_COLORS[ASSET_GROUPS[r.key].group] }} />
-                      {ASSET_GROUPS[r.key].group}
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-0.5">{ASSET_GROUPS[r.key].label}</div>
+              {rows.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-8">
+                    설정 → 투자성향에서 자산을 추가하고 저장하세요.
                   </TableCell>
-                  <TableCell>
-                    <span className="text-sm text-muted-foreground leading-tight block truncate max-w-[180px]" title={r.holding.etfName}>
-                      {r.holding.etfName}
-                    </span>
-                  </TableCell>
-                  <TableCell className="text-right text-sm tabular-nums">{r.pct}%</TableCell>
-                  <TableCell className="text-right text-sm tabular-nums text-muted-foreground">{formatKRW(r.target)}</TableCell>
-                  <TableCell className="text-right text-sm tabular-nums text-muted-foreground">
-                    {r.prevValue != null ? formatKRW(r.prevValue) : "—"}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <Input type="number" value={r.holding.value || ""}
-                      onChange={(e) => updateHolding(accountId, r.key, { value: parseFloat(e.target.value) || 0 })}
-                      placeholder="0" className="h-8 text-sm text-right tabular-nums" />
-                  </TableCell>
-                  <TableCell className="text-right"><RebalanceCell diff={r.diff} /></TableCell>
                 </TableRow>
-              ))}
+              ) : (
+                rows.map((r) => (
+                  <TableRow key={r.rowId} className="hover:bg-muted/30">
+                    <TableCell>
+                      <div className="flex items-center gap-1.5 text-xs">
+                        <span className="w-2 h-2 rounded-full shrink-0"
+                          style={{ background: GROUP_COLORS[r.group] ?? "#888" }} />
+                        {r.group}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-0.5">{r.label}</div>
+                    </TableCell>
+                    <TableCell>
+                      <span className="text-sm text-muted-foreground leading-tight block truncate max-w-[180px]" title={r.etfName}>
+                        {r.etfName}
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-right text-sm tabular-nums">{r.alloc}%</TableCell>
+                    <TableCell className="text-right text-sm tabular-nums text-muted-foreground">{formatKRW(r.target)}</TableCell>
+                    <TableCell className="text-right text-sm tabular-nums text-muted-foreground">
+                      {r.prevValue != null ? formatKRW(r.prevValue) : "—"}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Input
+                        type="number"
+                        value={r.value || ""}
+                        onChange={(e) => updateRowHolding(accountId, r.rowId, parseFloat(e.target.value) || 0)}
+                        placeholder="0"
+                        className="h-8 text-sm text-right tabular-nums"
+                      />
+                    </TableCell>
+                    <TableCell className="text-right"><RebalanceCell diff={r.diff} /></TableCell>
+                  </TableRow>
+                ))
+              )}
               <TableRow className="bg-muted/40 font-semibold">
                 <TableCell colSpan={3} className="text-sm">합계</TableCell>
                 <TableCell className="text-right tabular-nums text-sm">{formatKRW(account.baseAmount)}</TableCell>
