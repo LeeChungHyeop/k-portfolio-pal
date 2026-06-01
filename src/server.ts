@@ -2,9 +2,16 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { handleWebhookRequest } from "./lib/telegram";
+
+// Cloudflare Workers environment bindings
+export interface Env {
+  TELEGRAM_BOT_TOKEN?: string;
+  [key: string]: unknown;
+}
 
 type ServerEntry = {
-  fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
+  fetch: (request: Request, env: Env, ctx: unknown) => Promise<Response> | Response;
 };
 
 let serverEntryPromise: Promise<ServerEntry> | undefined;
@@ -67,7 +74,15 @@ async function normalizeCatastrophicSsrResponse(response: Response): Promise<Res
 }
 
 export default {
-  async fetch(request: Request, env: unknown, ctx: unknown) {
+  async fetch(request: Request, env: Env, ctx: unknown) {
+    const { pathname } = new URL(request.url);
+
+    // ── Telegram webhook ────────────────────────────────────────────────
+    if (pathname === "/api/webhook/telegram" && request.method === "POST") {
+      return handleWebhookRequest(request, env.TELEGRAM_BOT_TOKEN);
+    }
+
+    // ── TanStack Start app (SSR + static) ───────────────────────────────
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
