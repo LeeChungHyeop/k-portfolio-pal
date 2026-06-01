@@ -19,6 +19,11 @@ export interface HistoryEntry {
   returnPct: number | null;
   holdings?: Partial<Record<AssetKey, number>>;
 }
+export interface AssetRowDef {
+  id: string;
+  assetKey: AssetKey;
+  etfName: string;
+}
 export interface AccountState {
   // Per-account settings
   active: boolean;
@@ -26,6 +31,9 @@ export interface AccountState {
   accountAllocations: Record<ProfileKey, Record<AssetKey, number>>;
   etfNames: Record<AssetKey, string>;
   enabledAssets: AssetKey[];
+  // Row-based asset management (supports duplicate assetKeys)
+  assetRows?: AssetRowDef[];
+  rowAllocations?: Record<ProfileKey, Record<string, number>>;
   // Data
   baseAmount: number;
   deposit: number;
@@ -184,6 +192,24 @@ function migrateState(parsed: StoreState): StoreState {
       });
     }
     if (!acc.rebalanceDate) acc.rebalanceDate = new Date().toISOString().slice(0, 10);
+
+    // Migrate to row-based asset management
+    if (!acc.assetRows?.length) {
+      acc.assetRows = acc.enabledAssets.map((k) => ({
+        id: k,
+        assetKey: k,
+        etfName: acc.etfNames?.[k] ?? ASSET_GROUPS[k].defaultEtf,
+      }));
+    }
+    if (!acc.rowAllocations) {
+      const allocs = acc.accountAllocations ?? structuredClone(PROFILE_PRESETS);
+      acc.rowAllocations = Object.fromEntries(
+        (Object.keys(PROFILE_PRESETS) as ProfileKey[]).map((p) => [
+          p,
+          Object.fromEntries(acc.assetRows!.map((r) => [r.id, allocs[p]?.[r.assetKey] ?? 0])),
+        ])
+      ) as Record<ProfileKey, Record<string, number>>;
+    }
   }
   return parsed;
 }
