@@ -7,6 +7,7 @@ import { handleWebhookRequest } from "./lib/telegram";
 // Cloudflare Workers environment bindings
 export interface Env {
   TELEGRAM_BOT_TOKEN?: string;
+  ANTHROPIC_API_KEY?: string;
   [key: string]: unknown;
 }
 
@@ -79,7 +80,7 @@ export default {
 
     // ── Telegram webhook ────────────────────────────────────────────────
     if (pathname === "/api/webhook/telegram" && request.method === "POST") {
-      return handleWebhookRequest(request, env.TELEGRAM_BOT_TOKEN);
+      return handleWebhookRequest(request, env.TELEGRAM_BOT_TOKEN, env.ANTHROPIC_API_KEY);
     }
 
     // ── TanStack Start app (SSR + static) ───────────────────────────────

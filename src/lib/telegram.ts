@@ -23,6 +23,35 @@ export interface TelegramUpdate {
   message?: TelegramMessage;
 }
 
+// ── Anthropic API ─────────────────────────────────────────────────────────
+interface AnthropicResponse {
+  content: Array<{ type: string; text: string }>;
+}
+
+async function askClaude(apiKey: string, userText: string): Promise<string> {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: userText }],
+    }),
+  });
+
+  if (!res.ok) {
+    console.error("[claude] API error:", res.status, await res.text());
+    return "죄송해요, 지금 답변을 생성할 수 없어요.";
+  }
+
+  const data = (await res.json()) as AnthropicResponse;
+  return data.content.find((b) => b.type === "text")?.text ?? "응답을 파싱할 수 없어요.";
+}
+
 // ── Telegram API Calls ────────────────────────────────────────────────────
 async function sendMessage(botToken: string, chatId: number, text: string): Promise<void> {
   const res = await fetch(
@@ -38,22 +67,32 @@ async function sendMessage(botToken: string, chatId: number, text: string): Prom
   }
 }
 
-// ── Echo Handler ──────────────────────────────────────────────────────────
-async function handleUpdate(update: TelegramUpdate, botToken: string): Promise<void> {
+// ── AI Handler ────────────────────────────────────────────────────────────
+async function handleUpdate(
+  update: TelegramUpdate,
+  botToken: string,
+  anthropicApiKey: string
+): Promise<void> {
   const msg = update.message;
-  if (!msg?.text) return; // ignore non-text messages (photos, stickers, etc.)
+  if (!msg?.text) return;
 
-  await sendMessage(botToken, msg.chat.id, msg.text);
+  const reply = await askClaude(anthropicApiKey, msg.text);
+  await sendMessage(botToken, msg.chat.id, reply);
 }
 
 // ── Webhook Entry Point ───────────────────────────────────────────────────
 export async function handleWebhookRequest(
   request: Request,
-  botToken: string | undefined
+  botToken: string | undefined,
+  anthropicApiKey: string | undefined
 ): Promise<Response> {
   if (!botToken) {
     console.error("[telegram] TELEGRAM_BOT_TOKEN is not set");
     return new Response("Bot token not configured", { status: 500 });
+  }
+  if (!anthropicApiKey) {
+    console.error("[telegram] ANTHROPIC_API_KEY is not set");
+    return new Response("Anthropic API key not configured", { status: 500 });
   }
 
   let update: TelegramUpdate;
@@ -63,8 +102,6 @@ export async function handleWebhookRequest(
     return new Response("Invalid JSON", { status: 400 });
   }
 
-  // Process the update, then always acknowledge with 200
-  // (Telegram retries if it doesn't get 2xx within ~55 s)
-  await handleUpdate(update, botToken);
+  await handleUpdate(update, botToken, anthropicApiKey);
   return new Response("OK", { status: 200 });
 }

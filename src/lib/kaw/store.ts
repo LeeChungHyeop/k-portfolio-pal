@@ -57,6 +57,7 @@ export interface AccountState {
   rebalanceDate: string;
   holdings: Holding[];
   rowHoldings?: Record<string, number>;  // row instance ID → current market value
+  rowMemos?: Record<string, string>;     // key: `${profileKey}:${rowId}`
   history: HistoryEntry[];
 }
 export interface StoreState {
@@ -628,6 +629,13 @@ export function usePortfolioStore() {
         ...acc, rowHoldings: { ...(acc.rowHoldings ?? {}), [rowId]: value },
       }}};
     }), []);
+  const updateRowMemo        = useCallback((id: AccountId, memoKey: string, text: string) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      const memos = { ...(acc.rowMemos ?? {}), [memoKey]: text };
+      if (!text) delete memos[memoKey];
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, rowMemos: memos } } };
+    }), []);
 
   // ── Per-account settings actions ──────────────────────────────────────────
   const setAccountActive = useCallback((id: AccountId, v: boolean) =>
@@ -684,6 +692,7 @@ export function usePortfolioStore() {
     setAccountEtfName, toggleAccountAsset,
     updateAssetLibrary,
     updateRowHolding,
+    updateRowMemo,
     activateProfile: useCallback((id: string) => activateProfile(id), []),
     deactivateProfile: useCallback(() => deactivateProfile(), []),
     logoutCode:    useCallback(() => logoutCode(), []),
