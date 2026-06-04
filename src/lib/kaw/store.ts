@@ -615,6 +615,12 @@ export function usePortfolioStore() {
       const filtered = acc.history.filter((h) => h.id !== hid);
       return { ...s, accounts: { ...s.accounts, [id]: { ...acc, history: recalcReturns(filtered) } } };
     }), []);
+  const updateHistory   = useCallback((id: AccountId, entry: HistoryEntry) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      const updated = acc.history.map((h) => h.id === entry.id ? { ...entry } : h);
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, history: recalcReturns(updated) } } };
+    }), []);
   const resetAll        = useCallback(() => {
     memState = null;
     setState(() => currentUser === "hyeobi" ? seedState() : emptyState());
@@ -685,7 +691,7 @@ export function usePortfolioStore() {
     hasSupabase,
     setProfile, setAllocation, resetAllocation,
     updateAccount, updateHolding,
-    addHistory, removeHistory,
+    addHistory, removeHistory, updateHistory,
     resetAll, importJson,
     setAccountActive, setAccountProfile,
     setAccountAllocation, resetAccountAllocations,

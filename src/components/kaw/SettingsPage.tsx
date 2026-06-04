@@ -975,25 +975,31 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                     </div>
                   )}
 
-                  {/* ETF 종목명 (자산에 ETF가 여럿일 때만 표시) */}
-                  {addLabel && defsForLabel.length > 1 && (
+                  {/* ETF 종목명 — 1개면 읽기전용 표시, 여럿이면 드롭다운 */}
+                  {addLabel && defsForLabel.length > 0 && (
                     <div className="space-y-1">
                       <label className="text-xs text-muted-foreground">ETF 종목명</label>
-                      <Select value={addAsset} onValueChange={handleAssetSelect}>
-                        <SelectTrigger className="h-8 w-52 text-sm">
-                          <SelectValue placeholder="선택" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {defsForLabel.map((def) => {
-                            const atMax = countForAsset(def.id) >= MAX_PER_KEY;
-                            return (
-                              <SelectItem key={def.id} value={def.id} disabled={atMax}>
-                                {def.defaultEtf}{atMax ? " (최대)" : ""}
-                              </SelectItem>
-                            );
-                          })}
-                        </SelectContent>
-                      </Select>
+                      {defsForLabel.length === 1 ? (
+                        <div className="h-8 px-3 flex items-center rounded-lg border bg-muted/50 text-sm text-foreground w-52 truncate">
+                          {defsForLabel[0].defaultEtf}
+                        </div>
+                      ) : (
+                        <Select value={addAsset} onValueChange={handleAssetSelect}>
+                          <SelectTrigger className="h-8 w-52 text-sm">
+                            <SelectValue placeholder="선택" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {defsForLabel.map((def) => {
+                              const atMax = countForAsset(def.id) >= MAX_PER_KEY;
+                              return (
+                                <SelectItem key={def.id} value={def.id} disabled={atMax}>
+                                  {def.defaultEtf}{atMax ? " (최대)" : ""}
+                                </SelectItem>
+                              );
+                            })}
+                          </SelectContent>
+                        </Select>
+                      )}
                     </div>
                   )}
 

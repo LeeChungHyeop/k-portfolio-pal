@@ -5,8 +5,33 @@ import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { TrendingUp, TrendingDown, Minus, Camera, Plus, Trash2, ChevronDown, ChevronRight, CheckCircle2 } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Camera, Plus, Trash2, ChevronDown, ChevronRight, CheckCircle2, Save } from "lucide-react";
+
+// 콤마 포맷 숫자 입력 — 입력 중에는 raw, blur 시 콤마 표시
+function NumberInput({ value, onChange, className, placeholder }: {
+  value: number; onChange: (v: number) => void; className?: string; placeholder?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+  const [raw, setRaw] = useState("");
+  return (
+    <Input
+      type="text"
+      inputMode="numeric"
+      value={focused ? raw : (value > 0 ? formatKRW(value) : "")}
+      placeholder={placeholder}
+      className={className}
+      onFocus={(e) => { setRaw(value > 0 ? String(value) : ""); setFocused(true); e.target.select(); }}
+      onChange={(e) => {
+        const stripped = e.target.value.replace(/[^0-9]/g, "");
+        setRaw(stripped);
+        onChange(parseInt(stripped, 10) || 0);
+      }}
+      onBlur={() => setFocused(false)}
+    />
+  );
+}
 
 type Tab = "rebalance" | "history";
 
@@ -213,10 +238,9 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                       {r.prevValue != null ? formatKRW(r.prevValue) : "—"}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Input
-                        type="number"
-                        value={r.value || ""}
-                        onChange={(e) => updateRowHolding(accountId, r.rowId, parseFloat(e.target.value) || 0)}
+                      <NumberInput
+                        value={r.value}
+                        onChange={(v) => updateRowHolding(accountId, r.rowId, v)}
                         placeholder="0"
                         className="h-8 text-sm text-right tabular-nums"
                       />
@@ -257,9 +281,10 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
    히스토리 탭
 ───────────────────────────────────────────── */
 function HistoryTab({ accountId }: { accountId: AccountId }) {
-  const { state, addHistory, removeHistory } = usePortfolioStore();
+  const { state, addHistory, removeHistory, updateHistory } = usePortfolioStore();
   const account = state.accounts[accountId];
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [editingEntry, setEditingEntry] = useState<HistoryEntry | null>(null);
   const [manualDate, setManualDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [manualTotal, setManualTotal] = useState("");
   const [manualDeposit, setManualDeposit] = useState("");
@@ -339,7 +364,7 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
       <Card className="overflow-hidden">
         <div className="px-5 py-4 border-b">
           <p className="font-semibold">전체 리밸런싱 기록</p>
-          <p className="text-xs text-muted-foreground mt-0.5">행을 클릭하면 종목별 평가금액을 확인할 수 있습니다.</p>
+          <p className="text-xs text-muted-foreground mt-0.5">클릭: 종목별 상세 보기 · 더블클릭: 수정</p>
         </div>
 
         {reversed.length === 0 ? (
@@ -370,6 +395,8 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
                           isExpanded ? "bg-violet-50/60 dark:bg-violet-900/20" : "hover:bg-muted/30"
                         }`}
                         onClick={() => setExpandedId(isExpanded ? null : h.id)}
+                        onDoubleClick={(e) => { e.stopPropagation(); setEditingEntry({ ...h }); }}
+                        title="더블클릭으로 수정"
                       >
                         <TableCell className="text-muted-foreground">
                           {hasHoldings
@@ -456,6 +483,49 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
           </div>
         </div>
       </Card>
+
+      {/* 히스토리 수정 다이얼로그 */}
+      {editingEntry && (
+        <Dialog open onOpenChange={(v) => !v && setEditingEntry(null)}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle>히스토리 수정</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-muted-foreground">날짜</label>
+                <Input type="date" value={editingEntry.date}
+                  onChange={(e) => setEditingEntry({ ...editingEntry, date: e.target.value })}
+                  className="mt-1" />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">기준금액 (원)</label>
+                <NumberInput value={editingEntry.baseAmount}
+                  onChange={(v) => setEditingEntry({ ...editingEntry, baseAmount: v })}
+                  className="mt-1" placeholder="0" />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">평가금액 (원)</label>
+                <NumberInput value={editingEntry.totalValue}
+                  onChange={(v) => setEditingEntry({ ...editingEntry, totalValue: v })}
+                  className="mt-1" placeholder="0" />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">불입액 (원)</label>
+                <NumberInput value={editingEntry.deposit}
+                  onChange={(v) => setEditingEntry({ ...editingEntry, deposit: v })}
+                  className="mt-1" placeholder="0" />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" size="sm" onClick={() => setEditingEntry(null)}>취소</Button>
+              <Button size="sm" onClick={() => { updateHistory(accountId, editingEntry); setEditingEntry(null); }}>
+                <Save className="w-3.5 h-3.5 mr-1" /> 저장
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }
