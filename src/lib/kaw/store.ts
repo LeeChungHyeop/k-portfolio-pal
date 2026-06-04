@@ -377,7 +377,13 @@ async function dbSave(code: string, user: string, state: StoreState) {
     ...ACCOUNT_IDS.map((id) => ({ family_code: code, profile: user, account_type: id, data: state.accounts[id], updated_at: now })),
   ];
   const { error } = await supabase.from("kaw_data").upsert(rows, { onConflict: "family_code,profile,account_type" });
-  if (error) console.error("[kaw] DB save error:", error);
+  if (error) {
+    console.error("[kaw] DB save error:", error.message, error.details ?? "");
+    dbError = `동기화 실패: ${error.message}`;
+    notify();
+  } else {
+    if (dbError?.startsWith("동기화 실패")) { dbError = null; notify(); }
+  }
 }
 
 function scheduleSave() {
@@ -495,14 +501,19 @@ export async function activateProfile(profileId: string): Promise<void> {
       await dbSave(familyCode, currentUser, memState).catch(() => {});
     }
 
-    const loaded = await dbLoad(familyCode, profileId);
-    const newState = loaded ?? (profileId === "hyeobi" ? seedState() : emptyState());
-
+    // currentUser를 먼저 설정해야 loadLocal()이 올바른 키로 읽음
     currentUser = profileId;
-    memState = newState;
-    saveLocal(memState);
     localStorage.setItem(AUTH_USER_KEY, profileId);
 
+    const loaded = await dbLoad(familyCode, profileId);
+    if (loaded) {
+      // DB 데이터는 반드시 migrateState를 거쳐 새 필드(profileRows 등)를 초기화
+      memState = migrateState(loaded);
+    } else {
+      // DB 실패 시 로컬 캐시 우선 사용 (로컬 캐시도 내부에서 migrateState 적용)
+      memState = loadLocal();
+    }
+    saveLocal(memState);
     subscribeRealtime(familyCode);
   } catch {}
 
@@ -565,7 +576,7 @@ async function initFromStorage() {
     if (hasSupabase) {
       try {
         const dbState = await dbLoad(code, sessionProfile);
-        if (dbState) { memState = dbState; saveLocal(memState); }
+        if (dbState) { memState = migrateState(dbState); saveLocal(memState); notify(); }
       } catch {}
     }
     subscribeRealtime(code);

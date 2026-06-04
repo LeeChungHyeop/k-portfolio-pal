@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, Moon, X, LogOut, RefreshCw, Users } from "lucide-react";
+import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, Moon, X, LogOut, RefreshCw, Users, Cloud, CloudOff } from "lucide-react";
 import { usePortfolioStore } from "@/lib/kaw/store";
 import { type FamilyData } from "@/lib/kaw/auth";
 
@@ -23,7 +23,7 @@ interface Props {
 }
 
 export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose }: Props) {
-  const { familyCode, currentUser, dbLoading, deactivateProfile, logoutCode } = usePortfolioStore();
+  const { familyCode, currentUser, dbLoading, dbError, hasSupabase, deactivateProfile, logoutCode } = usePortfolioStore();
 
   const [dark, setDark] = useState(() => {
     if (typeof document === "undefined") return true;
@@ -123,6 +123,26 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
           })}
         </div>
       </nav>
+
+      {/* 동기화 상태 */}
+      {familyCode && (
+        <div className="px-3 py-2 mx-2 mb-1 rounded-xl text-xs flex items-center gap-1.5
+          bg-muted/40">
+          {dbError ? (
+            <><CloudOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+              <span className="text-rose-500 truncate" title={dbError}>동기화 오류</span></>
+          ) : dbLoading ? (
+            <><RefreshCw className="w-3.5 h-3.5 text-violet-400 animate-spin shrink-0" />
+              <span className="text-muted-foreground">동기화 중…</span></>
+          ) : hasSupabase ? (
+            <><Cloud className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+              <span className="text-muted-foreground">클라우드 동기화</span></>
+          ) : (
+            <><CloudOff className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+              <span className="text-amber-500">로컬 전용</span></>
+          )}
+        </div>
+      )}
 
       {/* 하단 */}
       <div className="px-2 py-3 border-t space-y-0.5">
