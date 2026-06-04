@@ -40,14 +40,13 @@ export function Dashboard() {
 
   const accountSummaries = useMemo(() => ACCOUNT_IDS.map((id) => {
     const acc = state.accounts[id];
-    const totalValue = acc.holdings.reduce((s, h) => s + h.value, 0);
     const last = acc.history.length > 0 ? acc.history[acc.history.length - 1] : null;
-    const latestReturnPct = last?.returnPct ?? null;
     const histTotal = last?.totalValue ?? 0;
-    return { id, label: ACCOUNT_LABELS_SHORT[id], totalValue, histTotal, last, latestReturnPct };
+    const latestReturnPct = last?.returnPct ?? null;
+    return { id, label: ACCOUNT_LABELS_SHORT[id], histTotal, last, latestReturnPct };
   }), [state]);
 
-  const grandTotal = accountSummaries.reduce((s, a) => s + (a.totalValue > 0 ? a.totalValue : a.histTotal), 0);
+  const grandTotal = accountSummaries.reduce((s, a) => s + a.histTotal, 0);
 
   // Group by YYYY-MM, pick last entry per month per account
   const chartData = useMemo(() => {
@@ -87,7 +86,7 @@ export function Dashboard() {
       {/* 계좌별 카드 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         {accountSummaries.map((a) => {
-          const displayVal = a.totalValue > 0 ? a.totalValue : a.histTotal;
+          const displayVal = a.histTotal;
           const isUp = (a.latestReturnPct ?? 0) >= 0;
           return (
             <Card key={a.id} className="p-4 space-y-1">

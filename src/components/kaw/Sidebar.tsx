@@ -80,8 +80,9 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
       </div>
 
       {/* 메뉴 */}
-      <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-        {NAV.map(({ id, label, icon: Icon, color }) => {
+      <nav className="flex-1 px-2 py-3 overflow-y-auto">
+        {/* 대시보드 */}
+        {NAV.slice(0, 1).map(({ id, label, icon: Icon, color }) => {
           const isActive = active === id;
           return (
             <button key={id} onClick={() => { onNavigate(id); onMobileClose?.(); }}
@@ -97,6 +98,30 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
             </button>
           );
         })}
+
+        {/* 구분선 + 섹션 레이블 */}
+        <div className="mx-1 my-3 border-t border-border/60" />
+        <p className="px-3 mb-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">계좌별 관리</p>
+
+        {/* 계좌 메뉴 */}
+        <div className="space-y-0.5">
+          {NAV.slice(1).map(({ id, label, icon: Icon, color }) => {
+            const isActive = active === id;
+            return (
+              <button key={id} onClick={() => { onNavigate(id); onMobileClose?.(); }}
+                className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                  isActive
+                    ? "bg-gradient-to-r from-violet-500/10 to-blue-500/10 text-foreground shadow-sm border border-violet-200/50 dark:border-violet-800/50"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                }`}
+              >
+                <Icon className={`w-4 h-4 shrink-0 ${isActive ? color : ""}`} />
+                <span className="truncate">{label}</span>
+                {isActive && <span className={`ml-auto w-1.5 h-1.5 rounded-full ${color.replace("text-", "bg-")}`} />}
+              </button>
+            );
+          })}
+        </div>
       </nav>
 
       {/* 하단 */}

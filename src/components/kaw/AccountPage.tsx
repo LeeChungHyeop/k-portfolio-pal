@@ -9,26 +9,26 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
 import { TrendingUp, TrendingDown, Minus, Camera, Plus, Trash2, ChevronDown, ChevronRight, CheckCircle2, Save } from "lucide-react";
 
-// 콤마 포맷 숫자 입력 — 입력 중에는 raw, blur 시 콤마 표시
+// 콤마 포맷 숫자 입력 — null=비포커스(콤마표시), string=포커스(raw 숫자)
 function NumberInput({ value, onChange, className, placeholder }: {
   value: number; onChange: (v: number) => void; className?: string; placeholder?: string;
 }) {
-  const [focused, setFocused] = useState(false);
-  const [raw, setRaw] = useState("");
+  const [rawText, setRawText] = useState<string | null>(null);
+  const display = rawText !== null ? rawText : (value > 0 ? formatKRW(value) : "");
   return (
     <Input
       type="text"
       inputMode="numeric"
-      value={focused ? raw : (value > 0 ? formatKRW(value) : "")}
+      value={display}
       placeholder={placeholder}
       className={className}
-      onFocus={(e) => { setRaw(value > 0 ? String(value) : ""); setFocused(true); e.target.select(); }}
+      onFocus={() => setRawText(value > 0 ? String(value) : "")}
       onChange={(e) => {
-        const stripped = e.target.value.replace(/[^0-9]/g, "");
-        setRaw(stripped);
-        onChange(parseInt(stripped, 10) || 0);
+        const digits = e.target.value.replace(/[^0-9]/g, "");
+        setRawText(digits);
+        onChange(parseInt(digits, 10) || 0);
       }}
-      onBlur={() => setFocused(false)}
+      onBlur={() => setRawText(null)}
     />
   );
 }
