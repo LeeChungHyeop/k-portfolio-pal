@@ -521,6 +521,15 @@ export async function activateProfile(profileId: string): Promise<void> {
   notify();
 }
 
+export async function syncNow(): Promise<void> {
+  if (!familyCode || !currentUser || !hasSupabase) return;
+  try {
+    const state = await dbLoad(familyCode, currentUser);
+    if (state) { memState = migrateState(state); saveLocal(memState); notify(); }
+    subscribeRealtime(familyCode);
+  } catch {}
+}
+
 export function deactivateProfile(): void {
   unsubscribeRealtime();
   localStorage.removeItem(AUTH_USER_KEY);
@@ -556,6 +565,25 @@ function setState(updater: (s: StoreState) => StoreState) {
   notify();
 }
 
+// ── Visibility-based refresh (iOS Safari 백그라운드 복귀 시 재동기화) ──────
+let visibilityListenerAdded = false;
+function setupVisibilityRefresh() {
+  if (visibilityListenerAdded || typeof document === "undefined") return;
+  visibilityListenerAdded = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible" || !familyCode || !currentUser) return;
+    // WebSocket이 끊겼을 수 있으므로 재구독
+    subscribeRealtime(familyCode);
+    // Supabase에서 최신 데이터 강제 로드
+    dbLoad(familyCode, currentUser).then((state) => {
+      if (!state) return;
+      memState = migrateState(state);
+      saveLocal(memState);
+      notify();
+    }).catch(() => {});
+  });
+}
+
 // ── Async init ─────────────────────────────────────────────────────────────
 async function initFromStorage() {
   if (typeof window === "undefined") return;
@@ -563,6 +591,7 @@ async function initFromStorage() {
   if (!code) { dbLoading = false; notify(); return; }
 
   familyCode = code;
+  setupVisibilityRefresh();
 
   // sessionStorage에 프로필 인증 기록이 있으면 세션 복원 (같은 탭 새로고침)
   const sessionProfile = sessionStorage.getItem(SESSION_AUTH_KEY);
@@ -614,12 +643,17 @@ export function usePortfolioStore() {
       const acc = s.accounts[id];
       return { ...s, accounts: { ...s.accounts, [id]: { ...acc, holdings: acc.holdings.map((h) => h.assetKey === key ? { ...h, ...patch } : h) } } };
     }), []);
-  const addHistory      = useCallback((id: AccountId, entry: Omit<HistoryEntry, "returnPct">) =>
+  const addHistory      = useCallback((id: AccountId, entry: Omit<HistoryEntry, "returnPct">) => {
     setState((s) => {
       const acc = s.accounts[id];
       const sorted = [...acc.history, { ...entry, returnPct: null }].sort((a, b) => a.date.localeCompare(b.date));
       return { ...s, accounts: { ...s.accounts, [id]: { ...acc, history: recalcReturns(sorted) } } };
-    }), []);
+    });
+    // 리밸런싱 저장은 즉시 DB에 반영 (디바운스 누락 방지)
+    if (familyCode && currentUser && memState) {
+      dbSave(familyCode, currentUser, memState).catch(console.error);
+    }
+  }, []);
   const removeHistory   = useCallback((id: AccountId, hid: string) =>
     setState((s) => {
       const acc = s.accounts[id];

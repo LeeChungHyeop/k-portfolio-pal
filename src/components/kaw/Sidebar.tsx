@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, Moon, X, LogOut, RefreshCw, Users, Cloud, CloudOff } from "lucide-react";
-import { usePortfolioStore } from "@/lib/kaw/store";
+import { usePortfolioStore, syncNow } from "@/lib/kaw/store";
 import { type FamilyData } from "@/lib/kaw/auth";
 
 export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings";
@@ -126,20 +126,28 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
 
       {/* 동기화 상태 */}
       {familyCode && (
-        <div className="px-3 py-2 mx-2 mb-1 rounded-xl text-xs flex items-center gap-1.5
-          bg-muted/40">
+        <div className="px-3 py-2 mx-2 mb-1 rounded-xl text-xs flex items-center gap-1.5 bg-muted/40">
           {dbError ? (
             <><CloudOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-              <span className="text-rose-500 truncate" title={dbError}>동기화 오류</span></>
+              <span className="text-rose-500 flex-1 truncate" title={dbError}>동기화 오류</span></>
           ) : dbLoading ? (
             <><RefreshCw className="w-3.5 h-3.5 text-violet-400 animate-spin shrink-0" />
-              <span className="text-muted-foreground">동기화 중…</span></>
+              <span className="text-muted-foreground flex-1">동기화 중…</span></>
           ) : hasSupabase ? (
             <><Cloud className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-              <span className="text-muted-foreground">클라우드 동기화</span></>
+              <span className="text-muted-foreground flex-1">클라우드 동기화</span></>
           ) : (
             <><CloudOff className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-              <span className="text-amber-500">로컬 전용</span></>
+              <span className="text-amber-500 flex-1">로컬 전용</span></>
+          )}
+          {hasSupabase && !dbLoading && (
+            <button
+              onClick={() => syncNow()}
+              className="w-5 h-5 rounded flex items-center justify-center text-muted-foreground hover:text-violet-500 transition-colors shrink-0"
+              title="지금 동기화"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
           )}
         </div>
       )}
