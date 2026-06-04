@@ -184,14 +184,14 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           </div>
           <div>
             <label className="text-xs text-muted-foreground">기준금액 (원)</label>
-            <Input type="number" value={account.baseAmount || ""}
-              onChange={(e) => updateAccount(accountId, { baseAmount: parseFloat(e.target.value) || 0 })}
+            <NumberInput value={account.baseAmount}
+              onChange={(v) => updateAccount(accountId, { baseAmount: v })}
               placeholder="0" className="mt-1 font-semibold" />
           </div>
           <div>
             <label className="text-xs text-muted-foreground">이번 달 불입액 (원)</label>
-            <Input type="number" value={account.deposit || ""}
-              onChange={(e) => updateAccount(accountId, { deposit: parseFloat(e.target.value) || 0 })}
+            <NumberInput value={account.deposit}
+              onChange={(v) => updateAccount(accountId, { deposit: v })}
               placeholder="0" className="mt-1" />
           </div>
         </div>
@@ -201,10 +201,10 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
             <TableHeader>
               <TableRow className="bg-muted/50">
                 <TableHead className="w-28">자산</TableHead>
-                <TableHead>ETF 종목명</TableHead>
-                <TableHead className="text-right w-12">비중</TableHead>
-                <TableHead className="text-right">기준금액</TableHead>
-                <TableHead className="text-right">이전 평가</TableHead>
+                <TableHead className="hidden md:table-cell">ETF 종목명</TableHead>
+                <TableHead className="hidden md:table-cell text-right w-12">비중</TableHead>
+                <TableHead className="hidden lg:table-cell text-right">기준금액</TableHead>
+                <TableHead className="hidden lg:table-cell text-right">이전 평가</TableHead>
                 <TableHead className="text-right">현재 평가</TableHead>
                 <TableHead className="text-right">추가매수</TableHead>
               </TableRow>
@@ -226,15 +226,16 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                         {r.group}
                       </div>
                       <div className="text-xs text-muted-foreground mt-0.5">{r.label}</div>
+                      <div className="text-[11px] text-muted-foreground/70 mt-0.5 md:hidden truncate max-w-[120px]">{r.etfName}</div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden md:table-cell">
                       <span className="text-sm text-muted-foreground leading-tight block truncate max-w-[180px]" title={r.etfName}>
                         {r.etfName}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right text-sm tabular-nums">{r.alloc}%</TableCell>
-                    <TableCell className="text-right text-sm tabular-nums text-muted-foreground">{formatKRW(r.target)}</TableCell>
-                    <TableCell className="text-right text-sm tabular-nums text-muted-foreground">
+                    <TableCell className="hidden md:table-cell text-right text-sm tabular-nums">{r.alloc}%</TableCell>
+                    <TableCell className="hidden lg:table-cell text-right text-sm tabular-nums text-muted-foreground">{formatKRW(r.target)}</TableCell>
+                    <TableCell className="hidden lg:table-cell text-right text-sm tabular-nums text-muted-foreground">
                       {r.prevValue != null ? formatKRW(r.prevValue) : "—"}
                     </TableCell>
                     <TableCell className="text-right">
@@ -242,7 +243,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                         value={r.value}
                         onChange={(v) => updateRowHolding(accountId, r.rowId, v)}
                         placeholder="0"
-                        className="h-8 text-sm text-right tabular-nums"
+                        className="h-8 text-sm text-right tabular-nums w-28"
                       />
                     </TableCell>
                     <TableCell className="text-right"><RebalanceCell diff={r.diff} /></TableCell>
@@ -250,9 +251,11 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                 ))
               )}
               <TableRow className="bg-muted/40 font-semibold">
-                <TableCell colSpan={3} className="text-sm">합계</TableCell>
-                <TableCell className="text-right tabular-nums text-sm">{formatKRW(account.baseAmount)}</TableCell>
-                <TableCell className="text-right tabular-nums text-sm text-muted-foreground">
+                <TableCell className="text-sm">합계</TableCell>
+                <TableCell className="hidden md:table-cell" />
+                <TableCell className="hidden md:table-cell" />
+                <TableCell className="hidden lg:table-cell text-right tabular-nums text-sm">{formatKRW(account.baseAmount)}</TableCell>
+                <TableCell className="hidden lg:table-cell text-right tabular-nums text-sm text-muted-foreground">
                   {lastHistory ? formatKRW(lastHistory.totalValue) : "—"}
                 </TableCell>
                 <TableCell className="text-right tabular-nums text-sm">{formatKRW(totalValue)}</TableCell>
@@ -376,9 +379,9 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
                 <TableRow className="bg-muted/50">
                   <TableHead className="w-8" />
                   <TableHead>날짜</TableHead>
-                  <TableHead className="text-right">기준금액</TableHead>
+                  <TableHead className="hidden sm:table-cell text-right">기준금액</TableHead>
                   <TableHead className="text-right">평가금액</TableHead>
-                  <TableHead className="text-right">불입액</TableHead>
+                  <TableHead className="hidden sm:table-cell text-right">불입액</TableHead>
                   <TableHead className="text-right">수익률</TableHead>
                   <TableHead className="w-10" />
                 </TableRow>
@@ -407,9 +410,9 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
                           }
                         </TableCell>
                         <TableCell className="font-semibold text-sm">{h.date}</TableCell>
-                        <TableCell className="text-right tabular-nums text-sm text-muted-foreground">{formatKRW(h.baseAmount)}</TableCell>
+                        <TableCell className="hidden sm:table-cell text-right tabular-nums text-sm text-muted-foreground">{formatKRW(h.baseAmount)}</TableCell>
                         <TableCell className="text-right tabular-nums text-sm font-medium">{formatKRW(h.totalValue)}</TableCell>
-                        <TableCell className="text-right tabular-nums text-sm text-muted-foreground">{h.deposit ? formatKRW(h.deposit) : "—"}</TableCell>
+                        <TableCell className="hidden sm:table-cell text-right tabular-nums text-sm text-muted-foreground">{h.deposit ? formatKRW(h.deposit) : "—"}</TableCell>
                         <TableCell className="text-right tabular-nums text-sm">
                           {h.returnPct === null
                             ? <span className="text-muted-foreground">—</span>

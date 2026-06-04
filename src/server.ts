@@ -86,8 +86,15 @@ export default {
     // ── TanStack Start app (SSR + static) ───────────────────────────────
     try {
       const handler = await getServerEntry();
-      const response = await handler.fetch(request, env, ctx);
-      return await normalizeCatastrophicSsrResponse(response);
+      const raw = await handler.fetch(request, env, ctx);
+      const response = await normalizeCatastrophicSsrResponse(raw);
+      // Prevent iOS Safari from caching the HTML document
+      if ((response.headers.get("content-type") ?? "").includes("text/html")) {
+        const h = new Headers(response.headers);
+        h.set("Cache-Control", "no-store");
+        return new Response(response.body, { status: response.status, headers: h });
+      }
+      return response;
     } catch (error) {
       console.error(error);
       return brandedErrorResponse();
