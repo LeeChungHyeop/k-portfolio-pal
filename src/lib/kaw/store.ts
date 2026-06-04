@@ -523,11 +523,18 @@ export async function activateProfile(profileId: string): Promise<void> {
 
 export async function syncNow(): Promise<void> {
   if (!familyCode || !currentUser || !hasSupabase) return;
+  dbLoading = true;
+  notify();
   try {
     const state = await dbLoad(familyCode, currentUser);
-    if (state) { memState = migrateState(state); saveLocal(memState); notify(); }
+    if (state) { memState = migrateState(state); saveLocal(memState); }
     subscribeRealtime(familyCode);
-  } catch {}
+  } catch (e) {
+    console.error("[kaw] syncNow error:", e);
+  } finally {
+    dbLoading = false;
+    notify();
+  }
 }
 
 export function deactivateProfile(): void {

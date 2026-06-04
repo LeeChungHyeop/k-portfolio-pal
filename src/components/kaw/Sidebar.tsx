@@ -124,29 +124,34 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
         </div>
       </nav>
 
-      {/* 동기화 상태 */}
+      {/* 동기화 상태 + 수동 동기화 버튼 */}
       {familyCode && (
-        <div className="px-3 py-2 mx-2 mb-1 rounded-xl text-xs flex items-center gap-1.5 bg-muted/40">
-          {dbError ? (
-            <><CloudOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-              <span className="text-rose-500 flex-1 truncate" title={dbError}>동기화 오류</span></>
-          ) : dbLoading ? (
-            <><RefreshCw className="w-3.5 h-3.5 text-violet-400 animate-spin shrink-0" />
-              <span className="text-muted-foreground flex-1">동기화 중…</span></>
-          ) : hasSupabase ? (
-            <><Cloud className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-              <span className="text-muted-foreground flex-1">클라우드 동기화</span></>
-          ) : (
-            <><CloudOff className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-              <span className="text-amber-500 flex-1">로컬 전용</span></>
-          )}
-          {hasSupabase && !dbLoading && (
+        <div className="mx-2 mb-1 space-y-1">
+          <div className="px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 bg-muted/40">
+            {dbError ? (
+              <><CloudOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                <span className="text-rose-500 flex-1 truncate" title={dbError}>동기화 오류</span></>
+            ) : dbLoading ? (
+              <><RefreshCw className="w-3.5 h-3.5 text-violet-400 animate-spin shrink-0" />
+                <span className="text-muted-foreground flex-1">동기화 중…</span></>
+            ) : hasSupabase ? (
+              <><Cloud className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                <span className="text-muted-foreground flex-1">클라우드 동기화</span></>
+            ) : (
+              <><CloudOff className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                <span className="text-amber-500 flex-1">로컬 전용</span></>
+            )}
+          </div>
+          {hasSupabase && (
             <button
               onClick={() => syncNow()}
-              className="w-5 h-5 rounded flex items-center justify-center text-muted-foreground hover:text-violet-500 transition-colors shrink-0"
-              title="지금 동기화"
+              disabled={dbLoading}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-all
+                bg-violet-500/10 text-violet-600 dark:text-violet-400 hover:bg-violet-500/20 active:bg-violet-500/30
+                disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
+              <RefreshCw className={`w-3.5 h-3.5 ${dbLoading ? "animate-spin" : ""}`} />
+              {dbLoading ? "동기화 중…" : "지금 동기화"}
             </button>
           )}
         </div>
