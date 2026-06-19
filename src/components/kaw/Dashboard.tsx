@@ -1,9 +1,12 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { ACCOUNT_IDS, ACCOUNT_LABELS_SHORT } from "@/lib/kaw/constants";
 import { usePortfolioStore, formatKRW, formatPct } from "@/lib/kaw/store";
 import { Card } from "@/components/ui/card";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from "recharts";
-import { TrendingUp, TrendingDown } from "lucide-react";
+import {
+  LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, CartesianGrid, Legend, ReferenceLine,
+} from "recharts";
+import { TrendingUp, TrendingDown, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight } from "lucide-react";
 
 const ACCOUNT_COLORS: Record<string, string> = {
   retirement: "oklch(0.62 0.18 250)",
@@ -11,6 +14,8 @@ const ACCOUNT_COLORS: Record<string, string> = {
   pension:    "oklch(0.70 0.18 30)",
   irp:        "oklch(0.60 0.18 320)",
 };
+
+type GranularityTab = "daily" | "monthly" | "yearly";
 
 function DashboardTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
@@ -38,6 +43,51 @@ function DashboardTooltip({ active, payload, label }: any) {
   );
 }
 
+function ReturnTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="rounded-xl border bg-popover p-3 shadow-md text-sm space-y-1 min-w-40">
+      <p className="font-semibold text-xs text-muted-foreground mb-1">{label}</p>
+      {payload.map((p: any) => (
+        <div key={p.dataKey} className="flex justify-between gap-4">
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: p.color }} />
+            <span className="text-xs">{ACCOUNT_LABELS_SHORT[p.dataKey as keyof typeof ACCOUNT_LABELS_SHORT] ?? p.dataKey}</span>
+          </span>
+          <span className={`tabular-nums text-xs font-medium ${p.value >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+            {p.value >= 0 ? "+" : ""}{p.value?.toFixed(2)}%
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DepositTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  const total = payload.reduce((s: number, p: any) => s + (p.value ?? 0), 0);
+  return (
+    <div className="rounded-xl border bg-popover p-3 shadow-md text-sm space-y-1 min-w-44">
+      <p className="font-semibold text-xs text-muted-foreground mb-1">{label}</p>
+      {payload.filter((p: any) => p.value > 0).map((p: any) => (
+        <div key={p.dataKey} className="flex justify-between gap-4">
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: p.fill }} />
+            <span className="text-xs">{ACCOUNT_LABELS_SHORT[p.dataKey as keyof typeof ACCOUNT_LABELS_SHORT] ?? p.dataKey}</span>
+          </span>
+          <span className="tabular-nums text-xs font-medium">{formatKRW(p.value)}</span>
+        </div>
+      ))}
+      {total > 0 && (
+        <div className="border-t pt-1 mt-1 flex justify-between font-bold text-xs">
+          <span>합계</span>
+          <span className="tabular-nums">{formatKRW(total)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const ACCOUNT_ORDER: { id: string; label: string }[] = [
   { id: "retirement", label: "퇴직연금 자산 추이" },
   { id: "isa",        label: "ISA계좌 자산 추이" },
@@ -45,24 +95,43 @@ const ACCOUNT_ORDER: { id: string; label: string }[] = [
   { id: "irp",        label: "IRP계좌 자산 추이" },
 ];
 
+function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className={[
+        "px-3 py-1 text-xs rounded-lg font-medium transition-all",
+        active ? "bg-violet-500 text-white shadow-sm" : "text-muted-foreground hover:text-foreground hover:bg-muted",
+      ].join(" ")}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function Dashboard() {
   const { state } = usePortfolioStore();
+  const [returnTab, setReturnTab] = useState<GranularityTab>("monthly");
 
   const accountSummaries = useMemo(() => ACCOUNT_IDS.map((id) => {
     const acc = state.accounts[id];
     const last = acc.history.length > 0 ? acc.history[acc.history.length - 1] : null;
     const histTotal = last?.totalValue ?? 0;
     const latestReturnPct = last?.returnPct ?? null;
-    return { id, label: ACCOUNT_LABELS_SHORT[id], histTotal, last, latestReturnPct };
+    const baseAmount = last?.baseAmount ?? 0;
+    return { id, label: ACCOUNT_LABELS_SHORT[id], histTotal, last, latestReturnPct, baseAmount };
   }), [state]);
 
   const grandTotal = accountSummaries.reduce((s, a) => s + a.histTotal, 0);
+  const grandBase = accountSummaries.reduce((s, a) => s + a.baseAmount, 0);
+  const grandGain = grandTotal - grandBase;
+  const grandGainPct = grandBase > 0 ? (grandGain / grandBase) * 100 : null;
 
-  // Group by YYYY-MM, pick last entry per month per account
+  // Monthly chart data (existing)
   const chartData = useMemo(() => {
     const monthMap = new Map<string, Record<string, number>>();
     ACCOUNT_IDS.forEach((id) => {
-      const byMonth = new Map<string, string>(); // month -> last date
+      const byMonth = new Map<string, string>();
       state.accounts[id].history.forEach((h) => {
         const month = h.date.slice(0, 7);
         const existing = byMonth.get(month);
@@ -70,7 +139,7 @@ export function Dashboard() {
       });
       state.accounts[id].history.forEach((h) => {
         const month = h.date.slice(0, 7);
-        if (byMonth.get(month) !== h.date) return; // not the last entry of the month
+        if (byMonth.get(month) !== h.date) return;
         if (!monthMap.has(month)) monthMap.set(month, {});
         monthMap.get(month)![id] = h.totalValue;
       });
@@ -79,6 +148,85 @@ export function Dashboard() {
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([month, vals]) => ({ month, label: month.replace("-", "."), ...vals }));
   }, [state]);
+
+  // Cumulative return data per granularity
+  const cumulativeReturnData = useMemo(() => {
+    // For each account, build sorted entries with cumulative return
+    const accCumReturns = new Map<string, Map<string, number>>();
+    ACCOUNT_IDS.forEach((id) => {
+      const history = [...state.accounts[id].history].sort((a, b) => a.date.localeCompare(b.date));
+      const cumMap = new Map<string, number>();
+      let cum = 0; // cumulative return in %
+      history.forEach((h, i) => {
+        if (i === 0) { cumMap.set(h.date, 0); return; }
+        if (h.returnPct != null) {
+          cum = (1 + cum / 100) * (1 + h.returnPct / 100) * 100 - 100;
+        }
+        cumMap.set(h.date, cum);
+      });
+      accCumReturns.set(id, cumMap);
+    });
+
+    const buildData = (keyFn: (date: string) => string, labelFn: (key: string) => string) => {
+      const keyMap = new Map<string, Record<string, number>>();
+      ACCOUNT_IDS.forEach((id) => {
+        const history = [...state.accounts[id].history].sort((a, b) => a.date.localeCompare(b.date));
+        const byKey = new Map<string, string>();
+        history.forEach((h) => {
+          const k = keyFn(h.date);
+          const ex = byKey.get(k);
+          if (!ex || h.date > ex) byKey.set(k, h.date);
+        });
+        history.forEach((h) => {
+          const k = keyFn(h.date);
+          if (byKey.get(k) !== h.date) return;
+          const cumVal = accCumReturns.get(id)?.get(h.date);
+          if (cumVal === undefined) return;
+          if (!keyMap.has(k)) keyMap.set(k, {});
+          keyMap.get(k)![id] = Math.round(cumVal * 100) / 100;
+        });
+      });
+      return [...keyMap.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, vals]) => ({ key: k, label: labelFn(k), ...vals }));
+    };
+
+    return {
+      daily:   buildData((d) => d, (k) => k.slice(5)),
+      monthly: buildData((d) => d.slice(0, 7), (k) => k.replace("-", ".")),
+      yearly:  buildData((d) => d.slice(0, 4), (k) => k + "년"),
+    };
+  }, [state]);
+
+  // Monthly deposit data
+  const monthlyDepositData = useMemo(() => {
+    const monthMap = new Map<string, Record<string, number>>();
+    ACCOUNT_IDS.forEach((id) => {
+      state.accounts[id].history.forEach((h) => {
+        if (!h.deposit || h.deposit <= 0) return;
+        const month = h.date.slice(0, 7);
+        if (!monthMap.has(month)) monthMap.set(month, {});
+        monthMap.get(month)![id] = (monthMap.get(month)![id] ?? 0) + h.deposit;
+      });
+    });
+    return [...monthMap.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, vals]) => ({ month, label: month.replace("-", "."), ...vals }));
+  }, [state]);
+
+  const currentReturnData = cumulativeReturnData[returnTab];
+  const hasReturnData = currentReturnData.length >= 2;
+  const hasDepositData = monthlyDepositData.length >= 1;
+
+  // Latest cumulative returns per account for summary display
+  const latestCumReturns = useMemo(() => {
+    const result: Record<string, number | null> = {};
+    ACCOUNT_IDS.forEach((id) => {
+      const last = cumulativeReturnData.monthly.filter((d) => d[id as keyof typeof d] !== undefined).slice(-1)[0];
+      result[id] = last ? ((last[id as keyof typeof last] as unknown as number) ?? null) : null;
+    });
+    return result;
+  }, [cumulativeReturnData]);
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-5xl mx-auto">
@@ -96,7 +244,6 @@ export function Dashboard() {
       {/* 계좌별 카드 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         {accountSummaries.map((a) => {
-          const displayVal = a.histTotal;
           const isUp = (a.latestReturnPct ?? 0) >= 0;
           return (
             <Card key={a.id} className="p-4 space-y-1">
@@ -109,7 +256,7 @@ export function Dashboard() {
                   </span>
                 )}
               </div>
-              <p className="text-lg md:text-xl font-bold tabular-nums">{formatKRW(displayVal)}</p>
+              <p className="text-lg md:text-xl font-bold tabular-nums">{formatKRW(a.histTotal)}</p>
               {a.last && (
                 <p className="text-xs text-muted-foreground">{a.last.date} 기준</p>
               )}
@@ -117,6 +264,150 @@ export function Dashboard() {
           );
         })}
       </div>
+
+      {/* 납입원금 vs 현재가치 */}
+      {grandBase > 0 && (
+        <Card className="p-5">
+          <h3 className="font-semibold mb-4 flex items-center gap-2">
+            <Wallet className="w-4 h-4 text-violet-500" />
+            납입원금 vs 현재가치
+          </h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <PiggyBank className="w-3.5 h-3.5" /> 총 납입원금
+              </p>
+              <p className="text-xl font-bold tabular-nums">{formatKRW(grandBase)}</p>
+              <p className="text-xs text-muted-foreground">내가 넣은 돈</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <TrendingUp className="w-3.5 h-3.5" /> 현재가치
+              </p>
+              <p className="text-xl font-bold tabular-nums">{formatKRW(grandTotal)}</p>
+              <p className="text-xs text-muted-foreground">지금 평가금액</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">순수익</p>
+              <p className={`text-xl font-bold tabular-nums ${grandGain >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                {grandGain >= 0 ? "+" : ""}{formatKRW(Math.abs(grandGain))}
+              </p>
+              <p className="text-xs text-muted-foreground">현재가치 - 납입원금</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">수익률</p>
+              {grandGainPct !== null ? (
+                <p className={`text-xl font-bold tabular-nums flex items-center gap-1 ${grandGainPct >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                  {grandGainPct >= 0
+                    ? <ArrowUpRight className="w-4 h-4" />
+                    : <ArrowDownRight className="w-4 h-4" />}
+                  {grandGainPct >= 0 ? "+" : ""}{grandGainPct.toFixed(2)}%
+                </p>
+              ) : <p className="text-xl font-bold text-muted-foreground">—</p>}
+              <p className="text-xs text-muted-foreground">납입 대비 총 수익</p>
+            </div>
+          </div>
+          <div className="space-y-2">
+            {accountSummaries.filter((a) => a.baseAmount > 0).map((a) => {
+              const gain = a.histTotal - a.baseAmount;
+              const pct = a.baseAmount > 0 ? (gain / a.baseAmount) * 100 : 0;
+              const ratio = grandBase > 0 ? (a.baseAmount / grandBase) : 0;
+              return (
+                <div key={a.id} className="flex items-center gap-3">
+                  <span className="text-xs text-muted-foreground w-16 shrink-0">{a.label}</span>
+                  <div className="flex-1 bg-muted rounded-full h-2 overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{ width: `${ratio * 100}%`, background: ACCOUNT_COLORS[a.id] }}
+                    />
+                  </div>
+                  <span className="text-xs tabular-nums w-20 text-right font-medium">{formatKRW(a.baseAmount)}</span>
+                  <span className={`text-xs tabular-nums w-16 text-right font-medium ${pct >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                    {pct >= 0 ? "+" : ""}{pct.toFixed(2)}%
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+
+      {/* 누적 수익률 */}
+      {hasReturnData && (
+        <Card className="p-5">
+          <div className="flex items-center justify-between mb-1">
+            <h3 className="font-semibold">누적 수익률</h3>
+            <div className="flex gap-1 bg-muted p-0.5 rounded-lg">
+              <TabButton active={returnTab === "daily"}   onClick={() => setReturnTab("daily")}>일간</TabButton>
+              <TabButton active={returnTab === "monthly"} onClick={() => setReturnTab("monthly")}>월간</TabButton>
+              <TabButton active={returnTab === "yearly"}  onClick={() => setReturnTab("yearly")}>연간</TabButton>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground mb-4">납입금 제외 · 순수 투자 수익률 누적</p>
+
+          {/* 계좌별 현재 누적 수익률 요약 */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+            {accountSummaries.map((a) => {
+              const cum = latestCumReturns[a.id];
+              if (cum === null || cum === undefined) return null;
+              return (
+                <div key={a.id} className="rounded-lg bg-muted/50 px-3 py-2 text-center">
+                  <p className="text-xs text-muted-foreground">{a.label}</p>
+                  <p className={`text-base font-bold tabular-nums mt-0.5 ${cum >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                    {cum >= 0 ? "+" : ""}{cum.toFixed(2)}%
+                  </p>
+                </div>
+              );
+            }).filter(Boolean)}
+          </div>
+
+          <div className="h-64">
+            <ResponsiveContainer>
+              <LineChart data={currentReturnData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+                <YAxis
+                  tick={{ fontSize: 10 }}
+                  tickFormatter={(v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`}
+                  width={58}
+                />
+                <Tooltip content={<ReturnTooltip />} />
+                <ReferenceLine y={0} stroke="var(--border)" strokeWidth={1.5} strokeDasharray="4 2" />
+                <Legend formatter={(name) => ACCOUNT_LABELS_SHORT[name as keyof typeof ACCOUNT_LABELS_SHORT] ?? name} />
+                {ACCOUNT_IDS.map((id) => (
+                  <Line
+                    key={id} type="monotone" dataKey={id}
+                    stroke={ACCOUNT_COLORS[id]} strokeWidth={2}
+                    dot={{ r: 2 }} connectNulls
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
+
+      {/* 월별 납입 현황 */}
+      {hasDepositData && (
+        <Card className="p-5">
+          <h3 className="font-semibold mb-1">월별 납입 현황</h3>
+          <p className="text-xs text-muted-foreground mb-4">계좌별 입금액 · 쌓아온 기록</p>
+          <div className="h-52">
+            <ResponsiveContainer>
+              <BarChart data={monthlyDepositData} barCategoryGap="30%">
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+                <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${(v / 10000).toFixed(0)}만`} width={46} />
+                <Tooltip content={<DepositTooltip />} />
+                <Legend formatter={(name) => ACCOUNT_LABELS_SHORT[name as keyof typeof ACCOUNT_LABELS_SHORT] ?? name} />
+                {ACCOUNT_IDS.map((id) => (
+                  <Bar key={id} dataKey={id} stackId="a" fill={ACCOUNT_COLORS[id]} />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
 
       {/* 전체 자산 추이 */}
       {chartData.length >= 2 && (

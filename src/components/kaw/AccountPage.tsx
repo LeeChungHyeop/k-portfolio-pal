@@ -196,17 +196,17 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           </div>
         </div>
 
-        <div className="overflow-x-auto rounded-lg border">
+        <div className="rounded-lg border overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow className="bg-muted/50">
-                <TableHead className="w-28">자산</TableHead>
+                <TableHead className="py-2 px-2 sm:px-4 text-xs sm:text-sm">자산</TableHead>
                 <TableHead className="hidden md:table-cell">ETF 종목명</TableHead>
                 <TableHead className="hidden md:table-cell text-right w-12">비중</TableHead>
                 <TableHead className="hidden lg:table-cell text-right">기준금액</TableHead>
                 <TableHead className="hidden lg:table-cell text-right">이전 평가</TableHead>
-                <TableHead className="text-right">현재 평가</TableHead>
-                <TableHead className="text-right">추가매수</TableHead>
+                <TableHead className="text-right py-2 px-2 sm:px-4 text-xs sm:text-sm whitespace-nowrap">현재평가</TableHead>
+                <TableHead className="text-right py-2 px-2 sm:px-4 text-xs sm:text-sm whitespace-nowrap">추가매수</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -219,14 +219,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
               ) : (
                 rows.map((r) => (
                   <TableRow key={r.rowId} className="hover:bg-muted/30">
-                    <TableCell>
-                      <div className="flex items-center gap-1.5 text-xs">
-                        <span className="w-2 h-2 rounded-full shrink-0"
+                    <TableCell className="py-2 px-2 sm:px-4">
+                      <div className="flex items-center gap-1 text-[11px] sm:text-xs">
+                        <span className="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full shrink-0"
                           style={{ background: GROUP_COLORS[r.group] ?? "#888" }} />
-                        {r.group}
+                        <span className="truncate max-w-[60px] sm:max-w-none">{r.group}</span>
                       </div>
-                      <div className="text-xs text-muted-foreground mt-0.5">{r.label}</div>
-                      <div className="text-[11px] text-muted-foreground/70 mt-0.5 md:hidden truncate max-w-[120px]">{r.etfName}</div>
+                      <div className="text-[11px] sm:text-xs text-muted-foreground mt-0.5 leading-tight">{r.label}</div>
                     </TableCell>
                     <TableCell className="hidden md:table-cell">
                       <span className="text-sm text-muted-foreground leading-tight block truncate max-w-[180px]" title={r.etfName}>
@@ -238,27 +237,27 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                     <TableCell className="hidden lg:table-cell text-right text-sm tabular-nums text-muted-foreground">
                       {r.prevValue != null ? formatKRW(r.prevValue) : "—"}
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="text-right py-2 px-1 sm:px-4">
                       <NumberInput
                         value={r.value}
                         onChange={(v) => updateRowHolding(accountId, r.rowId, v)}
                         placeholder="0"
-                        className="h-8 text-sm text-right tabular-nums w-28"
+                        className="h-7 sm:h-8 text-xs sm:text-sm text-right tabular-nums w-[4.5rem] sm:w-28"
                       />
                     </TableCell>
-                    <TableCell className="text-right"><RebalanceCell diff={r.diff} /></TableCell>
+                    <TableCell className="text-right py-2 px-1 sm:px-4"><RebalanceCell diff={r.diff} /></TableCell>
                   </TableRow>
                 ))
               )}
               <TableRow className="bg-muted/40 font-semibold">
-                <TableCell className="text-sm">합계</TableCell>
+                <TableCell className="text-xs sm:text-sm py-2 px-2 sm:px-4">합계</TableCell>
                 <TableCell className="hidden md:table-cell" />
                 <TableCell className="hidden md:table-cell" />
                 <TableCell className="hidden lg:table-cell text-right tabular-nums text-sm">{formatKRW(account.baseAmount)}</TableCell>
                 <TableCell className="hidden lg:table-cell text-right tabular-nums text-sm text-muted-foreground">
                   {lastHistory ? formatKRW(lastHistory.totalValue) : "—"}
                 </TableCell>
-                <TableCell className="text-right tabular-nums text-sm">{formatKRW(totalValue)}</TableCell>
+                <TableCell className="text-right tabular-nums text-xs sm:text-sm py-2 px-1 sm:px-4">{formatKRW(totalValue)}</TableCell>
                 <TableCell />
               </TableRow>
             </TableBody>

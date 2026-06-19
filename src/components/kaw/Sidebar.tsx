@@ -36,7 +36,8 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
     localStorage.setItem("kaw.theme", dark ? "dark" : "light");
   }, [dark]);
 
-  const profileLabel = currentUser || "—";
+  const USER_LABELS: Record<string, string> = { hyeobi: "혀비", dayoung: "다영" };
+  const profileLabel = currentUser ? (USER_LABELS[currentUser] ?? currentUser) : "—";
 
   return (
     <aside className={[
@@ -66,7 +67,7 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
         <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-2 px-1">현재 프로필</p>
         <div className="flex items-center gap-2 px-2 py-2 rounded-xl bg-gradient-to-r from-violet-500/10 to-blue-500/10 border border-violet-200/50 dark:border-violet-800/50">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shrink-0">
-            <span className="text-xs font-bold text-white">{profileLabel.charAt(0).toUpperCase()}</span>
+            <span className="text-xs font-bold text-white">{profileLabel.charAt(0)}</span>
           </div>
           <span className="text-sm font-semibold flex-1 truncate">{profileLabel}</span>
           {dbLoading && <RefreshCw className="w-3 h-3 animate-spin text-violet-500 shrink-0" />}
