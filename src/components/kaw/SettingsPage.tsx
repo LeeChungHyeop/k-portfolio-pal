@@ -770,21 +770,26 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
           {/* 투자성향 프리셋 */}
           <Card className="p-5 space-y-3">
             <h3 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">투자성향</h3>
-            <div className="flex gap-1.5 bg-muted p-1 rounded-xl w-fit">
-              {(Object.keys(PROFILE_LABELS) as ProfileKey[]).map((p) => (
-                <button
-                  key={p}
-                  onClick={() => setDraft((d) => ({ ...d, profile: p }))}
-                  className={[
-                    "px-4 py-1.5 text-sm rounded-lg transition-all font-medium",
-                    currentProfile === p
-                      ? "bg-background shadow-sm text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  ].join(" ")}
-                >
-                  {PROFILE_LABELS[p]}
-                </button>
-              ))}
+            <div className="flex items-center gap-6 flex-wrap">
+              <div className="flex gap-1.5 bg-muted p-1 rounded-xl w-fit">
+                {(Object.keys(PROFILE_LABELS) as ProfileKey[]).map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => setDraft((d) => ({ ...d, profile: p }))}
+                    className={[
+                      "px-4 py-1.5 text-sm rounded-lg transition-all font-medium",
+                      currentProfile === p
+                        ? "bg-background shadow-sm text-foreground"
+                        : "text-muted-foreground hover:text-foreground",
+                    ].join(" ")}
+                  >
+                    {PROFILE_LABELS[p]}
+                  </button>
+                ))}
+              </div>
+              <Button variant="outline" size="sm" onClick={() => setShowLibraryModal(true)}>
+                <Settings className="w-3.5 h-3.5 mr-1" /> 종목 설정
+              </Button>
             </div>
           </Card>
 
@@ -804,9 +809,6 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                 </p>
               </div>
               <div className="flex gap-2 items-center flex-wrap justify-end">
-                <Button variant="outline" size="sm" onClick={() => setShowLibraryModal(true)}>
-                  <Settings className="w-3.5 h-3.5 mr-1" /> 종목 설정
-                </Button>
                 {currentProfile !== "custom" && (
                   <Button variant="outline" size="sm" onClick={handleResetAlloc}>
                     <RotateCcw className="w-3.5 h-3.5 mr-1" /> 기본값
