@@ -15,6 +15,7 @@ const ACCOUNT_COLORS: Record<string, string> = {
 function DashboardTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
   const total = payload.reduce((s: number, p: any) => s + (p.value ?? 0), 0);
+  const isSingle = payload.length === 1;
   return (
     <div className="rounded-xl border bg-popover p-3 shadow-md text-sm space-y-1 min-w-40">
       <p className="font-semibold text-xs text-muted-foreground mb-1">{label}</p>
@@ -27,13 +28,22 @@ function DashboardTooltip({ active, payload, label }: any) {
           <span className="tabular-nums text-xs font-medium">{formatKRW(p.value)}</span>
         </div>
       ))}
-      <div className="border-t pt-1 mt-1 flex justify-between font-bold text-xs">
-        <span>합계</span>
-        <span className="tabular-nums">{formatKRW(total)} 원</span>
-      </div>
+      {!isSingle && (
+        <div className="border-t pt-1 mt-1 flex justify-between font-bold text-xs">
+          <span>합계</span>
+          <span className="tabular-nums">{formatKRW(total)} 원</span>
+        </div>
+      )}
     </div>
   );
 }
+
+const ACCOUNT_ORDER: { id: string; label: string }[] = [
+  { id: "retirement", label: "퇴직연금 자산 추이" },
+  { id: "isa",        label: "ISA계좌 자산 추이" },
+  { id: "pension",    label: "연금저축펀드 자산 추이" },
+  { id: "irp",        label: "IRP계좌 자산 추이" },
+];
 
 export function Dashboard() {
   const { state } = usePortfolioStore();
@@ -108,10 +118,10 @@ export function Dashboard() {
         })}
       </div>
 
-      {/* 히스토리 차트 */}
+      {/* 전체 자산 추이 */}
       {chartData.length >= 2 && (
         <Card className="p-5">
-          <h3 className="font-semibold mb-4">계좌별 자산 추이</h3>
+          <h3 className="font-semibold mb-4">전체 자산 추이</h3>
           <div className="h-72">
             <ResponsiveContainer>
               <LineChart data={chartData}>
@@ -127,6 +137,32 @@ export function Dashboard() {
             </ResponsiveContainer>
           </div>
         </Card>
+      )}
+
+      {/* 계좌별 자산 추이 */}
+      {chartData.length >= 2 && (
+        <div className="space-y-4">
+          {ACCOUNT_ORDER.map(({ id, label }) => {
+            const hasData = chartData.some((d) => d[id as keyof typeof d] !== undefined);
+            if (!hasData) return null;
+            return (
+              <Card key={id} className="p-5">
+                <h3 className="font-semibold mb-4">{label}</h3>
+                <div className="h-48">
+                  <ResponsiveContainer>
+                    <LineChart data={chartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                      <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+                      <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${(v / 10000).toFixed(0)}만`} width={50} />
+                      <Tooltip content={<DashboardTooltip />} />
+                      <Line type="monotone" dataKey={id} stroke={ACCOUNT_COLORS[id]} strokeWidth={2} dot={{ r: 2 }} connectNulls />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
       )}
 
       {/* 계좌별 최근 수익률 테이블 */}
