@@ -98,6 +98,8 @@ function RootShell({ children }: { children: React.ReactNode }) {
     <html lang="en">
       <head>
         <HeadContent />
+        {/* 다크모드 기본값 - React 렌더 전에 실행해 FOUC 방지 */}
+        <script dangerouslySetInnerHTML={{ __html: `(function(){var t=localStorage.getItem('kaw.theme');if(!t||t==='dark')document.documentElement.classList.add('dark');})()`}} />
       </head>
       <body>
         {children}
