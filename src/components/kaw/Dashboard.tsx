@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/card";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid, Legend, ReferenceLine,
+  PieChart, Pie, Cell,
 } from "recharts";
 import { TrendingUp, TrendingDown, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight } from "lucide-react";
 
@@ -115,10 +116,14 @@ export function Dashboard() {
 
   const accountSummaries = useMemo(() => ACCOUNT_IDS.map((id) => {
     const acc = state.accounts[id];
-    const last = acc.history.length > 0 ? acc.history[acc.history.length - 1] : null;
+    const sorted = [...acc.history].sort((a, b) => a.date.localeCompare(b.date));
+    const last = sorted.length > 0 ? sorted[sorted.length - 1] : null;
     const histTotal = last?.totalValue ?? 0;
     const latestReturnPct = last?.returnPct ?? null;
-    const baseAmount = last?.baseAmount ?? 0;
+    // 첫 번째 히스토리의 baseAmount = 초기납입금, 이후 deposit 합산 = 추가납입금
+    const baseAmount = sorted.length > 0
+      ? sorted[0].baseAmount + sorted.slice(1).reduce((s, h) => s + Math.max(0, h.deposit ?? 0), 0)
+      : 0;
     return { id, label: ACCOUNT_LABELS_SHORT[id], histTotal, last, latestReturnPct, baseAmount };
   }), [state]);
 
@@ -218,6 +223,16 @@ export function Dashboard() {
   const hasReturnData = currentReturnData.length >= 2;
   const hasDepositData = monthlyDepositData.length >= 1;
 
+  const principalChartData = useMemo(
+    () => accountSummaries.filter((a) => a.baseAmount > 0).map((a) => ({ id: a.id, name: a.label, value: a.baseAmount })),
+    [accountSummaries],
+  );
+  const gainChartData = useMemo(
+    () => accountSummaries.filter((a) => a.baseAmount > 0 && (a.histTotal - a.baseAmount) > 0).map((a) => ({ id: a.id, name: a.label, value: a.histTotal - a.baseAmount })),
+    [accountSummaries],
+  );
+  const totalGain = gainChartData.reduce((s, d) => s + d.value, 0);
+
   // Latest cumulative returns per account for summary display
   const latestCumReturns = useMemo(() => {
     const result: Record<string, number | null> = {};
@@ -307,27 +322,85 @@ export function Dashboard() {
               <p className="text-xs text-muted-foreground">납입 대비 총 수익</p>
             </div>
           </div>
-          <div className="space-y-2">
-            {accountSummaries.filter((a) => a.baseAmount > 0).map((a) => {
-              const gain = a.histTotal - a.baseAmount;
-              const pct = a.baseAmount > 0 ? (gain / a.baseAmount) * 100 : 0;
-              const ratio = grandBase > 0 ? (a.baseAmount / grandBase) : 0;
-              return (
-                <div key={a.id} className="flex items-center gap-3">
-                  <span className="text-xs text-muted-foreground w-16 shrink-0">{a.label}</span>
-                  <div className="flex-1 bg-muted rounded-full h-2 overflow-hidden">
-                    <div
-                      className="h-full rounded-full transition-all"
-                      style={{ width: `${ratio * 100}%`, background: ACCOUNT_COLORS[a.id] }}
-                    />
+          <div className="grid grid-cols-2 gap-4">
+            {/* 납입원금 비중 */}
+            <div>
+              <p className="text-xs font-medium text-center text-muted-foreground mb-2">납입원금 비중</p>
+              <div className="h-36">
+                <ResponsiveContainer>
+                  <PieChart>
+                    <Pie data={principalChartData} cx="50%" cy="50%" innerRadius={46} outerRadius={64} dataKey="value" nameKey="name" strokeWidth={0}>
+                      {principalChartData.map((e) => <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />)}
+                    </Pie>
+                    <Tooltip content={({ active, payload }) => {
+                      if (!active || !payload?.length) return null;
+                      const v = payload[0].value as number;
+                      const pct = grandBase > 0 ? (v / grandBase * 100).toFixed(1) : "0";
+                      return (
+                        <div className="rounded-xl border bg-popover p-2 shadow-md text-xs">
+                          <p className="font-semibold mb-0.5">{payload[0].name}</p>
+                          <p className="tabular-nums">{formatKRW(v)}원</p>
+                          <p className="text-muted-foreground">{pct}%</p>
+                        </div>
+                      );
+                    }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="space-y-1 mt-2">
+                {principalChartData.map((e) => (
+                  <div key={e.id} className="flex items-center gap-1.5 text-xs">
+                    <span className="w-2 h-2 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[e.id] }} />
+                    <span className="text-muted-foreground truncate">{e.name}</span>
+                    <span className="ml-auto tabular-nums shrink-0 text-[11px]">{grandBase > 0 ? (e.value / grandBase * 100).toFixed(1) : "0"}%</span>
                   </div>
-                  <span className="text-xs tabular-nums w-20 text-right font-medium">{formatKRW(a.baseAmount)}</span>
-                  <span className={`text-xs tabular-nums w-16 text-right font-medium ${pct >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
-                    {pct >= 0 ? "+" : ""}{pct.toFixed(2)}%
-                  </span>
-                </div>
-              );
-            })}
+                ))}
+              </div>
+            </div>
+
+            {/* 계좌별 순수익 */}
+            <div>
+              <p className="text-xs font-medium text-center text-muted-foreground mb-2">계좌별 순수익</p>
+              <div className="h-36">
+                {gainChartData.length > 0 ? (
+                  <ResponsiveContainer>
+                    <PieChart>
+                      <Pie data={gainChartData} cx="50%" cy="50%" innerRadius={46} outerRadius={64} dataKey="value" nameKey="name" strokeWidth={0}>
+                        {gainChartData.map((e) => <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />)}
+                      </Pie>
+                      <Tooltip content={({ active, payload }) => {
+                        if (!active || !payload?.length) return null;
+                        const v = payload[0].value as number;
+                        const pct = totalGain > 0 ? (v / totalGain * 100).toFixed(1) : "0";
+                        return (
+                          <div className="rounded-xl border bg-popover p-2 shadow-md text-xs">
+                            <p className="font-semibold mb-0.5">{payload[0].name}</p>
+                            <p className="tabular-nums text-emerald-600">+{formatKRW(v)}원</p>
+                            <p className="text-muted-foreground">{pct}%</p>
+                          </div>
+                        );
+                      }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex items-center justify-center h-full text-xs text-muted-foreground">수익 데이터 없음</div>
+                )}
+              </div>
+              <div className="space-y-1 mt-2">
+                {accountSummaries.filter((a) => a.baseAmount > 0).map((a) => {
+                  const gain = a.histTotal - a.baseAmount;
+                  return (
+                    <div key={a.id} className="flex items-center gap-1.5 text-xs">
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[a.id] }} />
+                      <span className="text-muted-foreground truncate">{a.label}</span>
+                      <span className={`ml-auto tabular-nums shrink-0 font-medium text-[11px] ${gain >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                        {gain >= 0 ? "+" : ""}{formatKRW(Math.abs(gain))}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </Card>
       )}

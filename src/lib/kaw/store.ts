@@ -134,7 +134,7 @@ const SEED_HISTORY: Record<AccountId, SeedEntry[]> = {
     {date:"2026-04-27",totalValue:8515925,baseAmount:8521210,deposit:500000,holdings:{us:2048670,kr:783030,cn:682445,in:663000,gold:1624700,ust10:591800,ust30:540640,ktb30:1138680,cash:442960}},
   ],
   irp: [
-    {date:"2025-12-29",totalValue:3104050,baseAmount:3120898,deposit:0,holdings:{us:792480,kr:284340,cn:236925,in:242370,gold:605340,ust10:212300,ust30:213960,ktb30:406290,cash:110045}},
+    {date:"2025-12-29",totalValue:3104050,baseAmount:3000000,deposit:0,holdings:{us:792480,kr:284340,cn:236925,in:242370,gold:605340,ust10:212300,ust30:213960,ktb30:406290,cash:110045}},
     {date:"2026-02-26",totalValue:3172840,baseAmount:3177607,deposit:0,holdings:{us:784480,kr:365550,cn:236850,in:243270,gold:603630,ust10:211100,ust30:216600,ktb30:401070,cash:110290}},
     {date:"2026-03-25",totalValue:3953507,baseAmount:3951597,deposit:750000,holdings:{us:971990,kr:261310,cn:315875,in:318875,gold:753780,ust10:269125,ust30:270382,ktb30:570690,cash:221480}},
   ],
@@ -224,6 +224,14 @@ function migrateState(parsed: StoreState): StoreState {
       });
     }
     if (!acc.rebalanceDate) acc.rebalanceDate = new Date().toISOString().slice(0, 10);
+
+    // IRP 첫 항목 baseAmount 오류 수정 (3120898 → 3000000)
+    if (id === "irp" && acc.history.length > 0 && acc.history[0].id === "seed-2025-12-29" && acc.history[0].baseAmount === 3120898) {
+      acc.history = [{ ...acc.history[0], baseAmount: 3000000 }, ...acc.history.slice(1)];
+    }
+
+    // 히스토리를 날짜 오름차순으로 정렬 (역순 저장 데이터 대응)
+    acc.history = [...acc.history].sort((a, b) => a.date.localeCompare(b.date));
 
     // Migrate to row-based asset management (legacy)
     if (!acc.assetRows?.length) {

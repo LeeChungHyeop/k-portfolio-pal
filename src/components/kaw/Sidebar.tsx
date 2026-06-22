@@ -5,6 +5,8 @@ import { type FamilyData } from "@/lib/kaw/auth";
 
 export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
+const DEPLOY_DATE = "2026.06.22 09:30";
+
 const NAV = [
   { id: "dashboard"  as Page, label: "대시보드",    icon: LayoutDashboard, color: "text-violet-500" },
   { id: "retirement" as Page, label: "퇴직연금",    icon: Building2,       color: "text-blue-500" },
@@ -192,6 +194,10 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
           <LogOut className="w-3.5 h-3.5 shrink-0" />
           <span>로그아웃</span>
         </button>
+
+        <p className="px-3 pt-1 text-[10px] text-muted-foreground/50 text-center">
+          최근배포일: {DEPLOY_DATE}
+        </p>
       </div>
     </aside>
   );
