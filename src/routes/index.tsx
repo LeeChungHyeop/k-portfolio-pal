@@ -5,6 +5,7 @@ import { Sidebar, type Page } from "@/components/kaw/Sidebar";
 import { Dashboard } from "@/components/kaw/Dashboard";
 import { AccountPage } from "@/components/kaw/AccountPage";
 import { SettingsPage } from "@/components/kaw/SettingsPage";
+import { LabPage } from "@/components/kaw/LabPage";
 import { AuthGate } from "@/components/kaw/AuthGate";
 import { ProfileSelect } from "@/components/kaw/ProfileSelect";
 import { PinGate } from "@/components/kaw/PinGate";
@@ -158,6 +159,7 @@ function Index() {
             onFamilyUpdate={setFamilyData}
           />
         )}
+        {page === "lab"        && <LabPage />}
       </main>
     </div>
   );

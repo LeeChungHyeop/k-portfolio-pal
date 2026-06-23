@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff } from "lucide-react";
+import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, FlaskConical } from "lucide-react";
 import { usePortfolioStore, syncNow } from "@/lib/kaw/store";
 import { type FamilyData } from "@/lib/kaw/auth";
 
-export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings";
+export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings" | "lab";
 
 const DEPLOY_DATE = "2026.06.23 20:42";
 
@@ -125,6 +125,22 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
             );
           })}
         </div>
+
+        {/* 구분선 + 실험실 */}
+        <div className="mx-1 my-3 border-t border-border/60" />
+        <p className="px-3 mb-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">분석</p>
+        <button
+          onClick={() => { onNavigate("lab"); onMobileClose?.(); }}
+          className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+            active === "lab"
+              ? "bg-gradient-to-r from-violet-500/10 to-blue-500/10 text-foreground shadow-sm border border-violet-200/50 dark:border-violet-800/50"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground"
+          }`}
+        >
+          <FlaskConical className={`w-4 h-4 shrink-0 ${active === "lab" ? "text-violet-500" : ""}`} />
+          <span className="truncate">성과 분석 실험실</span>
+          {active === "lab" && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-violet-500" />}
+        </button>
       </nav>
 
       {/* 동기화 상태 + 수동 동기화 버튼 */}
