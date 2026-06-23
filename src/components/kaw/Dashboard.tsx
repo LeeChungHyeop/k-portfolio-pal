@@ -231,12 +231,6 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
     () => accountSummaries.filter((a) => a.baseAmount > 0).map((a) => ({ id: a.id, name: a.label, value: a.baseAmount })),
     [accountSummaries],
   );
-  const gainChartData = useMemo(
-    () => accountSummaries.filter((a) => a.baseAmount > 0 && (a.histTotal - a.baseAmount) > 0).map((a) => ({ id: a.id, name: a.label, value: a.histTotal - a.baseAmount })),
-    [accountSummaries],
-  );
-  const totalGain = gainChartData.reduce((s, d) => s + d.value, 0);
-
   // Latest cumulative returns per account for summary display
   const latestCumReturns = useMemo(() => {
     const result: Record<string, number | null> = {};
@@ -337,7 +331,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             {/* 납입원금 비중 */}
             <div className="flex flex-col items-center">
-              <p className="text-xs font-medium text-muted-foreground mb-3">납입원금 비중</p>
+              <p className="text-xs font-medium text-muted-foreground mb-3">납입원금</p>
               <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5">
                 <div className="shrink-0">
                   <PieChart width={200} height={200}>
@@ -370,46 +364,37 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               </div>
             </div>
 
-            {/* 계좌별 순수익 */}
+            {/* 현재가치 비중 */}
             <div className="flex flex-col items-center">
-              <p className="text-xs font-medium text-muted-foreground mb-3">계좌별 순수익</p>
+              <p className="text-xs font-medium text-muted-foreground mb-3">현재가치</p>
               <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5">
                 <div className="shrink-0">
-                  {gainChartData.length > 0 ? (
-                    <PieChart width={200} height={200}>
-                      <Pie data={gainChartData} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0}>
-                        {gainChartData.map((e) => <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />)}
-                      </Pie>
-                      <Tooltip content={({ active, payload }) => {
-                        if (!active || !payload?.length) return null;
-                        const v = payload[0].value as number;
-                        const pct = totalGain > 0 ? (v / totalGain * 100).toFixed(1) : "0";
-                        return (
-                          <div className="rounded-xl border bg-popover p-2 shadow-md text-xs">
-                            <p className="font-semibold mb-0.5">{payload[0].name}</p>
-                            <p className="tabular-nums text-emerald-600">+{formatKRW(v)}원</p>
-                            <p className="text-muted-foreground">{pct}%</p>
-                          </div>
-                        );
-                      }} />
-                    </PieChart>
-                  ) : (
-                    <div className="w-[200px] h-[200px] flex items-center justify-center text-xs text-muted-foreground text-center">수익 데이터 없음</div>
-                  )}
+                  <PieChart width={200} height={200}>
+                    <Pie data={principalChartData.map((e) => ({ ...e, value: accountSummaries.find((a) => a.id === e.id)?.histTotal ?? 0 }))} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0}>
+                      {principalChartData.map((e) => <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />)}
+                    </Pie>
+                    <Tooltip content={({ active, payload }) => {
+                      if (!active || !payload?.length) return null;
+                      const v = payload[0].value as number;
+                      const pct = grandTotal > 0 ? (v / grandTotal * 100).toFixed(1) : "0";
+                      return (
+                        <div className="rounded-xl border bg-popover p-2 shadow-md text-xs">
+                          <p className="font-semibold mb-0.5">{payload[0].name}</p>
+                          <p className="tabular-nums">{formatKRW(v)}원</p>
+                          <p className="text-muted-foreground">{pct}%</p>
+                        </div>
+                      );
+                    }} />
+                  </PieChart>
                 </div>
                 <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-1 sm:gap-x-0">
-                  {accountSummaries.filter((a) => a.baseAmount > 0).map((a) => {
-                    const gain = a.histTotal - a.baseAmount;
-                    return (
-                      <div key={a.id} className="flex items-center gap-2 text-sm">
-                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[a.id] }} />
-                        <span className="text-muted-foreground shrink-0">{a.label}</span>
-                        <span className={`tabular-nums font-semibold ml-1 ${gain >= 0 ? "text-emerald-500" : "text-rose-500"}`}>
-                          {gain >= 0 ? "+" : ""}{formatKRW(Math.abs(gain))}
-                        </span>
-                      </div>
-                    );
-                  })}
+                  {accountSummaries.filter((a) => a.histTotal > 0).map((a) => (
+                    <div key={a.id} className="flex items-center gap-2 text-sm">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[a.id] }} />
+                      <span className="text-muted-foreground shrink-0">{a.label}</span>
+                      <span className="tabular-nums font-semibold ml-1">{grandTotal > 0 ? (a.histTotal / grandTotal * 100).toFixed(1) : "0"}%</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
