@@ -322,14 +322,14 @@ export function Dashboard() {
               <p className="text-xs text-muted-foreground">납입 대비 총 수익</p>
             </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             {/* 납입원금 비중 */}
             <div>
-              <p className="text-xs font-medium text-muted-foreground mb-2">납입원금 비중</p>
-              <div className="flex items-center gap-3">
+              <p className="text-xs font-medium text-muted-foreground mb-3">납입원금 비중</p>
+              <div className="flex items-center gap-5">
                 <div className="shrink-0">
-                  <PieChart width={116} height={116}>
-                    <Pie data={principalChartData} cx="50%" cy="50%" innerRadius={36} outerRadius={52} dataKey="value" nameKey="name" strokeWidth={0}>
+                  <PieChart width={200} height={200}>
+                    <Pie data={principalChartData} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0}>
                       {principalChartData.map((e) => <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />)}
                     </Pie>
                     <Tooltip content={({ active, payload }) => {
@@ -346,12 +346,12 @@ export function Dashboard() {
                     }} />
                   </PieChart>
                 </div>
-                <div className="flex-1 space-y-2 min-w-0">
+                <div className="space-y-3">
                   {principalChartData.map((e) => (
-                    <div key={e.id} className="flex items-center gap-1.5 text-xs">
-                      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[e.id] }} />
-                      <span className="text-muted-foreground truncate">{e.name}</span>
-                      <span className="ml-auto tabular-nums shrink-0 font-medium">{grandBase > 0 ? (e.value / grandBase * 100).toFixed(1) : "0"}%</span>
+                    <div key={e.id} className="flex items-center gap-2 text-sm">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[e.id] }} />
+                      <span className="text-muted-foreground shrink-0">{e.name}</span>
+                      <span className="tabular-nums font-semibold ml-1">{grandBase > 0 ? (e.value / grandBase * 100).toFixed(1) : "0"}%</span>
                     </div>
                   ))}
                 </div>
@@ -360,12 +360,12 @@ export function Dashboard() {
 
             {/* 계좌별 순수익 */}
             <div>
-              <p className="text-xs font-medium text-muted-foreground mb-2">계좌별 순수익</p>
-              <div className="flex items-center gap-3">
+              <p className="text-xs font-medium text-muted-foreground mb-3">계좌별 순수익</p>
+              <div className="flex items-center gap-5">
                 <div className="shrink-0">
                   {gainChartData.length > 0 ? (
-                    <PieChart width={116} height={116}>
-                      <Pie data={gainChartData} cx="50%" cy="50%" innerRadius={36} outerRadius={52} dataKey="value" nameKey="name" strokeWidth={0}>
+                    <PieChart width={200} height={200}>
+                      <Pie data={gainChartData} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0}>
                         {gainChartData.map((e) => <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />)}
                       </Pie>
                       <Tooltip content={({ active, payload }) => {
@@ -382,17 +382,17 @@ export function Dashboard() {
                       }} />
                     </PieChart>
                   ) : (
-                    <div className="w-[116px] h-[116px] flex items-center justify-center text-xs text-muted-foreground text-center">수익 데이터 없음</div>
+                    <div className="w-[200px] h-[200px] flex items-center justify-center text-xs text-muted-foreground text-center">수익 데이터 없음</div>
                   )}
                 </div>
-                <div className="flex-1 space-y-2 min-w-0">
+                <div className="space-y-3">
                   {accountSummaries.filter((a) => a.baseAmount > 0).map((a) => {
                     const gain = a.histTotal - a.baseAmount;
                     return (
-                      <div key={a.id} className="flex items-center gap-1.5 text-xs">
-                        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[a.id] }} />
-                        <span className="text-muted-foreground truncate">{a.label}</span>
-                        <span className={`ml-auto tabular-nums shrink-0 font-medium ${gain >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                      <div key={a.id} className="flex items-center gap-2 text-sm">
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[a.id] }} />
+                        <span className="text-muted-foreground shrink-0">{a.label}</span>
+                        <span className={`tabular-nums font-semibold ml-1 ${gain >= 0 ? "text-emerald-500" : "text-rose-500"}`}>
                           {gain >= 0 ? "+" : ""}{formatKRW(Math.abs(gain))}
                         </span>
                       </div>
