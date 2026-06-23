@@ -517,7 +517,15 @@ export function Dashboard() {
                     <LineChart data={chartData}>
                       <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                       <XAxis dataKey="label" tick={{ fontSize: 10 }} />
-                      <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${(v / 10000).toFixed(0)}만`} width={50} />
+                      <YAxis
+                        tick={{ fontSize: 10 }}
+                        tickFormatter={(v) => `${(v / 10000).toFixed(0)}만`}
+                        width={50}
+                        domain={id === "isa"
+                          ? [0, (dataMax: number) => Math.ceil(dataMax * 1.02)]
+                          : [(dataMin: number) => Math.floor(dataMin * 0.97), (dataMax: number) => Math.ceil(dataMax * 1.01)]
+                        }
+                      />
                       <Tooltip content={<DashboardTooltip />} />
                       <Line type="monotone" dataKey={id} stroke={ACCOUNT_COLORS[id]} strokeWidth={2} dot={{ r: 2 }} connectNulls />
                     </LineChart>
