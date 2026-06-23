@@ -83,7 +83,7 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
       </div>
 
       {/* 메뉴 */}
-      <nav className="flex-1 px-2 py-3 overflow-y-auto">
+      <nav className="flex-1 px-2 py-3 overflow-y-auto sidebar-scroll">
         {/* 대시보드 */}
         {NAV.slice(0, 1).map(({ id, label, icon: Icon, color }) => {
           const isActive = active === id;

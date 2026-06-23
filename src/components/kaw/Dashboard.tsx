@@ -324,9 +324,9 @@ export function Dashboard() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             {/* 납입원금 비중 */}
-            <div>
+            <div className="flex flex-col items-center">
               <p className="text-xs font-medium text-muted-foreground mb-3">납입원금 비중</p>
-              <div className="flex items-center gap-5">
+              <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5">
                 <div className="shrink-0">
                   <PieChart width={200} height={200}>
                     <Pie data={principalChartData} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0}>
@@ -346,7 +346,7 @@ export function Dashboard() {
                     }} />
                   </PieChart>
                 </div>
-                <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-1 sm:gap-x-0">
                   {principalChartData.map((e) => (
                     <div key={e.id} className="flex items-center gap-2 text-sm">
                       <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[e.id] }} />
@@ -359,9 +359,9 @@ export function Dashboard() {
             </div>
 
             {/* 계좌별 순수익 */}
-            <div>
+            <div className="flex flex-col items-center">
               <p className="text-xs font-medium text-muted-foreground mb-3">계좌별 순수익</p>
-              <div className="flex items-center gap-5">
+              <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5">
                 <div className="shrink-0">
                   {gainChartData.length > 0 ? (
                     <PieChart width={200} height={200}>
@@ -385,7 +385,7 @@ export function Dashboard() {
                     <div className="w-[200px] h-[200px] flex items-center justify-center text-xs text-muted-foreground text-center">수익 데이터 없음</div>
                   )}
                 </div>
-                <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-1 sm:gap-x-0">
                   {accountSummaries.filter((a) => a.baseAmount > 0).map((a) => {
                     const gain = a.histTotal - a.baseAmount;
                     return (
