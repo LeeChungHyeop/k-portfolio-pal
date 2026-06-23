@@ -228,7 +228,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
   const hasDepositData = monthlyDepositData.length >= 1;
 
   const principalChartData = useMemo(
-    () => accountSummaries.filter((a) => a.baseAmount > 0).map((a) => ({ id: a.id, name: a.label, value: a.baseAmount })),
+    () => accountSummaries.filter((a) => a.baseAmount > 0).map((a) => ({ id: a.id, name: a.label, value: a.baseAmount })).sort((a, b) => b.value - a.value),
     [accountSummaries],
   );
   // Latest cumulative returns per account for summary display
@@ -335,7 +335,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5">
                 <div className="shrink-0">
                   <PieChart width={200} height={200}>
-                    <Pie data={principalChartData} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0}>
+                    <Pie data={principalChartData} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0} startAngle={90} endAngle={-270}>
                       {principalChartData.map((e) => <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />)}
                     </Pie>
                     <Tooltip content={({ active, payload }) => {
@@ -370,7 +370,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5">
                 <div className="shrink-0">
                   <PieChart width={200} height={200}>
-                    <Pie data={principalChartData.map((e) => ({ ...e, value: accountSummaries.find((a) => a.id === e.id)?.histTotal ?? 0 }))} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0}>
+                    <Pie data={principalChartData.map((e) => ({ ...e, value: accountSummaries.find((a) => a.id === e.id)?.histTotal ?? 0 })).sort((a, b) => b.value - a.value)} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0} startAngle={90} endAngle={-270}>
                       {principalChartData.map((e) => <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />)}
                     </Pie>
                     <Tooltip content={({ active, payload }) => {
