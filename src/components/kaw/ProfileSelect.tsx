@@ -1,4 +1,10 @@
 import { useState } from "react";
+
+function haptic(ms = 10) {
+  if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+    navigator.vibrate(ms);
+  }
+}
 import { UserPlus, ArrowLeft, RefreshCw, AlertCircle, CheckCircle2 } from "lucide-react";
 import {
   type ProfileConfig, type FamilyData,
@@ -301,8 +307,8 @@ export function ProfileSelect({ familyCode, familyData, onSelect, onFamilyUpdate
           {familyData.profiles.map((profile, i) => (
             <button
               key={profile.id}
-              onClick={() => onSelect(profile)}
-              className="flex flex-col items-center gap-3 p-6 rounded-2xl border bg-card hover:border-violet-400 hover:shadow-lg hover:scale-[1.03] transition-all group"
+              onClick={() => { haptic(15); onSelect(profile); }}
+              className="flex flex-col items-center gap-3 p-6 rounded-2xl border bg-card hover:border-violet-400 hover:shadow-lg active:scale-95 transition-transform duration-75 touch-manipulation select-none group"
             >
               <div className={`w-16 h-16 rounded-2xl bg-gradient-to-br ${AVATAR_COLORS[i % AVATAR_COLORS.length]} flex items-center justify-center shadow-md group-hover:shadow-lg transition-shadow`}>
                 <span className="text-2xl font-bold text-white">
@@ -316,7 +322,7 @@ export function ProfileSelect({ familyCode, familyData, onSelect, onFamilyUpdate
           {/* + 프로필 추가 */}
           <button
             onClick={() => setStep("master_verify")}
-            className="flex flex-col items-center gap-3 p-6 rounded-2xl border border-dashed bg-card/50 hover:border-violet-400 hover:bg-card hover:scale-[1.03] transition-all group"
+            className="flex flex-col items-center gap-3 p-6 rounded-2xl border border-dashed bg-card/50 hover:border-violet-400 hover:bg-card active:scale-95 transition-transform duration-75 touch-manipulation select-none group"
           >
             <div className="w-16 h-16 rounded-2xl border-2 border-dashed border-muted-foreground/30 group-hover:border-violet-400 flex items-center justify-center transition-colors">
               <UserPlus className="w-7 h-7 text-muted-foreground/50 group-hover:text-violet-500 transition-colors" />

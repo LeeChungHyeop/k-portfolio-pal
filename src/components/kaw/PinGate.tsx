@@ -26,13 +26,19 @@ const AVATAR_COLORS = [
   "from-rose-500 to-pink-500",
 ];
 
+function haptic(ms = 10) {
+  if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+    navigator.vibrate(ms);
+  }
+}
+
 function PinDots({ value, maxLen = 4 }: { value: string; maxLen?: number }) {
   return (
     <div className="flex gap-3 justify-center my-6">
       {Array.from({ length: maxLen }).map((_, i) => (
         <div
           key={i}
-          className={`w-4 h-4 rounded-full border-2 transition-all ${
+          className={`w-4 h-4 rounded-full border-2 transition-transform duration-75 ${
             i < value.length
               ? "bg-violet-500 border-violet-500 scale-110"
               : "border-muted-foreground/40"
@@ -50,14 +56,16 @@ function PinPad({ onDigit, onDelete }: { onDigit: (d: string) => void; onDelete:
       {keys.map((k, i) => {
         if (!k) return <div key={i} />;
         if (k === "⌫") return (
-          <button key={i} onClick={onDelete}
-            className="h-14 rounded-2xl text-lg font-medium bg-muted/50 hover:bg-muted active:scale-95 transition-all">
+          <button key={i}
+            onPointerDown={(e) => { e.preventDefault(); haptic(); onDelete(); }}
+            className="h-14 rounded-2xl text-lg font-medium bg-muted/50 hover:bg-muted active:scale-90 active:bg-muted transition-transform duration-75 touch-manipulation select-none">
             {k}
           </button>
         );
         return (
-          <button key={i} onClick={() => onDigit(k)}
-            className="h-14 rounded-2xl text-lg font-semibold bg-card border hover:bg-muted active:scale-95 transition-all shadow-sm">
+          <button key={i}
+            onPointerDown={(e) => { e.preventDefault(); haptic(); onDigit(k); }}
+            className="h-14 rounded-2xl text-lg font-semibold bg-card border hover:bg-muted active:scale-90 active:bg-muted/80 transition-transform duration-75 shadow-sm touch-manipulation select-none">
             {k}
           </button>
         );
