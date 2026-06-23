@@ -23,24 +23,19 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   RotateCcw, Download, Upload, FileSpreadsheet, Trash2,
   KeyRound, Shield, CheckCircle2, AlertCircle, RefreshCw,
-  Plus, X, Save, Settings, MessageSquare,
+  Plus, X, Save, Settings, MessageSquare, Users,
 } from "lucide-react";
 import {
-  type FamilyData,
+  type FamilyData, type ProfileConfig,
   verifyPin, updatePin, verifyMasterCode, updateMasterCode,
+  softDeleteProfile, hardDeleteProfile,
 } from "@/lib/kaw/auth";
 import {
   SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, type SQIndex,
 } from "@/lib/kaw/secretQuestions";
 
 // ── Main tab types ─────────────────────────────────────────────────────────
-type MainTab = "investment" | "data" | "security";
-
-const MAIN_TABS: { id: MainTab; label: string }[] = [
-  { id: "investment", label: "투자성향" },
-  { id: "data",       label: "데이터 관리" },
-  { id: "security",   label: "보안" },
-];
+type MainTab = "investment" | "data" | "security" | "users";
 
 // ── Props ──────────────────────────────────────────────────────────────────
 interface SettingsProps {
@@ -141,6 +136,16 @@ function parseExcelWorkbook(wb: XLSX.WorkBook): Record<AccountId, AccountState> 
 // Main Component
 // ══════════════════════════════════════════════════════════════════════════════
 export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
+  const { currentUser } = usePortfolioStore();
+  const isMaster = currentUser === "hyeobi";
+
+  const MAIN_TABS: { id: MainTab; label: string }[] = [
+    { id: "investment", label: "투자성향" },
+    { id: "data",       label: "데이터 관리" },
+    { id: "security",   label: "보안" },
+    ...(isMaster ? [{ id: "users" as MainTab, label: "사용자 관리" }] : []),
+  ];
+
   const [mainTab, setMainTab] = useState<MainTab>("investment");
   const [unsavedWarning, setUnsavedWarning] = useState<AccountId[]>([]);
   const investTabRef = useRef<{ getUnsavedAccounts: () => AccountId[] }>(null);
@@ -171,7 +176,7 @@ export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
                   key={id}
                   onClick={() => handleTabChange(id)}
                   className={[
-                    "px-6 py-2.5 text-sm font-semibold rounded-t-lg border-x border-t transition-all select-none",
+                    "px-5 py-2.5 text-sm font-semibold rounded-t-lg border-x border-t transition-all select-none",
                     isActive
                       ? "bg-background text-foreground border-border relative -mb-px pb-3.5 shadow-sm z-10"
                       : "bg-muted/50 text-muted-foreground border-border/50 hover:bg-muted hover:text-foreground ml-0.5",
@@ -204,6 +209,7 @@ export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
           {mainTab === "investment" && <InvestmentTab ref={investTabRef} />}
           {mainTab === "data"       && <DataTab />}
           {mainTab === "security"   && <SecurityTab familyData={familyData} onFamilyUpdate={onFamilyUpdate} />}
+          {mainTab === "users" && isMaster && <UserManagementTab familyData={familyData} onFamilyUpdate={onFamilyUpdate} />}
         </div>
       </div>
     </div>
@@ -1262,7 +1268,7 @@ interface SecurityTabProps {
 
 function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
   const { currentUser, familyCode } = usePortfolioStore();
-  const isAdmin = familyData.profiles.find((p) => p.id === currentUser)?.is_admin ?? false;
+  const canChangeMasterCode = currentUser === "hyeobi";
 
   // PIN change
   const [pinCurrent, setPinCurrent] = useState("");
@@ -1391,14 +1397,14 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
         </form>
       </Card>
 
-      {/* 마스터 코드 변경 (관리자 전용) */}
-      {isAdmin && (
+      {/* 마스터 코드 변경 (혀비 전용) */}
+      {canChangeMasterCode && (
         <Card className="p-6 space-y-4">
           <div className="flex items-center gap-2">
             <Shield className="w-5 h-5 text-amber-500" />
             <div>
               <h3 className="font-semibold">액세스 코드(마스터) 변경</h3>
-              <p className="text-xs text-muted-foreground">관리자 프로필 전용 · 기본값은 앱 액세스 코드와 동일</p>
+              <p className="text-xs text-muted-foreground">혀비 프로필 전용 · 기본값은 앱 액세스 코드와 동일</p>
             </div>
           </div>
           <form onSubmit={handleMcChange} className="space-y-3 max-w-sm">
@@ -1509,6 +1515,209 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
           </div>
         </Card>
       )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 사용자 관리 탭 (혀비 전용)
+// ══════════════════════════════════════════════════════════════════════════════
+interface UserManagementTabProps {
+  familyData: FamilyData;
+  onFamilyUpdate: (fd: FamilyData) => void;
+}
+
+type DeleteStep = "choose" | "verify";
+type DeleteMode = "soft" | "hard";
+
+function UserManagementTab({ familyData, onFamilyUpdate }: UserManagementTabProps) {
+  const { familyCode } = usePortfolioStore();
+  const [deleteTarget, setDeleteTarget] = useState<ProfileConfig | null>(null);
+  const [deleteMode, setDeleteMode] = useState<DeleteMode | null>(null);
+  const [deleteStep, setDeleteStep] = useState<DeleteStep>("choose");
+  const [masterInput, setMasterInput] = useState("");
+  const [masterError, setMasterError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [doneMsg, setDoneMsg] = useState<string | null>(null);
+
+  const nonMasterProfiles = familyData.profiles.filter((p) => p.id !== "hyeobi");
+
+  const AVATAR_COLORS = [
+    "from-emerald-500 to-teal-500",
+    "from-amber-500 to-orange-500",
+    "from-rose-500 to-pink-500",
+    "from-sky-500 to-cyan-500",
+    "from-purple-500 to-indigo-500",
+  ];
+
+  function openDelete(profile: ProfileConfig) {
+    setDeleteTarget(profile);
+    setDeleteMode(null);
+    setDeleteStep("choose");
+    setMasterInput("");
+    setMasterError(null);
+  }
+
+  function closeDelete() {
+    setDeleteTarget(null);
+    setDeleteMode(null);
+    setDeleteStep("choose");
+    setMasterInput("");
+    setMasterError(null);
+  }
+
+  async function handleDeleteConfirm(e: React.FormEvent) {
+    e.preventDefault();
+    if (!deleteTarget || !deleteMode || !familyCode) return;
+    const ok = await verifyMasterCode(masterInput, familyData, familyCode);
+    if (!ok) {
+      setMasterError("마스터 코드가 일치하지 않습니다.");
+      setMasterInput("");
+      return;
+    }
+    setLoading(true);
+    try {
+      let updated: FamilyData;
+      if (deleteMode === "soft") {
+        updated = await softDeleteProfile(familyCode, deleteTarget.id, familyData);
+        setDoneMsg(`${deleteTarget.label} 프로필이 삭제됐습니다. 데이터는 보존됩니다.`);
+      } else {
+        updated = await hardDeleteProfile(familyCode, deleteTarget.id, familyData);
+        setDoneMsg(`${deleteTarget.label}의 모든 데이터가 삭제됐습니다.`);
+      }
+      onFamilyUpdate(updated);
+      closeDelete();
+      setTimeout(() => setDoneMsg(null), 4000);
+    } catch (err: unknown) {
+      setMasterError((err as { message?: string })?.message ?? "삭제 중 오류가 발생했습니다.");
+    }
+    setLoading(false);
+  }
+
+  return (
+    <div className="space-y-6">
+      <Card className="p-6 space-y-4">
+        <div className="flex items-center gap-2">
+          <Users className="w-5 h-5 text-violet-500" />
+          <div>
+            <h3 className="font-semibold">사용자 관리</h3>
+            <p className="text-xs text-muted-foreground">혀비 계정을 제외한 프로필을 관리합니다.</p>
+          </div>
+        </div>
+
+        {doneMsg && (
+          <div className="flex items-center gap-2 text-xs text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 rounded-xl px-3 py-2.5">
+            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />{doneMsg}
+          </div>
+        )}
+
+        {nonMasterProfiles.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-6 text-center">관리할 프로필이 없습니다.</p>
+        ) : (
+          <div className="space-y-2">
+            {nonMasterProfiles.map((p, i) => (
+              <div key={p.id} className="flex items-center justify-between p-3 rounded-xl border bg-muted/20">
+                <div className="flex items-center gap-3">
+                  <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${AVATAR_COLORS[i % AVATAR_COLORS.length]} flex items-center justify-center shrink-0`}>
+                    <span className="text-sm font-bold text-white">{p.label.charAt(0)}</span>
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium">{p.label}</p>
+                    <p className="text-xs text-muted-foreground">{p.id}</p>
+                  </div>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => openDelete(p)}
+                  className="text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 hover:border-rose-300 dark:hover:border-rose-800"
+                >
+                  <Trash2 className="w-3.5 h-3.5 mr-1" /> 삭제
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* 삭제 다이얼로그 */}
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && closeDelete()}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Trash2 className="w-4 h-4 text-rose-500" />
+              프로필 삭제
+            </DialogTitle>
+          </DialogHeader>
+
+          {deleteStep === "choose" && (
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                <span className="font-semibold text-foreground">{deleteTarget?.label}</span> 프로필을 어떻게 삭제할까요?
+              </p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => { setDeleteMode("soft"); setDeleteStep("verify"); }}
+                  className="w-full p-4 text-left rounded-xl border hover:border-violet-400 hover:bg-violet-500/5 transition-all"
+                >
+                  <p className="text-sm font-semibold">프로필만 삭제</p>
+                  <p className="text-xs text-muted-foreground mt-1">계좌 데이터는 보존됩니다. 나중에 같은 이름으로 다시 만들면 데이터를 복원할 수 있습니다.</p>
+                </button>
+                <button
+                  onClick={() => { setDeleteMode("hard"); setDeleteStep("verify"); }}
+                  className="w-full p-4 text-left rounded-xl border border-rose-200/40 dark:border-rose-900/40 hover:border-rose-400 hover:bg-rose-500/5 transition-all"
+                >
+                  <p className="text-sm font-semibold text-rose-600 dark:text-rose-400">데이터 모두 삭제</p>
+                  <p className="text-xs text-muted-foreground mt-1">프로필과 모든 계좌 히스토리가 영구 삭제됩니다. 복원 불가.</p>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {deleteStep === "verify" && (
+            <form onSubmit={handleDeleteConfirm} className="space-y-3">
+              <div className={`p-3 rounded-xl text-xs ${deleteMode === "hard" ? "bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-300/30" : "bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-300/30"}`}>
+                {deleteMode === "hard"
+                  ? `⚠️ ${deleteTarget?.label}의 모든 데이터가 영구 삭제됩니다. 되돌릴 수 없습니다.`
+                  : `${deleteTarget?.label} 프로필을 삭제합니다. 계좌 데이터는 보존됩니다.`}
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">마스터 코드를 입력하여 확인</label>
+                <input
+                  type="password"
+                  value={masterInput}
+                  onChange={(e) => { setMasterInput(e.target.value); setMasterError(null); }}
+                  placeholder="마스터 코드"
+                  autoFocus
+                  autoComplete="off"
+                  className="w-full h-10 px-3 rounded-lg border bg-background text-sm outline-none focus:ring-2 focus:ring-amber-500/40 focus:border-amber-500 transition-all"
+                />
+              </div>
+              {masterError && (
+                <div className="flex items-center gap-2 text-xs text-rose-500 bg-rose-500/10 rounded-lg px-3 py-2">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />{masterError}
+                </div>
+              )}
+              <DialogFooter className="gap-2 pt-1">
+                <Button type="button" variant="outline" size="sm" onClick={() => setDeleteStep("choose")}>
+                  이전
+                </Button>
+                <Button
+                  type="submit"
+                  size="sm"
+                  variant={deleteMode === "hard" ? "destructive" : "default"}
+                  disabled={loading || !masterInput}
+                >
+                  {loading
+                    ? <RefreshCw className="w-3.5 h-3.5 mr-1 animate-spin" />
+                    : <Trash2 className="w-3.5 h-3.5 mr-1" />}
+                  삭제 확인
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

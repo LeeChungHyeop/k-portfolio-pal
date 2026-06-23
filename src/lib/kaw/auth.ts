@@ -10,6 +10,7 @@ export interface ProfileConfig {
 export interface FamilyData {
   profiles: ProfileConfig[];
   master_code_hash?: string | null;
+  deleted_profiles?: ProfileConfig[];
 }
 
 const FAMILY_CACHE_KEY = (code: string) => `kaw.family.${code}`;
@@ -145,6 +146,58 @@ export async function updateMasterCode(
   const h = await sha256(`master:${newCode}`);
   const updated: FamilyData = { ...family, master_code_hash: h };
   await saveFamilyData(familyCode, updated);
+  return updated;
+}
+
+export async function softDeleteProfile(
+  code: string,
+  profileId: string,
+  family: FamilyData
+): Promise<FamilyData> {
+  const profile = family.profiles.find((p) => p.id === profileId);
+  if (!profile) throw new Error("프로필을 찾을 수 없습니다.");
+  const updated: FamilyData = {
+    ...family,
+    profiles: family.profiles.filter((p) => p.id !== profileId),
+    deleted_profiles: [...(family.deleted_profiles ?? []), profile],
+  };
+  await saveFamilyData(code, updated);
+  return updated;
+}
+
+export async function hardDeleteProfile(
+  code: string,
+  profileId: string,
+  family: FamilyData
+): Promise<FamilyData> {
+  const updated: FamilyData = {
+    ...family,
+    profiles: family.profiles.filter((p) => p.id !== profileId),
+    deleted_profiles: (family.deleted_profiles ?? []).filter((p) => p.id !== profileId),
+  };
+  try { localStorage.removeItem(`kaw.v2.${code}.${profileId}`); } catch {}
+  if (supabase) {
+    await supabase.from("kaw_data").delete()
+      .eq("family_code", code)
+      .eq("profile", profileId);
+  }
+  await saveFamilyData(code, updated);
+  return updated;
+}
+
+export async function restoreProfile(
+  code: string,
+  profileId: string,
+  family: FamilyData
+): Promise<FamilyData> {
+  const profile = (family.deleted_profiles ?? []).find((p) => p.id === profileId);
+  if (!profile) throw new Error("삭제된 프로필을 찾을 수 없습니다.");
+  const updated: FamilyData = {
+    ...family,
+    profiles: [...family.profiles, profile],
+    deleted_profiles: (family.deleted_profiles ?? []).filter((p) => p.id !== profileId),
+  };
+  await saveFamilyData(code, updated);
   return updated;
 }
 
