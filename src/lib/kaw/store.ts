@@ -180,13 +180,13 @@ function recalcReturns(history: HistoryEntry[]): HistoryEntry[] {
   });
 }
 
-function migrateState(parsed: StoreState): StoreState {
+function migrateState(parsed: StoreState, injectSeed = false): StoreState {
   const seed = seedState();
   // Migrate global MP → growth if leftover
   if ((parsed.profile as string) === "MP") parsed.profile = "growth";
 
   for (const id of ACCOUNT_IDS) {
-    if (!parsed.accounts[id]) { parsed.accounts[id] = seed.accounts[id]; continue; }
+    if (!parsed.accounts[id]) { parsed.accounts[id] = injectSeed ? seed.accounts[id] : { ...seed.accounts[id], history: [] }; continue; }
     const acc = parsed.accounts[id];
 
     // Inject per-account settings defaults if missing
@@ -214,19 +214,23 @@ function migrateState(parsed: StoreState): StoreState {
     acc.holdings = ASSET_ORDER.map((k) => existing.get(k) ?? { assetKey: k, etfName: acc.etfNames[k], value: 0 });
 
     if (!acc.history?.length) {
-      acc.history = seed.accounts[id].history;
-    } else {
+      acc.history = injectSeed ? seed.accounts[id].history : [];
+    } else if (injectSeed) {
       const seedMap = new Map(seed.accounts[id].history.map((h) => [h.id, h]));
       acc.history = acc.history.map((h) => {
         const s = seedMap.get(h.id);
         if (s && !h.holdings) return { ...s, returnPct: h.returnPct };
         return { ...h, baseAmount: (h as HistoryEntry & { baseAmount?: number }).baseAmount ?? 0 };
       });
+    } else {
+      acc.history = acc.history.map((h) => ({
+        ...h, baseAmount: (h as HistoryEntry & { baseAmount?: number }).baseAmount ?? 0,
+      }));
     }
     if (!acc.rebalanceDate) acc.rebalanceDate = new Date().toISOString().slice(0, 10);
 
     // IRP 첫 항목 baseAmount 오류 수정 (3120898 → 3000000)
-    if (id === "irp" && acc.history.length > 0 && acc.history[0].id === "seed-2025-12-29" && acc.history[0].baseAmount === 3120898) {
+    if (injectSeed && id === "irp" && acc.history.length > 0 && acc.history[0].id === "seed-2025-12-29" && acc.history[0].baseAmount === 3120898) {
       acc.history = [{ ...acc.history[0], baseAmount: 3000000 }, ...acc.history.slice(1)];
     }
 
@@ -312,24 +316,42 @@ let isReceivingRealtime = false;
 function notify() { listeners.forEach((l) => l()); }
 
 // ── Local storage helpers ──────────────────────────────────────────────────
+const sharedLibKey = (code: string) => `kaw.v2.${code}._lib`;
+function saveSharedLib(code: string, lib: AssetDef[] | undefined) {
+  if (!lib || typeof window === "undefined") return;
+  try { localStorage.setItem(sharedLibKey(code), JSON.stringify(lib)); } catch {}
+}
+function loadSharedLib(code: string): AssetDef[] | undefined {
+  try {
+    const raw = localStorage.getItem(sharedLibKey(code));
+    return raw ? JSON.parse(raw) as AssetDef[] : undefined;
+  } catch { return undefined; }
+}
+
 function saveLocal(state: StoreState) {
   if (typeof window === "undefined" || !currentUser) return;
   const key = familyCode ? storeKey(familyCode, currentUser) : LEGACY_STORE_KEY;
   try { localStorage.setItem(key, JSON.stringify(state)); } catch {}
+  if (familyCode) saveSharedLib(familyCode, state.assetLibrary);
 }
 
 function loadLocal(): StoreState {
   if (typeof window === "undefined" || !currentUser) return emptyState();
+  const isSeed = currentUser === "hyeobi";
   if (familyCode) {
+    let st: StoreState | null = null;
     try {
       const raw = localStorage.getItem(storeKey(familyCode, currentUser));
-      if (raw) return migrateState(JSON.parse(raw) as StoreState);
+      if (raw) st = migrateState(JSON.parse(raw) as StoreState, isSeed);
     } catch {}
-    return currentUser === "hyeobi" ? seedState() : emptyState();
+    if (!st) st = isSeed ? seedState() : emptyState();
+    const sharedLib = loadSharedLib(familyCode);
+    if (sharedLib?.some(d => !d.isBuiltIn)) st = { ...st, assetLibrary: sharedLib };
+    return st;
   }
   try {
     const raw = localStorage.getItem(LEGACY_STORE_KEY);
-    if (raw) return migrateState(JSON.parse(raw) as StoreState);
+    if (raw) return migrateState(JSON.parse(raw) as StoreState, true);
   } catch {}
   return seedState();
 }
@@ -342,25 +364,30 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
   try {
     const { data, error } = await supabase
       .from("kaw_data")
-      .select("account_type, data")
+      .select("account_type, data, profile")
       .eq("family_code", code)
-      .eq("profile", user);
+      .in("profile", [user, "_shared"]);
     if (error) throw error;
     if (!data?.length) return null;
 
     let profileKey: ProfileKey = "growth";
     let allocations = structuredClone(PROFILE_PRESETS);
     let assetLibrary: AssetDef[] | undefined;
+    let sharedAssetLibrary: AssetDef[] | undefined;
     const accounts: Partial<Record<AccountId, AccountState>> = {};
 
     for (const row of data) {
-      if (row.account_type === "_meta") {
-        const m = row.data as { profile: ProfileKey; allocations: typeof allocations; assetLibrary?: AssetDef[] };
-        profileKey = m.profile ?? "growth";
-        allocations = m.allocations ?? allocations;
-        assetLibrary = m.assetLibrary;
-      } else if (ACCOUNT_IDS.includes(row.account_type as AccountId)) {
-        accounts[row.account_type as AccountId] = row.data as AccountState;
+      if ((row as { profile: string }).profile === "_shared" && row.account_type === "_assetLib") {
+        sharedAssetLibrary = (row.data as { assetLibrary?: AssetDef[] }).assetLibrary;
+      } else if ((row as { profile: string }).profile === user) {
+        if (row.account_type === "_meta") {
+          const m = row.data as { profile: ProfileKey; allocations: typeof allocations; assetLibrary?: AssetDef[] };
+          profileKey = m.profile ?? "growth";
+          allocations = m.allocations ?? allocations;
+          assetLibrary = m.assetLibrary;
+        } else if (ACCOUNT_IDS.includes(row.account_type as AccountId)) {
+          accounts[row.account_type as AccountId] = row.data as AccountState;
+        }
       }
     }
 
@@ -368,7 +395,7 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
     return {
       profile: profileKey,
       allocations,
-      assetLibrary,
+      assetLibrary: sharedAssetLibrary ?? assetLibrary,
       accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, accounts[id] ?? fallback.accounts[id]])) as Record<AccountId, AccountState>,
     };
   } catch (e) {
@@ -382,6 +409,7 @@ async function dbSave(code: string, user: string, state: StoreState) {
   const now = new Date().toISOString();
   const rows: DbRow[] = [
     { family_code: code, profile: user, account_type: "_meta", data: { profile: state.profile, allocations: state.allocations, assetLibrary: state.assetLibrary }, updated_at: now },
+    { family_code: code, profile: "_shared", account_type: "_assetLib", data: { assetLibrary: state.assetLibrary }, updated_at: now },
     ...ACCOUNT_IDS.map((id) => ({ family_code: code, profile: user, account_type: id, data: state.accounts[id], updated_at: now })),
   ];
   const { error } = await supabase.from("kaw_data").upsert(rows, { onConflict: "family_code,profile,account_type" });
@@ -516,7 +544,7 @@ export async function activateProfile(profileId: string): Promise<void> {
     const loaded = await dbLoad(familyCode, profileId);
     if (loaded) {
       // DB 데이터는 반드시 migrateState를 거쳐 새 필드(profileRows 등)를 초기화
-      memState = migrateState(loaded);
+      memState = migrateState(loaded, profileId === "hyeobi");
     } else {
       // DB 실패 시 로컬 캐시 우선 사용 (로컬 캐시도 내부에서 migrateState 적용)
       memState = loadLocal();
@@ -535,7 +563,7 @@ export async function syncNow(): Promise<void> {
   notify();
   try {
     const state = await dbLoad(familyCode, currentUser);
-    if (state) { memState = migrateState(state); saveLocal(memState); }
+    if (state) { memState = migrateState(state, currentUser === "hyeobi"); saveLocal(memState); }
     subscribeRealtime(familyCode);
   } catch (e) {
     console.error("[kaw] syncNow error:", e);
@@ -620,7 +648,7 @@ async function initFromStorage() {
     if (hasSupabase) {
       try {
         const dbState = await dbLoad(code, sessionProfile);
-        if (dbState) { memState = migrateState(dbState); saveLocal(memState); notify(); }
+        if (dbState) { memState = migrateState(dbState, sessionProfile === "hyeobi"); saveLocal(memState); notify(); }
       } catch {}
     }
     subscribeRealtime(code);

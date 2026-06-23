@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { TrendingUp, TrendingDown, Minus, Camera, Plus, Trash2, ChevronDown, ChevronRight, CheckCircle2, Save } from "lucide-react";
+import { Camera, Plus, Trash2, ChevronDown, ChevronRight, CheckCircle2, Save } from "lucide-react";
 
 // 콤마 포맷 숫자 입력 — null=비포커스(콤마표시), string=포커스(raw 숫자)
 function NumberInput({ value, onChange, className, placeholder }: {
@@ -200,13 +200,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           <Table>
             <TableHeader>
               <TableRow className="bg-muted/50">
-                <TableHead className="py-2 px-2 sm:px-4 text-xs sm:text-sm">자산</TableHead>
+                <TableHead className="py-2 px-1 sm:px-3 text-xs w-[72px] sm:w-auto">자산</TableHead>
                 <TableHead className="hidden md:table-cell">ETF 종목명</TableHead>
                 <TableHead className="hidden md:table-cell text-right w-12">비중</TableHead>
                 <TableHead className="hidden lg:table-cell text-right">기준금액</TableHead>
                 <TableHead className="hidden lg:table-cell text-right">이전 평가</TableHead>
-                <TableHead className="text-right py-2 px-2 sm:px-4 text-xs sm:text-sm whitespace-nowrap">현재평가</TableHead>
-                <TableHead className="text-right py-2 px-2 sm:px-4 text-xs sm:text-sm whitespace-nowrap">추가매수</TableHead>
+                <TableHead className="text-right py-2 px-1 sm:px-3 text-xs whitespace-nowrap">현재평가</TableHead>
+                <TableHead className="text-right py-2 px-1 sm:px-3 text-xs whitespace-nowrap">추가매수</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -219,13 +219,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
               ) : (
                 rows.map((r) => (
                   <TableRow key={r.rowId} className="hover:bg-muted/30">
-                    <TableCell className="py-2 px-2 sm:px-4">
-                      <div className="flex items-center gap-1 text-[11px] sm:text-xs">
-                        <span className="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full shrink-0"
+                    <TableCell className="py-2 px-1 sm:px-3">
+                      <div className="flex items-center gap-1 text-[10px] sm:text-xs">
+                        <span className="w-1.5 h-1.5 rounded-full shrink-0"
                           style={{ background: GROUP_COLORS[r.group] ?? "#888" }} />
-                        <span className="truncate max-w-[60px] sm:max-w-none">{r.group}</span>
+                        <span className="truncate max-w-[52px] sm:max-w-none">{r.group}</span>
                       </div>
-                      <div className="text-[11px] sm:text-xs text-muted-foreground mt-0.5 leading-tight">{r.label}</div>
+                      <div className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 leading-tight truncate max-w-[68px] sm:max-w-none">{r.label}</div>
                     </TableCell>
                     <TableCell className="hidden md:table-cell">
                       <span className="text-sm text-muted-foreground leading-tight block truncate max-w-[180px]" title={r.etfName}>
@@ -237,15 +237,15 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                     <TableCell className="hidden lg:table-cell text-right text-sm tabular-nums text-muted-foreground">
                       {r.prevValue != null ? formatKRW(r.prevValue) : "—"}
                     </TableCell>
-                    <TableCell className="text-right py-2 px-1 sm:px-4">
+                    <TableCell className="text-right py-2 px-1 sm:px-3">
                       <NumberInput
                         value={r.value}
                         onChange={(v) => updateRowHolding(accountId, r.rowId, v)}
                         placeholder="0"
-                        className="h-7 sm:h-8 text-xs sm:text-sm text-right tabular-nums w-[4.5rem] sm:w-28"
+                        className="h-7 text-xs text-right tabular-nums w-[5.5rem] sm:w-28"
                       />
                     </TableCell>
-                    <TableCell className="text-right py-2 px-1 sm:px-4"><RebalanceCell diff={r.diff} /></TableCell>
+                    <TableCell className="text-right py-2 px-1 sm:px-3"><RebalanceCell diff={r.diff} /></TableCell>
                   </TableRow>
                 ))
               )}
@@ -533,7 +533,7 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
 }
 
 function RebalanceCell({ diff }: { diff: number }) {
-  if (Math.abs(diff) < 1) return <span className="text-muted-foreground inline-flex items-center gap-1 text-sm"><Minus className="w-3 h-3" />—</span>;
-  if (diff > 0) return <span className="text-emerald-500 inline-flex items-center gap-1 text-sm font-semibold tabular-nums"><TrendingUp className="w-3.5 h-3.5" />+{formatKRW(diff)}</span>;
-  return <span className="text-rose-500 inline-flex items-center gap-1 text-sm font-semibold tabular-nums"><TrendingDown className="w-3.5 h-3.5" />{formatKRW(diff)}</span>;
+  if (Math.abs(diff) < 1) return <span className="text-muted-foreground text-xs">—</span>;
+  if (diff > 0) return <span className="text-emerald-500 text-xs font-semibold tabular-nums">+{formatKRW(diff)}</span>;
+  return <span className="text-rose-500 text-xs font-semibold tabular-nums">{formatKRW(diff)}</span>;
 }

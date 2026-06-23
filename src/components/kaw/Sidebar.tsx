@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, Moon, X, LogOut, RefreshCw, Users, Cloud, CloudOff } from "lucide-react";
+import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff } from "lucide-react";
 import { usePortfolioStore, syncNow } from "@/lib/kaw/store";
 import { type FamilyData } from "@/lib/kaw/auth";
 
@@ -178,12 +178,10 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
           onClick={() => setDark(!dark)}
           className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-all"
         >
-          {dark
-            ? <><Sun className="w-4 h-4 shrink-0 text-amber-400" /><span>라이트 모드</span></>
-            : <><Moon className="w-4 h-4 shrink-0 text-slate-500" /><span>다크 모드</span></>
-          }
-          <div className={`ml-auto w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${dark ? "bg-violet-500" : "bg-muted-foreground/30"}`}>
-            <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${dark ? "translate-x-4" : "translate-x-0"}`} />
+          <Sun className={`w-4 h-4 shrink-0 ${!dark ? "text-amber-400" : ""}`} />
+          <span>라이트 모드</span>
+          <div className={`ml-auto w-9 h-5 rounded-full transition-colors flex items-center px-0.5 ${!dark ? "bg-violet-500" : "bg-muted-foreground/30"}`}>
+            <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${!dark ? "translate-x-4" : "translate-x-0"}`} />
           </div>
         </button>
 
