@@ -7,7 +7,11 @@ import {
   ResponsiveContainer, CartesianGrid, Legend, ReferenceLine,
   PieChart, Pie, Cell,
 } from "recharts";
-import { TrendingUp, TrendingDown, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { TrendingUp, TrendingDown, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, ChevronRight } from "lucide-react";
+import type { Page } from "@/components/kaw/Sidebar";
+
+const fmtAxis = (v: number) =>
+  v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
 
 const ACCOUNT_COLORS: Record<string, string> = {
   retirement: "oklch(0.62 0.18 250)",
@@ -110,7 +114,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   );
 }
 
-export function Dashboard() {
+export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
   const { state } = usePortfolioStore();
   const [returnTab, setReturnTab] = useState<GranularityTab>("monthly");
 
@@ -260,16 +264,24 @@ export function Dashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         {accountSummaries.map((a) => {
           const isUp = (a.latestReturnPct ?? 0) >= 0;
+          const targetPage = a.id as Page;
           return (
-            <Card key={a.id} className="p-4 space-y-1">
+            <Card
+              key={a.id}
+              onClick={() => onNavigate?.(targetPage)}
+              className={`p-4 space-y-1 transition-all ${onNavigate ? "cursor-pointer hover:border-violet-400/60 hover:shadow-md hover:scale-[1.01]" : ""}`}
+            >
               <div className="flex items-center justify-between gap-1">
                 <p className="text-sm font-medium truncate">{a.label}</p>
-                {a.latestReturnPct !== null && (
-                  <span className={`flex items-center gap-0.5 text-xs font-medium shrink-0 ${isUp ? "text-emerald-600" : "text-rose-600"}`}>
-                    {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                    {formatPct(a.latestReturnPct)}
-                  </span>
-                )}
+                <div className="flex items-center gap-1 shrink-0">
+                  {a.latestReturnPct !== null && (
+                    <span className={`flex items-center gap-0.5 text-xs font-medium ${isUp ? "text-emerald-600" : "text-rose-600"}`}>
+                      {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                      {formatPct(a.latestReturnPct)}
+                    </span>
+                  )}
+                  {onNavigate && <ChevronRight className="w-3.5 h-3.5 text-muted-foreground/50" />}
+                </div>
               </div>
               <p className="text-lg md:text-xl font-bold tabular-nums">{formatKRW(a.histTotal)}</p>
               {a.last && (
@@ -470,7 +482,7 @@ export function Dashboard() {
               <BarChart data={monthlyDepositData} barCategoryGap="30%">
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                 <XAxis dataKey="label" tick={{ fontSize: 10 }} />
-                <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${(v / 10000).toFixed(0)}만`} width={46} />
+                <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={46} />
                 <Tooltip content={<DepositTooltip />} />
                 <Legend formatter={(name) => ACCOUNT_LABELS_SHORT[name as keyof typeof ACCOUNT_LABELS_SHORT] ?? name} />
                 {ACCOUNT_IDS.map((id) => (
@@ -491,7 +503,7 @@ export function Dashboard() {
               <LineChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                 <XAxis dataKey="label" tick={{ fontSize: 10 }} />
-                <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${(v / 10000).toFixed(0)}만`} width={50} />
+                <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={50} />
                 <Tooltip content={<DashboardTooltip />} />
                 <Legend formatter={(name) => ACCOUNT_LABELS_SHORT[name as keyof typeof ACCOUNT_LABELS_SHORT] ?? name} />
                 {ACCOUNT_IDS.map((id) => (
@@ -519,7 +531,7 @@ export function Dashboard() {
                       <XAxis dataKey="label" tick={{ fontSize: 10 }} />
                       <YAxis
                         tick={{ fontSize: 10 }}
-                        tickFormatter={(v) => `${(v / 10000).toFixed(0)}만`}
+                        tickFormatter={fmtAxis}
                         width={50}
                         domain={[(dataMin: number) => Math.floor(dataMin * 0.97), (dataMax: number) => Math.ceil(dataMax * 1.01)]}
                       />

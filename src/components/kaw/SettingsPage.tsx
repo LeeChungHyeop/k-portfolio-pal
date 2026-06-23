@@ -23,8 +23,9 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   RotateCcw, Download, Upload, FileSpreadsheet, Trash2,
   KeyRound, Shield, CheckCircle2, AlertCircle, RefreshCw,
-  Plus, X, Save, Settings, MessageSquare, Users,
+  Plus, X, Save, Settings, MessageSquare, Users, ChevronUp, ChevronDown,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   type FamilyData, type ProfileConfig,
   verifyPin, updatePin, verifyMasterCode, updateMasterCode,
@@ -328,6 +329,26 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
     setAddLabel(""); setAddEtf(""); setShowAddFor(null);
   }
 
+  function moveLabel(label: string, direction: -1 | 1) {
+    setDraftLib((prev) => {
+      // separate into before-this-group, this-group, after-this-group
+      const firstGroupIdx = prev.findIndex((d) => d.group === activeGroup);
+      const lastGroupIdx = prev.reduce((acc, d, i) => d.group === activeGroup ? i : acc, -1);
+      if (firstGroupIdx < 0) return prev;
+      const before = prev.slice(0, firstGroupIdx);
+      const groupItems = prev.slice(firstGroupIdx, lastGroupIdx + 1);
+      const after = prev.slice(lastGroupIdx + 1);
+      // build ordered label list
+      const labels = Array.from(new Map(groupItems.map((d) => [d.label, true])).keys());
+      const idx = labels.indexOf(label);
+      const newIdx = idx + direction;
+      if (newIdx < 0 || newIdx >= labels.length) return prev;
+      [labels[idx], labels[newIdx]] = [labels[newIdx], labels[idx]];
+      const reordered = labels.flatMap((l) => groupItems.filter((d) => d.label === l));
+      return [...before, ...reordered, ...after];
+    });
+  }
+
   // Group draftLib entries by label within activeGroup
   const labelGroups = (() => {
     const seen = new Map<string, AssetDef[]>();
@@ -367,7 +388,7 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
         {/* 자산 목록 (자산명 기준 그룹핑) */}
         <ScrollArea className="flex-1 min-h-0 -mx-1 px-1">
           <div className="space-y-3 pb-2">
-            {labelGroups.map(({ label, defs }) => (
+            {labelGroups.map(({ label, defs }, groupIdx) => (
               <div key={label} className="space-y-1">
                 {/* 자산명 헤더 */}
                 <div className="flex items-center gap-2 px-1 py-0.5">
@@ -383,6 +404,22 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
                       </span>
                     )}
                   </span>
+                  <button
+                    onClick={() => moveLabel(label, -1)}
+                    disabled={groupIdx === 0}
+                    className="w-6 h-6 rounded flex items-center justify-center text-muted-foreground hover:text-violet-500 hover:bg-violet-500/10 transition-all disabled:opacity-25 shrink-0"
+                    title="위로"
+                  >
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => moveLabel(label, 1)}
+                    disabled={groupIdx === labelGroups.length - 1}
+                    className="w-6 h-6 rounded flex items-center justify-center text-muted-foreground hover:text-violet-500 hover:bg-violet-500/10 transition-all disabled:opacity-25 shrink-0"
+                    title="아래로"
+                  >
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  </button>
                   <button
                     onClick={() => { setShowAddFor(activeGroup); setAddLabel(label); setAddEtf(""); }}
                     className="text-muted-foreground hover:text-violet-500 transition-colors p-0.5 rounded"
@@ -1099,6 +1136,7 @@ function DataTab() {
   const { state, resetAll, importJson } = usePortfolioStore();
   const jsonFileRef = useRef<HTMLInputElement>(null);
   const xlsxFileRef = useRef<HTMLInputElement>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   function exportJson() {
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
@@ -1110,7 +1148,10 @@ function DataTab() {
 
   function onImportJson(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return;
-    f.text().then((t) => { try { importJson(JSON.parse(t)); } catch { alert("잘못된 JSON 파일입니다."); } });
+    f.text().then((t) => {
+      try { importJson(JSON.parse(t)); toast.success("JSON 가져오기 완료"); }
+      catch { toast.error("잘못된 JSON 파일입니다."); }
+    });
     e.target.value = "";
   }
 
@@ -1183,10 +1224,10 @@ function DataTab() {
         const wb = XLSX.read(data, { type: "array" });
         const parsed = parseExcelWorkbook(wb);
         const importedAccounts = Object.keys(parsed);
-        if (importedAccounts.length === 0) { alert("인식된 계좌 시트가 없습니다.\n시트명이 퇴직연금 / ISA / 연금저축 / IRP 인지 확인해주세요."); return; }
+        if (importedAccounts.length === 0) { toast.error("인식된 계좌 시트가 없습니다. 시트명을 확인해주세요."); return; }
         importJson({ ...state, accounts: { ...state.accounts, ...parsed } });
-        alert(`가져오기 완료!\n적용된 계좌: ${importedAccounts.map(id => ACCOUNT_LABELS_SHORT[id as AccountId]).join(", ")}`);
-      } catch (err) { alert(`엑셀 파일 읽기 실패: ${err}`); }
+        toast.success(`가져오기 완료 — ${importedAccounts.map(id => ACCOUNT_LABELS_SHORT[id as AccountId]).join(", ")}`);
+      } catch { toast.error("엑셀 파일을 읽을 수 없습니다."); }
     };
     reader.readAsArrayBuffer(f);
     e.target.value = "";
@@ -1249,11 +1290,25 @@ function DataTab() {
       {/* 초기화 */}
       <Card className="p-6">
         <h3 className="font-semibold mb-3">데이터 초기화</h3>
-        <Button variant="destructive" size="sm"
-          onClick={() => { if (confirm("모든 데이터를 초기화할까요?\n엑셀 원본 히스토리 데이터는 자동 복원됩니다.")) resetAll(); }}>
+        <Button variant="destructive" size="sm" onClick={() => setShowResetConfirm(true)}>
           <Trash2 className="w-4 h-4 mr-1.5" /> 전체 초기화
         </Button>
       </Card>
+
+      <Dialog open={showResetConfirm} onOpenChange={setShowResetConfirm}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>데이터 초기화</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">모든 데이터를 초기화할까요? 엑셀 원본 히스토리 데이터는 자동 복원됩니다.</p>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => setShowResetConfirm(false)}>취소</Button>
+            <Button variant="destructive" size="sm" onClick={() => { resetAll(); setShowResetConfirm(false); }}>
+              <Trash2 className="w-3.5 h-3.5 mr-1" /> 초기화
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

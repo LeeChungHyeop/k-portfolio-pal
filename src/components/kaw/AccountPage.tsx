@@ -7,7 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { Camera, Plus, Trash2, ChevronDown, ChevronRight, CheckCircle2, Save } from "lucide-react";
+import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil } from "lucide-react";
+import { toast } from "sonner";
+
+const fmtAxis = (v: number) =>
+  v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
 
 // 콤마 포맷 숫자 입력 — null=비포커스(콤마표시), string=포커스(raw 숫자)
 function NumberInput({ value, onChange, className, placeholder }: {
@@ -94,7 +98,6 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   const { state, updateAccount, updateRowHolding, addHistory } = usePortfolioStore();
   const account = state.accounts[accountId];
   const library = getOrDefaultLibrary(state);
-  const [saved, setSaved] = useState(false);
 
   const profile = account.profile ?? "growth";
   const profileRows = account.profileRows?.[profile] ?? [];
@@ -147,8 +150,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       deposit: account.deposit,
       holdings: holdingsSnap,
     });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2500);
+    toast.success("리밸런싱이 저장됐습니다");
   }
 
   return (
@@ -265,11 +267,6 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         </div>
 
         <div className="flex items-center justify-end gap-3">
-          {saved && (
-            <span className="flex items-center gap-1.5 text-sm text-emerald-500 font-medium animate-in fade-in slide-in-from-right-2 duration-200">
-              <CheckCircle2 className="w-4 h-4" /> 저장됐습니다
-            </span>
-          )}
           <Button onClick={snapshotNow} disabled={totalValue <= 0}>
             <Camera className="w-4 h-4 mr-1.5" /> 리밸런싱 저장
           </Button>
@@ -287,6 +284,7 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
   const account = state.accounts[accountId];
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editingEntry, setEditingEntry] = useState<HistoryEntry | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [manualDate, setManualDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [manualTotal, setManualTotal] = useState("");
   const [manualDeposit, setManualDeposit] = useState("");
@@ -330,7 +328,7 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
                 <LineChart data={account.history}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                   <XAxis dataKey="date" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${(v / 10000).toFixed(0)}만`} width={50} />
+                  <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={52} />
                   <Tooltip
                     formatter={(v: number) => [`${formatKRW(v)} 원`, "평가금액"]}
                     contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8 }}
@@ -366,7 +364,7 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
       <Card className="overflow-hidden">
         <div className="px-5 py-4 border-b">
           <p className="font-semibold">전체 리밸런싱 기록</p>
-          <p className="text-xs text-muted-foreground mt-0.5">클릭: 종목별 상세 보기 · 더블클릭: 수정</p>
+          <p className="text-xs text-muted-foreground mt-0.5">클릭: 종목별 상세 보기</p>
         </div>
 
         {reversed.length === 0 ? (
@@ -382,7 +380,7 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
                   <TableHead className="text-right">평가금액</TableHead>
                   <TableHead className="hidden sm:table-cell text-right">불입액</TableHead>
                   <TableHead className="text-right">수익률</TableHead>
-                  <TableHead className="w-10" />
+                  <TableHead className="w-20" />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -397,8 +395,6 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
                           isExpanded ? "bg-violet-50/60 dark:bg-violet-900/20" : "hover:bg-muted/30"
                         }`}
                         onClick={() => setExpandedId(isExpanded ? null : h.id)}
-                        onDoubleClick={(e) => { e.stopPropagation(); setEditingEntry({ ...h }); }}
-                        title="더블클릭으로 수정"
                       >
                         <TableCell className="text-muted-foreground">
                           {hasHoldings
@@ -421,10 +417,16 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
                           }
                         </TableCell>
                         <TableCell onClick={(e) => e.stopPropagation()}>
-                          <Button variant="ghost" size="icon" className="h-7 w-7"
-                            onClick={() => removeHistory(accountId, h.id)}>
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </Button>
+                          <div className="flex items-center gap-0.5">
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-violet-500"
+                              onClick={() => setEditingEntry({ ...h })}>
+                              <Pencil className="w-3.5 h-3.5" />
+                            </Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10"
+                              onClick={() => setPendingDeleteId(h.id)}>
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
 
@@ -521,13 +523,33 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
             </div>
             <DialogFooter>
               <Button variant="outline" size="sm" onClick={() => setEditingEntry(null)}>취소</Button>
-              <Button size="sm" onClick={() => { updateHistory(accountId, editingEntry); setEditingEntry(null); }}>
+              <Button size="sm" onClick={() => { updateHistory(accountId, editingEntry); setEditingEntry(null); toast.success("수정됐습니다"); }}>
                 <Save className="w-3.5 h-3.5 mr-1" /> 저장
               </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
       )}
+
+      {/* 히스토리 삭제 confirm */}
+      <Dialog open={!!pendingDeleteId} onOpenChange={(v) => !v && setPendingDeleteId(null)}>
+        <DialogContent className="max-w-xs">
+          <DialogHeader>
+            <DialogTitle>히스토리 삭제</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">이 항목을 삭제할까요? 되돌릴 수 없습니다.</p>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => setPendingDeleteId(null)}>취소</Button>
+            <Button variant="destructive" size="sm" onClick={() => {
+              if (pendingDeleteId) removeHistory(accountId, pendingDeleteId);
+              setPendingDeleteId(null);
+              toast.success("삭제됐습니다");
+            }}>
+              <Trash2 className="w-3.5 h-3.5 mr-1" /> 삭제
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

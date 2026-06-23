@@ -147,7 +147,7 @@ function Index() {
           </div>
         </div>
 
-        {page === "dashboard"  && <Dashboard />}
+        {page === "dashboard"  && <Dashboard onNavigate={navigate} />}
         {page === "retirement" && <AccountPage accountId="retirement" />}
         {page === "isa"        && <AccountPage accountId="isa" />}
         {page === "pension"    && <AccountPage accountId="pension" />}
