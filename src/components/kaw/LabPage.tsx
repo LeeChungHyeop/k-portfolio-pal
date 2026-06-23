@@ -69,10 +69,11 @@ export function LabPage() {
     현재가치: a.histTotal,
   }));
 
-  // 도넛 데이터 (현재가치 비중)
+  // 도넛 데이터 (현재가치 비중) - 큰 비중 순 정렬
   const donutData = activeSummaries
     .filter((a) => a.histTotal > 0)
-    .map((a) => ({ id: a.id, name: a.label, value: a.histTotal }));
+    .map((a) => ({ id: a.id, name: a.label, value: a.histTotal }))
+    .sort((a, b) => b.value - a.value);
 
   const noData = activeSummaries.length === 0;
 
@@ -213,6 +214,7 @@ export function LabPage() {
                       innerRadius={65} outerRadius={90}
                       dataKey="value" nameKey="name"
                       strokeWidth={0}
+                      startAngle={90} endAngle={-270}
                     >
                       {donutData.map((e) => (
                         <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />
