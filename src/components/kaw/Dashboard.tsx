@@ -346,7 +346,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
           </div>
           <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
             {/* 납입원금 비중 도넛 */}
-            <div className="flex flex-col items-center lg:w-56 shrink-0">
+            <div className="flex flex-col items-center lg:w-72 shrink-0">
               <p className="text-xs font-medium text-muted-foreground mb-3">납입원금 비중</p>
               <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5 lg:flex-col lg:gap-3">
                 <div className="shrink-0">
@@ -382,7 +382,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
 
             {/* 계좌별 납입원금 vs 현재가치 막대그래프 */}
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-muted-foreground mb-3">계좌별 납입원금 vs 현재가치</p>
+              <p className="text-xs font-medium text-muted-foreground mb-3 text-center">계좌별 납입원금 vs 현재가치</p>
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={barData} barCategoryGap="28%" barGap={4}>
                   <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" vertical={false} />
