@@ -1,14 +1,16 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS, ACCOUNT_LABELS, type AccountId, type AssetKey } from "@/lib/kaw/constants";
 import { usePortfolioStore, formatKRW, formatPct, getOrDefaultLibrary, type HistoryEntry } from "@/lib/kaw/store";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil } from "lucide-react";
+import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap } from "lucide-react";
 import { toast } from "sonner";
+import { useKisPrices } from "@/lib/kaw/useKisPrices";
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
@@ -106,6 +108,26 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   const lastHistory: HistoryEntry | null =
     account.history.length > 0 ? account.history[account.history.length - 1] : null;
 
+  // ── 실시간 모드 상태 ───────────────────────────────────────────────────
+  const [liveMode, setLiveMode] = useState(false);
+
+  // 종목코드(6자리) — rowId 키, localStorage에 계좌별 영구 저장
+  const TICKER_KEY = `kaw.tickers.${accountId}`;
+  const [tickers, setTickers] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem(TICKER_KEY) ?? "{}"); } catch { return {}; }
+  });
+  const updateTicker = (rowId: string, code: string) => {
+    setTickers((prev) => {
+      const next = { ...prev, [rowId]: code.replace(/\D/g, "").slice(0, 6) };
+      localStorage.setItem(TICKER_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  // 보유수량 — rowId 키, 로컬 state (세션 내 유지)
+  const [quantities, setQuantities] = useState<Record<string, number>>({});
+
+  // ── 기본 rows (rowHoldings 기반) ──────────────────────────────────────
   const rows = useMemo(() => {
     if (!profileRows.length) return [];
     return profileRows.map((row) => {
@@ -114,29 +136,72 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       const group = def?.group ?? "";
       const label = def?.label ?? row.assetId;
       const alloc = profileAlloc[row.id] ?? 0;
-
-      // rowHoldings is source of truth; fall back to legacy holdings for standard assets
       const legacyValue = ASSET_ORDER.includes(row.assetId as AssetKey)
-        ? (account.holdings.find((h) => h.assetKey === row.assetId)?.value ?? 0)
-        : 0;
+        ? (account.holdings.find((h) => h.assetKey === row.assetId)?.value ?? 0) : 0;
       const value = account.rowHoldings?.[row.id] ?? legacyValue;
-
-      const target = (account.baseAmount * alloc) / 100;
-      const diff = target - value;
       const prevValue = ASSET_ORDER.includes(row.assetId as AssetKey)
-        ? (lastHistory?.holdings?.[row.assetId as AssetKey] ?? null)
-        : null;
-
-      return { rowId: row.id, assetId: row.assetId, etfName, group, label, alloc, value, target, diff, prevValue };
+        ? (lastHistory?.holdings?.[row.assetId as AssetKey] ?? null) : null;
+      return { rowId: row.id, assetId: row.assetId, etfName, group, label, alloc, value, prevValue };
     });
   }, [account, profileRows, profileAlloc, library, lastHistory]);
 
-  const totalValue = rows.reduce((s, r) => s + r.value, 0);
+  const manualTotal = rows.reduce((s, r) => s + r.value, 0);
 
+  // ── TanStack Query: 실시간 주가 ───────────────────────────────────────
+  const activeTickers = liveMode
+    ? [...new Set(rows.map((r) => tickers[r.rowId]).filter((t): t is string => !!t && t.length === 6))]
+    : [];
+  const { data: priceData, isLoading: priceLoading, isError: priceError, refetch: refetchPrices } = useKisPrices(activeTickers, liveMode);
+
+  // Show toast when live mode has an issue
+  useEffect(() => {
+    if (!liveMode) return;
+    if (priceError) toast.error("주가를 불러오지 못했습니다. 수동 입력 모드로 폴백됩니다.");
+    else if (priceData && !priceData.configured) toast.error("KIS API 인증 정보가 설정되지 않았습니다. 수동 입력 모드로 유지됩니다.");
+  }, [priceError, priceData?.configured, liveMode]);
+
+  const isLiveActive = liveMode && !priceError && !!priceData?.configured;
+  const livePrices = priceData?.prices ?? {};
+
+  // ── 실시간 계산 ────────────────────────────────────────────────────────
+  const liveValueByRow = useMemo((): Record<string, number> => {
+    if (!isLiveActive) return {};
+    return Object.fromEntries(
+      rows.map((r) => {
+        const ticker = tickers[r.rowId];
+        const price = (ticker && livePrices[ticker]) ? livePrices[ticker] : 0;
+        return [r.rowId, (quantities[r.rowId] ?? 0) * price];
+      }),
+    );
+  }, [isLiveActive, livePrices, quantities, tickers, rows]);
+
+  const liveTotal = isLiveActive
+    ? Object.values(liveValueByRow).reduce((s, v) => s + v, 0)
+    : manualTotal;
+
+  // effectiveBase: 실시간 모드 = (현재 평가금액 + 불입액), 수동 = baseAmount
+  const effectiveBase = isLiveActive ? liveTotal + account.deposit : account.baseAmount;
+
+  // 최종 effective rows (target/diff 재계산 포함)
+  const effectiveRows = rows.map((r) => {
+    const value = isLiveActive ? (liveValueByRow[r.rowId] ?? 0) : r.value;
+    const target = (effectiveBase * r.alloc) / 100;
+    const diff = target - value;
+    const livePrice = isLiveActive && tickers[r.rowId] ? (livePrices[tickers[r.rowId]] ?? 0) : 0;
+    return { ...r, value, target, diff, livePrice };
+  });
+  const effectiveTotal = effectiveRows.reduce((s, r) => s + r.value, 0);
+
+  // ── 스냅샷 ─────────────────────────────────────────────────────────────
   function snapshotNow() {
-    // Aggregate values by assetId for history (standard assets only, for backwards compat)
+    if (isLiveActive) {
+      // 라이브 평가금액을 store에 반영 후 저장
+      effectiveRows.forEach((r) => {
+        if (r.value > 0) updateRowHolding(accountId, r.rowId, r.value);
+      });
+    }
     const holdingsSnap: Partial<Record<AssetKey, number>> = {};
-    rows.forEach((r) => {
+    effectiveRows.forEach((r) => {
       if (r.value > 0 && ASSET_ORDER.includes(r.assetId as AssetKey)) {
         const k = r.assetId as AssetKey;
         holdingsSnap[k] = (holdingsSnap[k] ?? 0) + r.value;
@@ -145,13 +210,15 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     addHistory(accountId, {
       id: crypto.randomUUID(),
       date: account.rebalanceDate,
-      baseAmount: account.baseAmount,
-      totalValue,
+      baseAmount: effectiveBase,
+      totalValue: effectiveTotal,
       deposit: account.deposit,
       holdings: holdingsSnap,
     });
     toast.success("리밸런싱이 저장됐습니다");
   }
+
+  const colCount = 7 + (isLiveActive ? 1 : 0);
 
   return (
     <div className="space-y-5">
@@ -177,7 +244,41 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
 
       {/* 이번 리밸런싱 */}
       <Card className="p-5 space-y-4">
-        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">이번 리밸런싱</p>
+        {/* 헤더: 타이틀 + 실시간 모드 토글 */}
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">이번 리밸런싱</p>
+          <div className="flex items-center gap-2">
+            {liveMode && (
+              <button
+                onClick={() => refetchPrices()}
+                disabled={priceLoading}
+                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-violet-500 transition-colors"
+                title="주가 수동 갱신"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${priceLoading ? "animate-spin" : ""}`} />
+              </button>
+            )}
+            {liveMode && (
+              <span className={`flex items-center gap-1 text-[10px] font-medium ${isLiveActive ? "text-emerald-500" : "text-amber-500"}`}>
+                {isLiveActive ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+                {isLiveActive ? "실시간 연결" : "연결 안 됨"}
+              </span>
+            )}
+            <div className="flex items-center gap-1.5">
+              <Zap className={`w-3.5 h-3.5 ${liveMode ? "text-violet-500" : "text-muted-foreground"}`} />
+              <span className="text-xs font-medium text-muted-foreground">실시간 주가 계산</span>
+              <Switch
+                checked={liveMode}
+                onCheckedChange={(v) => {
+                  setLiveMode(v);
+                  if (v) toast.success("실시간 모드 활성화 — 종목코드를 입력해 주세요");
+                }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* 입력 폼 */}
         <div className="grid sm:grid-cols-3 gap-3">
           <div>
             <label className="text-xs text-muted-foreground">리밸런싱 일자</label>
@@ -185,10 +286,18 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
               onChange={(e) => updateAccount(accountId, { rebalanceDate: e.target.value })} className="mt-1" />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground">기준금액 (원)</label>
-            <NumberInput value={account.baseAmount}
-              onChange={(v) => updateAccount(accountId, { baseAmount: v })}
-              placeholder="0" className="mt-1 font-semibold" />
+            <label className="text-xs text-muted-foreground">
+              {isLiveActive ? "기준금액 (자동계산)" : "기준금액 (원)"}
+            </label>
+            {isLiveActive ? (
+              <div className="mt-1 h-9 px-3 flex items-center rounded-md border bg-muted/50 text-sm font-semibold tabular-nums text-violet-600 dark:text-violet-400">
+                {formatKRW(effectiveBase)}
+              </div>
+            ) : (
+              <NumberInput value={account.baseAmount}
+                onChange={(v) => updateAccount(accountId, { baseAmount: v })}
+                placeholder="0" className="mt-1 font-semibold" />
+            )}
           </div>
           <div>
             <label className="text-xs text-muted-foreground">이번 달 불입액 (원)</label>
@@ -198,29 +307,46 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           </div>
         </div>
 
-        <div className="rounded-lg border overflow-hidden">
+        {/* 실시간 기준금액 계산 근거 */}
+        {isLiveActive && (
+          <div className="rounded-lg bg-violet-500/8 border border-violet-500/20 px-4 py-2.5 flex flex-wrap gap-3 items-center text-xs">
+            <span className="text-muted-foreground">💡 기준금액 자동계산:</span>
+            <span className="tabular-nums font-medium text-emerald-600">현재가치 {formatKRW(liveTotal)}</span>
+            <span className="text-muted-foreground">+</span>
+            <span className="tabular-nums font-medium">불입액 {formatKRW(account.deposit)}</span>
+            <span className="text-muted-foreground">=</span>
+            <span className="tabular-nums font-bold text-violet-600">{formatKRW(effectiveBase)}</span>
+          </div>
+        )}
+
+        {/* 자산 테이블 */}
+        <div className="rounded-lg border overflow-hidden overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow className="bg-muted/50">
                 <TableHead className="py-2 px-1 sm:px-3 text-xs w-[72px] sm:w-auto">자산</TableHead>
-                <TableHead className="hidden md:table-cell">ETF 종목명</TableHead>
+                <TableHead className="hidden md:table-cell">ETF 종목명{isLiveActive && " / 종목코드"}</TableHead>
                 <TableHead className="hidden md:table-cell text-right w-12">비중</TableHead>
                 <TableHead className="hidden lg:table-cell text-right">기준금액</TableHead>
                 <TableHead className="hidden lg:table-cell text-right">이전 평가</TableHead>
+                {isLiveActive && (
+                  <TableHead className="text-right py-2 px-1 sm:px-3 text-xs whitespace-nowrap">보유수량(주)</TableHead>
+                )}
                 <TableHead className="text-right py-2 px-1 sm:px-3 text-xs whitespace-nowrap">현재평가</TableHead>
                 <TableHead className="text-right py-2 px-1 sm:px-3 text-xs whitespace-nowrap">추가매수</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.length === 0 ? (
+              {effectiveRows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-8">
+                  <TableCell colSpan={colCount} className="text-center text-sm text-muted-foreground py-8">
                     설정 → 투자성향에서 자산을 추가하고 저장하세요.
                   </TableCell>
                 </TableRow>
               ) : (
-                rows.map((r) => (
+                effectiveRows.map((r) => (
                   <TableRow key={r.rowId} className="hover:bg-muted/30">
+                    {/* 자산 */}
                     <TableCell className="py-2 px-1 sm:px-3">
                       <div className="flex items-center gap-1 text-[10px] sm:text-xs">
                         <span className="w-1.5 h-1.5 rounded-full shrink-0"
@@ -228,38 +354,108 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                         <span className="truncate max-w-[52px] sm:max-w-none">{r.group}</span>
                       </div>
                       <div className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 leading-tight truncate max-w-[68px] sm:max-w-none">{r.label}</div>
+                      {/* 모바일용 종목코드 입력 (sm 미만에서 표시) */}
+                      {liveMode && (
+                        <input
+                          className="md:hidden mt-1 w-16 h-5 text-[10px] text-center rounded border border-violet-300/60 bg-violet-50/50 dark:bg-violet-950/30 placeholder-muted-foreground/50 focus:outline-none focus:border-violet-500"
+                          placeholder="종목코드"
+                          value={tickers[r.rowId] ?? ""}
+                          maxLength={6}
+                          onChange={(e) => updateTicker(r.rowId, e.target.value)}
+                        />
+                      )}
                     </TableCell>
+                    {/* ETF 종목명 + 종목코드 입력 */}
                     <TableCell className="hidden md:table-cell">
                       <span className="text-sm text-muted-foreground leading-tight block truncate max-w-[180px]" title={r.etfName}>
                         {r.etfName}
                       </span>
+                      {liveMode && (
+                        <div className="flex items-center gap-1.5 mt-1">
+                          <input
+                            className="w-20 h-6 text-xs text-center rounded border border-violet-300/60 bg-violet-50/50 dark:bg-violet-950/30 placeholder-muted-foreground/50 focus:outline-none focus:border-violet-500"
+                            placeholder="6자리"
+                            value={tickers[r.rowId] ?? ""}
+                            maxLength={6}
+                            onChange={(e) => updateTicker(r.rowId, e.target.value)}
+                          />
+                          {tickers[r.rowId]?.length === 6 && r.livePrice > 0 && (
+                            <span className="text-[10px] text-emerald-500 tabular-nums">₩{formatKRW(r.livePrice)}</span>
+                          )}
+                          {tickers[r.rowId]?.length === 6 && r.livePrice === 0 && isLiveActive && (
+                            <span className="text-[10px] text-amber-500">조회 실패</span>
+                          )}
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell className="hidden md:table-cell text-right text-sm tabular-nums">{r.alloc}%</TableCell>
                     <TableCell className="hidden lg:table-cell text-right text-sm tabular-nums text-muted-foreground">{formatKRW(r.target)}</TableCell>
                     <TableCell className="hidden lg:table-cell text-right text-sm tabular-nums text-muted-foreground">
                       {r.prevValue != null ? formatKRW(r.prevValue) : "—"}
                     </TableCell>
+                    {/* 보유수량 입력 (실시간 모드) */}
+                    {isLiveActive && (
+                      <TableCell className="text-right py-2 px-1 sm:px-3">
+                        <input
+                          type="number"
+                          min={0}
+                          value={quantities[r.rowId] ?? ""}
+                          onChange={(e) => {
+                            const qty = Math.max(0, parseInt(e.target.value, 10) || 0);
+                            setQuantities((prev) => ({ ...prev, [r.rowId]: qty }));
+                          }}
+                          placeholder="0"
+                          className="h-7 w-16 text-xs text-right tabular-nums rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                        />
+                      </TableCell>
+                    )}
+                    {/* 현재 평가금액 */}
                     <TableCell className="text-right py-2 px-1 sm:px-3">
-                      <NumberInput
-                        value={r.value}
-                        onChange={(v) => updateRowHolding(accountId, r.rowId, v)}
-                        placeholder="0"
-                        className="h-7 text-xs text-right tabular-nums w-[5.5rem] sm:w-28"
-                      />
+                      {isLiveActive ? (
+                        <div className="text-right">
+                          <p className="text-xs tabular-nums font-medium text-violet-600 dark:text-violet-400">
+                            {formatKRW(r.value)}
+                          </p>
+                          {r.livePrice > 0 && (
+                            <p className="text-[10px] text-muted-foreground tabular-nums">
+                              @{formatKRW(r.livePrice)}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <NumberInput
+                          value={r.value}
+                          onChange={(v) => updateRowHolding(accountId, r.rowId, v)}
+                          placeholder="0"
+                          className="h-7 text-xs text-right tabular-nums w-[5.5rem] sm:w-28"
+                        />
+                      )}
                     </TableCell>
-                    <TableCell className="text-right py-2 px-1 sm:px-3"><RebalanceCell diff={r.diff} /></TableCell>
+                    {/* 추가매수 */}
+                    <TableCell className="text-right py-2 px-1 sm:px-3">
+                      {isLiveActive
+                        ? <LiveRebalanceCell diff={r.diff} livePrice={r.livePrice} />
+                        : <RebalanceCell diff={r.diff} />
+                      }
+                    </TableCell>
                   </TableRow>
                 ))
               )}
+              {/* 합계 행 */}
               <TableRow className="bg-muted/40 font-semibold">
                 <TableCell className="text-xs sm:text-sm py-2 px-2 sm:px-4">합계</TableCell>
                 <TableCell className="hidden md:table-cell" />
                 <TableCell className="hidden md:table-cell" />
-                <TableCell className="hidden lg:table-cell text-right tabular-nums text-sm">{formatKRW(account.baseAmount)}</TableCell>
+                <TableCell className="hidden lg:table-cell text-right tabular-nums text-sm">{formatKRW(effectiveBase)}</TableCell>
                 <TableCell className="hidden lg:table-cell text-right tabular-nums text-sm text-muted-foreground">
                   {lastHistory ? formatKRW(lastHistory.totalValue) : "—"}
                 </TableCell>
-                <TableCell className="text-right tabular-nums text-xs sm:text-sm py-2 px-1 sm:px-4">{formatKRW(totalValue)}</TableCell>
+                {isLiveActive && <TableCell className="text-right tabular-nums text-xs sm:text-sm py-2 px-1 sm:px-4 text-violet-600">
+                  {Object.values(quantities).reduce((s, q) => s + q, 0)}주
+                </TableCell>}
+                <TableCell className={`text-right tabular-nums text-xs sm:text-sm py-2 px-1 sm:px-4 ${isLiveActive ? "text-violet-600 font-bold" : ""}`}>
+                  {formatKRW(effectiveTotal)}
+                </TableCell>
                 <TableCell />
               </TableRow>
             </TableBody>
@@ -267,7 +463,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         </div>
 
         <div className="flex items-center justify-end gap-3">
-          <Button onClick={snapshotNow} disabled={totalValue <= 0}>
+          <Button onClick={snapshotNow} disabled={effectiveTotal <= 0}>
             <Camera className="w-4 h-4 mr-1.5" /> 리밸런싱 저장
           </Button>
         </div>
@@ -557,5 +753,33 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
 function RebalanceCell({ diff }: { diff: number }) {
   if (Math.abs(diff) < 1) return <span className="text-muted-foreground text-xs">—</span>;
   if (diff > 0) return <span className="text-emerald-500 text-xs font-semibold tabular-nums">+{formatKRW(diff)}</span>;
+  return <span className="text-rose-500 text-xs font-semibold tabular-nums">{formatKRW(diff)}</span>;
+}
+
+function LiveRebalanceCell({ diff, livePrice }: { diff: number; livePrice: number }) {
+  if (Math.abs(diff) < 1) return <span className="text-muted-foreground text-xs">—</span>;
+
+  if (diff > 0) {
+    const shares = livePrice > 0 ? Math.floor(diff / livePrice) : 0;
+    const actualAmount = shares * livePrice;
+    const remainder = diff - actualAmount;
+    return (
+      <div className="text-right space-y-0.5">
+        <p className="text-emerald-500 text-xs font-semibold tabular-nums">+{formatKRW(diff)}</p>
+        {livePrice > 0 && shares > 0 && (
+          <p className="text-emerald-400 text-[10px] tabular-nums font-medium">
+            ≈ {shares}주 · {formatKRW(actualAmount)}원
+          </p>
+        )}
+        {livePrice > 0 && remainder > 0 && (
+          <p className="text-muted-foreground text-[10px] tabular-nums">잔액 {formatKRW(remainder)}</p>
+        )}
+        {livePrice > 0 && shares === 0 && (
+          <p className="text-amber-500 text-[10px]">1주 미만</p>
+        )}
+      </div>
+    );
+  }
+
   return <span className="text-rose-500 text-xs font-semibold tabular-nums">{formatKRW(diff)}</span>;
 }

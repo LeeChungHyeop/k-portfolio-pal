@@ -3,11 +3,14 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleWebhookRequest } from "./lib/telegram";
+import { fetchKisPrices } from "./lib/kaw/kis-server";
 
 // Cloudflare Workers environment bindings
 export interface Env {
   TELEGRAM_BOT_TOKEN?: string;
   ANTHROPIC_API_KEY?: string;
+  KIS_APP_KEY?: string;
+  KIS_APP_SECRET?: string;
   [key: string]: unknown;
 }
 
@@ -81,6 +84,23 @@ export default {
     // ── Telegram webhook ────────────────────────────────────────────────
     if (pathname === "/api/webhook/telegram" && request.method === "POST") {
       return handleWebhookRequest(request, env.TELEGRAM_BOT_TOKEN, env.ANTHROPIC_API_KEY);
+    }
+
+    // ── KIS 실시간 주가 프록시 ─────────────────────────────────────────
+    if (pathname === "/api/kis/price" && request.method === "POST") {
+      if (!env.KIS_APP_KEY || !env.KIS_APP_SECRET) {
+        return Response.json({ error: "KIS credentials not configured" }, { status: 503 });
+      }
+      try {
+        const body = await request.json() as { tickers?: unknown };
+        const tickers = Array.isArray(body?.tickers) ? (body.tickers as string[]).filter(t => typeof t === "string" && /^\d{6}$/.test(t)).slice(0, 20) : [];
+        if (!tickers.length) return Response.json({});
+        const prices = await fetchKisPrices(tickers, env.KIS_APP_KEY, env.KIS_APP_SECRET);
+        return Response.json(prices, { headers: { "Cache-Control": "no-store" } });
+      } catch (err) {
+        console.error("KIS price error:", err);
+        return Response.json({ error: String(err) }, { status: 500 });
+      }
     }
 
     // ── TanStack Start app (SSR + static) ───────────────────────────────
