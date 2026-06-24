@@ -111,19 +111,6 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   // ── 실시간 모드 상태 ───────────────────────────────────────────────────
   const [liveMode, setLiveMode] = useState(false);
 
-  // 종목코드(6자리) — rowId 키, localStorage에 계좌별 영구 저장
-  const TICKER_KEY = `kaw.tickers.${accountId}`;
-  const [tickers, setTickers] = useState<Record<string, string>>(() => {
-    try { return JSON.parse(localStorage.getItem(TICKER_KEY) ?? "{}"); } catch { return {}; }
-  });
-  const updateTicker = (rowId: string, code: string) => {
-    setTickers((prev) => {
-      const next = { ...prev, [rowId]: code.replace(/\D/g, "").slice(0, 6) };
-      localStorage.setItem(TICKER_KEY, JSON.stringify(next));
-      return next;
-    });
-  };
-
   // 보유수량 — rowId 키, 로컬 state (세션 내 유지)
   const [quantities, setQuantities] = useState<Record<string, number>>({});
 
@@ -141,7 +128,8 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       const value = account.rowHoldings?.[row.id] ?? legacyValue;
       const prevValue = ASSET_ORDER.includes(row.assetId as AssetKey)
         ? (lastHistory?.holdings?.[row.assetId as AssetKey] ?? null) : null;
-      return { rowId: row.id, assetId: row.assetId, etfName, group, label, alloc, value, prevValue };
+      const ticker = def?.ticker ?? "";
+      return { rowId: row.id, assetId: row.assetId, etfName, group, label, alloc, value, prevValue, ticker };
     });
   }, [account, profileRows, profileAlloc, library, lastHistory]);
 
@@ -149,7 +137,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
 
   // ── TanStack Query: 실시간 주가 ───────────────────────────────────────
   const activeTickers = liveMode
-    ? [...new Set(rows.map((r) => tickers[r.rowId]).filter((t): t is string => !!t && t.length === 6))]
+    ? [...new Set(rows.map((r) => r.ticker).filter((t): t is string => t.length === 6))]
     : [];
   const { data: priceData, isLoading: priceLoading, isError: priceError, refetch: refetchPrices } = useKisPrices(activeTickers, liveMode);
 
@@ -168,12 +156,11 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     if (!isLiveActive) return {};
     return Object.fromEntries(
       rows.map((r) => {
-        const ticker = tickers[r.rowId];
-        const price = (ticker && livePrices[ticker]) ? livePrices[ticker] : 0;
+        const price = r.ticker && livePrices[r.ticker] ? livePrices[r.ticker] : 0;
         return [r.rowId, (quantities[r.rowId] ?? 0) * price];
       }),
     );
-  }, [isLiveActive, livePrices, quantities, tickers, rows]);
+  }, [isLiveActive, livePrices, quantities, rows]);
 
   const liveTotal = isLiveActive
     ? Object.values(liveValueByRow).reduce((s, v) => s + v, 0)
@@ -187,7 +174,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     const value = isLiveActive ? (liveValueByRow[r.rowId] ?? 0) : r.value;
     const target = (effectiveBase * r.alloc) / 100;
     const diff = target - value;
-    const livePrice = isLiveActive && tickers[r.rowId] ? (livePrices[tickers[r.rowId]] ?? 0) : 0;
+    const livePrice = isLiveActive && r.ticker ? (livePrices[r.ticker] ?? 0) : 0;
     return { ...r, value, target, diff, livePrice };
   });
   const effectiveTotal = effectiveRows.reduce((s, r) => s + r.value, 0);
@@ -354,36 +341,33 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                         <span className="truncate max-w-[52px] sm:max-w-none">{r.group}</span>
                       </div>
                       <div className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 leading-tight truncate max-w-[68px] sm:max-w-none">{r.label}</div>
-                      {/* 모바일용 종목코드 입력 (sm 미만에서 표시) */}
-                      {liveMode && (
-                        <input
-                          className="md:hidden mt-1 w-16 h-5 text-[10px] text-center rounded border border-violet-300/60 bg-violet-50/50 dark:bg-violet-950/30 placeholder-muted-foreground/50 focus:outline-none focus:border-violet-500"
-                          placeholder="종목코드"
-                          value={tickers[r.rowId] ?? ""}
-                          maxLength={6}
-                          onChange={(e) => updateTicker(r.rowId, e.target.value)}
-                        />
+                      {/* 모바일: 종목코드 표시 */}
+                      {liveMode && r.ticker && (
+                        <span className="md:hidden mt-1 text-[10px] text-violet-500 tabular-nums font-mono">{r.ticker}</span>
+                      )}
+                      {liveMode && !r.ticker && (
+                        <span className="md:hidden mt-1 text-[10px] text-amber-500">코드 미설정</span>
                       )}
                     </TableCell>
-                    {/* ETF 종목명 + 종목코드 입력 */}
+                    {/* ETF 종목명 + 종목코드 */}
                     <TableCell className="hidden md:table-cell">
                       <span className="text-sm text-muted-foreground leading-tight block truncate max-w-[180px]" title={r.etfName}>
                         {r.etfName}
                       </span>
                       {liveMode && (
-                        <div className="flex items-center gap-1.5 mt-1">
-                          <input
-                            className="w-20 h-6 text-xs text-center rounded border border-violet-300/60 bg-violet-50/50 dark:bg-violet-950/30 placeholder-muted-foreground/50 focus:outline-none focus:border-violet-500"
-                            placeholder="6자리"
-                            value={tickers[r.rowId] ?? ""}
-                            maxLength={6}
-                            onChange={(e) => updateTicker(r.rowId, e.target.value)}
-                          />
-                          {tickers[r.rowId]?.length === 6 && r.livePrice > 0 && (
-                            <span className="text-[10px] text-emerald-500 tabular-nums">₩{formatKRW(r.livePrice)}</span>
-                          )}
-                          {tickers[r.rowId]?.length === 6 && r.livePrice === 0 && isLiveActive && (
-                            <span className="text-[10px] text-amber-500">조회 실패</span>
+                        <div className="flex items-center gap-2 mt-1">
+                          {r.ticker ? (
+                            <>
+                              <span className="text-[10px] text-violet-500 tabular-nums font-mono bg-violet-500/10 rounded px-1.5 py-0.5">{r.ticker}</span>
+                              {r.livePrice > 0 && (
+                                <span className="text-[10px] text-emerald-500 tabular-nums">₩{formatKRW(r.livePrice)}</span>
+                              )}
+                              {r.livePrice === 0 && isLiveActive && (
+                                <span className="text-[10px] text-amber-500">조회 실패</span>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-[10px] text-amber-500">설정 → 종목설정에서 코드 입력</span>
                           )}
                         </div>
                       )}

@@ -301,32 +301,38 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
   const [showAddFor, setShowAddFor] = useState<string | null>(null);
   const [addLabel, setAddLabel] = useState("");
   const [addEtf, setAddEtf] = useState("");
+  const [addTicker, setAddTicker] = useState("");
 
   useEffect(() => {
     if (open) {
       setDraftLib([...library]);
       setActiveGroup("주식");
-      setShowAddFor(null); setAddLabel(""); setAddEtf("");
+      setShowAddFor(null); setAddLabel(""); setAddEtf(""); setAddTicker("");
     }
   }, [open, library]);
 
   function handleEtfChange(id: string, v: string) {
     setDraftLib((prev) => prev.map((d) => d.id === id ? { ...d, defaultEtf: v } : d));
   }
+  function handleTickerChange(id: string, v: string) {
+    const code = v.replace(/\D/g, "").slice(0, 6);
+    setDraftLib((prev) => prev.map((d) => d.id === id ? { ...d, ticker: code } : d));
+  }
   function handleDelete(id: string) {
     setDraftLib((prev) => prev.filter((d) => d.id !== id));
   }
   function handleAdd() {
-    if (!addLabel.trim() || !addEtf.trim() || !showAddFor) return;
+    if (!addLabel.trim() || !addEtf.trim() || !addTicker.trim() || !showAddFor) return;
     const newDef: AssetDef = {
       id: `custom_${Date.now()}`,
       group: showAddFor,
       label: addLabel.trim(),
       defaultEtf: addEtf.trim(),
+      ticker: addTicker.replace(/\D/g, "").slice(0, 6),
       isBuiltIn: false,
     };
     setDraftLib((prev) => [...prev, newDef]);
-    setAddLabel(""); setAddEtf(""); setShowAddFor(null);
+    setAddLabel(""); setAddEtf(""); setAddTicker(""); setShowAddFor(null);
   }
 
   function moveLabel(label: string, direction: -1 | 1) {
@@ -437,6 +443,18 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
                       className="h-8 text-sm flex-1"
                       placeholder="ETF 종목명"
                     />
+                    <div className="relative shrink-0">
+                      <Input
+                        value={def.ticker ?? ""}
+                        onChange={(e) => handleTickerChange(def.id, e.target.value)}
+                        className={`h-8 text-sm w-24 text-center tabular-nums pr-2 ${def.ticker?.length === 6 ? "border-emerald-400/60 focus-visible:ring-emerald-500" : ""}`}
+                        placeholder="종목코드"
+                        maxLength={6}
+                      />
+                      {def.ticker && def.ticker.length > 0 && def.ticker.length < 6 && (
+                        <span className="absolute -bottom-3.5 left-0 text-[9px] text-amber-500 whitespace-nowrap">{def.ticker.length}/6자리</span>
+                      )}
+                    </div>
                     {def.isBuiltIn ? (
                       <div className="w-7 shrink-0" />
                     ) : (
@@ -454,31 +472,45 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
 
             {/* 추가 폼 */}
             {showAddFor === activeGroup ? (
-              <div className="flex items-center gap-2 pt-2 border-t mt-2">
-                <Input
-                  value={addLabel}
-                  onChange={(e) => setAddLabel(e.target.value)}
-                  placeholder="자산명 입력"
-                  className="h-8 text-sm flex-1"
-                  autoFocus
-                  onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); if (e.key === "Escape") { setShowAddFor(null); setAddLabel(""); setAddEtf(""); } }}
-                />
-                <Input
-                  value={addEtf}
-                  onChange={(e) => setAddEtf(e.target.value)}
-                  placeholder="ETF 종목명"
-                  className="h-8 text-sm w-48"
-                  onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }}
-                />
-                <Button size="sm" className="h-8 px-3 shrink-0" onClick={handleAdd} disabled={!addLabel.trim() || !addEtf.trim()}>
-                  추가
-                </Button>
-                <button
-                  onClick={() => { setShowAddFor(null); setAddLabel(""); setAddEtf(""); }}
-                  className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-foreground transition-all shrink-0"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
+              <div className="space-y-2 pt-2 border-t mt-2">
+                <div className="flex items-center gap-2">
+                  <Input
+                    value={addLabel}
+                    onChange={(e) => setAddLabel(e.target.value)}
+                    placeholder="자산명 입력"
+                    className="h-8 text-sm flex-1"
+                    autoFocus
+                    onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); if (e.key === "Escape") { setShowAddFor(null); setAddLabel(""); setAddEtf(""); setAddTicker(""); } }}
+                  />
+                  <Input
+                    value={addEtf}
+                    onChange={(e) => setAddEtf(e.target.value)}
+                    placeholder="ETF 종목명"
+                    className="h-8 text-sm w-40"
+                    onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }}
+                  />
+                  <div className="relative shrink-0">
+                    <Input
+                      value={addTicker}
+                      onChange={(e) => setAddTicker(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                      placeholder="종목코드*"
+                      className={`h-8 text-sm w-24 text-center tabular-nums ${addTicker.length === 6 ? "border-emerald-400/60" : addTicker.length > 0 ? "border-amber-400/60" : "border-rose-400/40"}`}
+                      maxLength={6}
+                      onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }}
+                    />
+                    <span className="absolute -bottom-3.5 left-0 text-[9px] text-muted-foreground whitespace-nowrap">6자리 필수</span>
+                  </div>
+                  <Button size="sm" className="h-8 px-3 shrink-0" onClick={handleAdd}
+                    disabled={!addLabel.trim() || !addEtf.trim() || addTicker.length !== 6}>
+                    추가
+                  </Button>
+                  <button
+                    onClick={() => { setShowAddFor(null); setAddLabel(""); setAddEtf(""); setAddTicker(""); }}
+                    className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-foreground transition-all shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             ) : (
               <button

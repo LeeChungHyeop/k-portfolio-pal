@@ -31,6 +31,7 @@ export interface AssetDef {
   label: string;
   defaultEtf: string;
   isBuiltIn: boolean;
+  ticker?: string; // KRX 6자리 종목코드 (KIS API용)
 }
 // Per-profile, per-account row
 export interface ProfileRowDef {
