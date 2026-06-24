@@ -346,7 +346,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
           </div>
           <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
             {/* 납입원금 비중 도넛 */}
-            <div className="flex flex-col items-center lg:w-72 shrink-0">
+            <div className="flex flex-col items-center lg:w-90 shrink-0">
               <p className="text-xs font-medium text-muted-foreground mb-3">납입원금 비중</p>
               <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5 lg:flex-col lg:gap-3">
                 <div className="shrink-0">
