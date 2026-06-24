@@ -5,7 +5,7 @@ import { type FamilyData } from "@/lib/kaw/auth";
 
 export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings" | "lab";
 
-const DEPLOY_DATE = "2026.06.24 10:15";
+const DEPLOY_DATE = "2026.06.24 10:17";
 
 const NAV = [
   { id: "dashboard"  as Page, label: "대시보드",    icon: LayoutDashboard, color: "text-violet-500" },
