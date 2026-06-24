@@ -20,6 +20,13 @@ const ACCOUNT_COLORS: Record<string, string> = {
   irp:        "oklch(0.60 0.18 320)",
 };
 
+const ACCOUNT_COLORS_SOFT: Record<string, string> = {
+  retirement: "oklch(0.78 0.12 250)",
+  isa:        "oklch(0.80 0.12 140)",
+  pension:    "oklch(0.82 0.12 30)",
+  irp:        "oklch(0.78 0.12 320)",
+};
+
 type GranularityTab = "daily" | "monthly" | "yearly";
 
 function DashboardTooltip({ active, payload, label }: any) {
@@ -93,12 +100,6 @@ function DepositTooltip({ active, payload, label }: any) {
   );
 }
 
-const ACCOUNT_ORDER: { id: string; label: string }[] = [
-  { id: "retirement", label: "퇴직연금 자산 추이" },
-  { id: "isa",        label: "ISA계좌 자산 추이" },
-  { id: "pension",    label: "연금저축펀드 자산 추이" },
-  { id: "irp",        label: "IRP계좌 자산 추이" },
-];
 
 function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
@@ -128,7 +129,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
     const baseAmount = sorted.length > 0
       ? sorted[0].baseAmount + sorted.slice(1).reduce((s, h) => s + Math.max(0, h.deposit ?? 0), 0)
       : 0;
-    return { id, label: ACCOUNT_LABELS_SHORT[id], histTotal, last, latestReturnPct, baseAmount };
+    const gain = histTotal - baseAmount;
+    return { id, label: ACCOUNT_LABELS_SHORT[id], histTotal, last, latestReturnPct, baseAmount, gain };
   }), [state]);
 
   const grandTotal = accountSummaries.reduce((s, a) => s + a.histTotal, 0);
@@ -231,6 +233,20 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
     () => accountSummaries.filter((a) => a.baseAmount > 0).map((a) => ({ id: a.id, name: a.label, value: a.baseAmount })).sort((a, b) => b.value - a.value),
     [accountSummaries],
   );
+
+  const barData = useMemo(
+    () => accountSummaries.filter((a) => a.baseAmount > 0 || a.histTotal > 0).map((a) => ({
+      name: a.label, id: a.id, 납입원금: a.baseAmount, 현재가치: a.histTotal,
+    })),
+    [accountSummaries],
+  );
+
+  const donutData = useMemo(
+    () => accountSummaries.filter((a) => a.histTotal > 0)
+      .map((a) => ({ id: a.id, name: a.label, value: a.histTotal }))
+      .sort((a, b) => b.value - a.value),
+    [accountSummaries],
+  );
   // Latest cumulative returns per account for summary display
   const latestCumReturns = useMemo(() => {
     const result: Record<string, number | null> = {};
@@ -286,14 +302,14 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
         })}
       </div>
 
-      {/* 납입원금 vs 현재가치 */}
+      {/* 납입원금과 현재가치 */}
       {grandBase > 0 && (
         <Card className="p-5">
           <h3 className="font-semibold mb-4 flex items-center gap-2">
             <Wallet className="w-4 h-4 text-violet-500" />
-            납입원금 vs 현재가치
+            납입원금과 현재가치
           </h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
             <div className="space-y-1">
               <p className="text-xs text-muted-foreground flex items-center gap-1">
                 <PiggyBank className="w-3.5 h-3.5" /> 총 납입원금
@@ -328,11 +344,11 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               <p className="text-xs text-muted-foreground">납입 대비 총 수익</p>
             </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-            {/* 납입원금 비중 */}
-            <div className="flex flex-col items-center">
-              <p className="text-xs font-medium text-muted-foreground mb-3">납입원금</p>
-              <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+            {/* 납입원금 비중 도넛 */}
+            <div className="flex flex-col items-center lg:w-56 shrink-0">
+              <p className="text-xs font-medium text-muted-foreground mb-3">납입원금 비중</p>
+              <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5 lg:flex-col lg:gap-3">
                 <div className="shrink-0">
                   <PieChart width={200} height={200}>
                     <Pie data={principalChartData} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0} startAngle={90} endAngle={-270}>
@@ -352,7 +368,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
                     }} />
                   </PieChart>
                 </div>
-                <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-1 sm:gap-x-0">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-1 sm:gap-x-0 lg:grid-cols-2">
                   {principalChartData.map((e) => (
                     <div key={e.id} className="flex items-center gap-2 text-sm">
                       <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[e.id] }} />
@@ -364,38 +380,60 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               </div>
             </div>
 
-            {/* 현재가치 비중 */}
-            <div className="flex flex-col items-center">
-              <p className="text-xs font-medium text-muted-foreground mb-3">현재가치</p>
-              <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-5">
-                <div className="shrink-0">
-                  <PieChart width={200} height={200}>
-                    <Pie data={principalChartData.map((e) => ({ ...e, value: accountSummaries.find((a) => a.id === e.id)?.histTotal ?? 0 })).sort((a, b) => b.value - a.value)} cx="50%" cy="50%" innerRadius={62} outerRadius={88} dataKey="value" nameKey="name" strokeWidth={0} startAngle={90} endAngle={-270}>
-                      {principalChartData.map((e) => <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />)}
-                    </Pie>
-                    <Tooltip content={({ active, payload }) => {
+            {/* 계좌별 납입원금 vs 현재가치 막대그래프 */}
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-muted-foreground mb-3">계좌별 납입원금 vs 현재가치</p>
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={barData} barCategoryGap="28%" barGap={4}>
+                  <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" vertical={false} />
+                  <XAxis dataKey="name" tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <YAxis tickFormatter={fmtAxis} tick={{ fontSize: 11 }} width={52} axisLine={false} tickLine={false} />
+                  <Tooltip
+                    content={({ active, payload, label }) => {
                       if (!active || !payload?.length) return null;
-                      const v = payload[0].value as number;
-                      const pct = grandTotal > 0 ? (v / grandTotal * 100).toFixed(1) : "0";
                       return (
-                        <div className="rounded-xl border bg-popover p-2 shadow-md text-xs">
-                          <p className="font-semibold mb-0.5">{payload[0].name}</p>
-                          <p className="tabular-nums">{formatKRW(v)}원</p>
-                          <p className="text-muted-foreground">{pct}%</p>
+                        <div className="rounded-xl border bg-popover p-3 shadow-md text-xs space-y-1.5 min-w-44">
+                          <p className="font-semibold text-xs text-muted-foreground mb-1">{label}</p>
+                          {payload.map((p: any) => (
+                            <div key={p.name} className="flex justify-between gap-4">
+                              <span className="flex items-center gap-1.5">
+                                <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: p.fill }} />
+                                <span>{p.name}</span>
+                              </span>
+                              <span className="tabular-nums font-medium">{formatKRW(p.value)}원</span>
+                            </div>
+                          ))}
+                          {payload.length === 2 && (payload[1].value as number) > (payload[0].value as number) && (
+                            <div className="border-t pt-1 mt-1 text-emerald-500 font-semibold flex justify-between">
+                              <span>수익</span>
+                              <span className="tabular-nums">+{formatKRW((payload[1].value as number) - (payload[0].value as number))}원</span>
+                            </div>
+                          )}
                         </div>
                       );
-                    }} />
-                  </PieChart>
-                </div>
-                <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-1 sm:gap-x-0">
-                  {accountSummaries.filter((a) => a.histTotal > 0).map((a) => (
-                    <div key={a.id} className="flex items-center gap-2 text-sm">
-                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[a.id] }} />
-                      <span className="text-muted-foreground shrink-0">{a.label}</span>
-                      <span className="tabular-nums font-semibold ml-1">{grandTotal > 0 ? (a.histTotal / grandTotal * 100).toFixed(1) : "0"}%</span>
-                    </div>
-                  ))}
-                </div>
+                    }}
+                  />
+                  <Bar dataKey="납입원금" radius={[4, 4, 0, 0]}>
+                    {barData.map((e) => (
+                      <Cell key={e.id} fill={ACCOUNT_COLORS_SOFT[e.id]} />
+                    ))}
+                  </Bar>
+                  <Bar dataKey="현재가치" radius={[4, 4, 0, 0]}>
+                    {barData.map((e) => (
+                      <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+              <div className="flex items-center justify-center gap-6 mt-2">
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span className="w-3 h-3 rounded-sm bg-muted-foreground/40" />
+                  납입원금 (연한색)
+                </span>
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span className="w-3 h-3 rounded-sm bg-violet-500" />
+                  현재가치 (진한색)
+                </span>
               </div>
             </div>
           </div>
@@ -500,35 +538,89 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
         </Card>
       )}
 
-      {/* 계좌별 자산 추이 */}
-      {chartData.length >= 2 && (
-        <div className="space-y-4">
-          {ACCOUNT_ORDER.map(({ id, label }) => {
-            const hasData = chartData.some((d) => d[id as keyof typeof d] !== undefined);
-            if (!hasData) return null;
-            return (
-              <Card key={id} className="p-5">
-                <h3 className="font-semibold mb-4">{label}</h3>
-                <div className="h-48">
-                  <ResponsiveContainer>
-                    <LineChart data={chartData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                      <XAxis dataKey="label" tick={{ fontSize: 10 }} />
-                      <YAxis
-                        tick={{ fontSize: 10 }}
-                        tickFormatter={fmtAxis}
-                        width={50}
-                        domain={[(dataMin: number) => Math.floor(dataMin * 0.97), (dataMax: number) => Math.ceil(dataMax * 1.01)]}
-                      />
-                      <Tooltip content={<DashboardTooltip />} />
-                      <Line type="monotone" dataKey={id} stroke={ACCOUNT_COLORS[id]} strokeWidth={2} dot={{ r: 2 }} connectNulls />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </Card>
-            );
-          })}
-        </div>
+      {/* 현재가치 비중 & 계좌별 수익 상세 */}
+      {donutData.length > 0 && (
+        <Card className="p-5">
+          <h3 className="font-semibold mb-4 flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-blue-500" />
+            현재가치 비중 &amp; 계좌별 수익 상세
+          </h3>
+          <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-start sm:gap-8">
+            <div className="shrink-0">
+              <PieChart width={210} height={210}>
+                <Pie
+                  data={donutData}
+                  cx="50%" cy="50%"
+                  innerRadius={65} outerRadius={90}
+                  dataKey="value" nameKey="name"
+                  strokeWidth={0}
+                  startAngle={90} endAngle={-270}
+                >
+                  {donutData.map((e) => (
+                    <Cell key={e.id} fill={ACCOUNT_COLORS[e.id]} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  content={({ active, payload }) => {
+                    if (!active || !payload?.length) return null;
+                    const id = (payload[0].payload as any).id as string;
+                    const v = payload[0].value as number;
+                    const pct = grandTotal > 0 ? (v / grandTotal * 100).toFixed(1) : "0";
+                    const s = accountSummaries.find((a) => a.id === id);
+                    return (
+                      <div className="rounded-xl border bg-popover p-3 shadow-md text-xs space-y-1">
+                        <p className="font-semibold mb-0.5">{payload[0].name}</p>
+                        <p className="tabular-nums">{formatKRW(v)}원</p>
+                        <p className="text-muted-foreground">비중 {pct}%</p>
+                        {s?.latestReturnPct !== null && s?.latestReturnPct !== undefined && (
+                          <p className={s.latestReturnPct >= 0 ? "text-emerald-500" : "text-rose-500"}>
+                            수익률 {s.latestReturnPct >= 0 ? "+" : ""}{s.latestReturnPct.toFixed(2)}%
+                          </p>
+                        )}
+                      </div>
+                    );
+                  }}
+                />
+              </PieChart>
+            </div>
+            <div className="w-full space-y-2">
+              {accountSummaries.filter((a) => a.baseAmount > 0 || a.histTotal > 0).map((a) => {
+                const pct = grandTotal > 0 ? (a.histTotal / grandTotal * 100).toFixed(1) : "0";
+                const isUp = (a.latestReturnPct ?? 0) >= 0;
+                return (
+                  <div key={a.id} className="rounded-xl p-3 border bg-muted/30">
+                    <div className="flex items-center gap-2.5 mb-1.5">
+                      <span className="w-3 h-3 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[a.id] }} />
+                      <span className="text-sm font-semibold flex-1">{a.label}</span>
+                      <span className="text-sm font-bold tabular-nums text-muted-foreground">{pct}%</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-xs pl-5">
+                      <div>
+                        <p className="text-muted-foreground mb-0.5">납입원금</p>
+                        <p className="tabular-nums font-medium">{formatKRW(a.baseAmount)}</p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground mb-0.5">현재가치</p>
+                        <p className="tabular-nums font-medium">{formatKRW(a.histTotal)}</p>
+                      </div>
+                      <div>
+                        <p className="text-muted-foreground mb-0.5">수익 / 수익률</p>
+                        <p className={`tabular-nums font-semibold ${a.gain >= 0 ? "text-emerald-500" : "text-rose-500"}`}>
+                          {a.gain >= 0 ? "+" : ""}{formatKRW(a.gain)}
+                        </p>
+                        {a.latestReturnPct !== null && (
+                          <p className={`tabular-nums text-[11px] ${isUp ? "text-emerald-500" : "text-rose-500"}`}>
+                            {isUp ? "+" : ""}{a.latestReturnPct?.toFixed(2)}%
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </Card>
       )}
 
       {/* 계좌별 최근 수익률 테이블 */}
