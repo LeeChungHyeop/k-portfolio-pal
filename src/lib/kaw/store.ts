@@ -69,14 +69,35 @@ export interface StoreState {
   assetLibrary?: AssetDef[];
 }
 
+// ── Built-in ticker codes (KRX 6자리) ─────────────────────────────────────
+const BUILTIN_TICKERS: Partial<Record<AssetKey, string>> = {
+  us:    "360750",
+  kr:    "354500",
+  cn:    "168580",
+  in:    "453890",
+  gold:  "482060",
+  ust10: "453850",
+  ust30: "458250",
+  ktb30: "396600",
+  cash:  "429000",
+};
+
 // ── Global asset library helper ────────────────────────────────────────────
 export function getOrDefaultLibrary(state: StoreState): AssetDef[] {
-  if (state.assetLibrary?.length) return state.assetLibrary;
+  if (state.assetLibrary?.length) {
+    // 기존 라이브러리에 ticker가 없는 내장 종목은 BUILTIN_TICKERS로 자동 보완
+    return state.assetLibrary.map((d) => {
+      if (d.ticker) return d;
+      const builtinTicker = BUILTIN_TICKERS[d.id as AssetKey];
+      return builtinTicker ? { ...d, ticker: builtinTicker } : d;
+    });
+  }
   return ASSET_ORDER.map((k) => ({
     id: k,
     group: ASSET_GROUPS[k].group,
     label: ASSET_GROUPS[k].label,
     defaultEtf: ASSET_GROUPS[k].defaultEtf,
+    ticker: BUILTIN_TICKERS[k],
     isBuiltIn: true,
   }));
 }
