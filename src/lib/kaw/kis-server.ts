@@ -70,7 +70,7 @@ export async function fetchKisPrices(
 
   // 순차 처리로 rate limit 방지 (KIS API 권장: 초당 20건)
   for (const ticker of tickers) {
-    const code = ticker.replace(/\D/g, "").slice(0, 6).padStart(6, "0");
+    const code = ticker.toUpperCase().slice(0, 6);
     const price = await fetchSinglePrice(code, token, appKey, appSecret);
     if (price > 0) results[ticker] = price;
     // 50ms 간격으로 rate limit 방어

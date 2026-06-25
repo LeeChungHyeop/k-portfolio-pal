@@ -93,7 +93,7 @@ export default {
       }
       try {
         const body = await request.json() as { tickers?: unknown };
-        const tickers = Array.isArray(body?.tickers) ? (body.tickers as string[]).filter(t => typeof t === "string" && /^\d{6}$/.test(t)).slice(0, 20) : [];
+        const tickers = Array.isArray(body?.tickers) ? (body.tickers as string[]).filter(t => typeof t === "string" && /^[A-Z0-9]{6}$/i.test(t)).slice(0, 20) : [];
         if (!tickers.length) return Response.json({});
         const prices = await fetchKisPrices(tickers, env.KIS_APP_KEY, env.KIS_APP_SECRET);
         return Response.json(prices, { headers: { "Cache-Control": "no-store" } });

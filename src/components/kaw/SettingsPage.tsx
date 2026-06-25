@@ -315,7 +315,7 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
     setDraftLib((prev) => prev.map((d) => d.id === id ? { ...d, defaultEtf: v } : d));
   }
   function handleTickerChange(id: string, v: string) {
-    const code = v.replace(/\D/g, "").slice(0, 6);
+    const code = v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
     setDraftLib((prev) => prev.map((d) => d.id === id ? { ...d, ticker: code } : d));
   }
   function handleDelete(id: string) {
@@ -328,7 +328,7 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
       group: showAddFor,
       label: addLabel.trim(),
       defaultEtf: addEtf.trim(),
-      ticker: addTicker.replace(/\D/g, "").slice(0, 6),
+      ticker: addTicker.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6),
       isBuiltIn: false,
     };
     setDraftLib((prev) => [...prev, newDef]);
@@ -492,7 +492,7 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
                   <div className="relative shrink-0">
                     <Input
                       value={addTicker}
-                      onChange={(e) => setAddTicker(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                      onChange={(e) => setAddTicker(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6))}
                       placeholder="종목코드*"
                       className={`h-8 text-sm w-24 text-center tabular-nums ${addTicker.length === 6 ? "border-emerald-400/60" : addTicker.length > 0 ? "border-amber-400/60" : "border-rose-400/40"}`}
                       maxLength={6}

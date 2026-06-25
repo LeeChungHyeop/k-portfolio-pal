@@ -75,7 +75,8 @@ const BUILTIN_TICKERS: Partial<Record<AssetKey, string>> = {
   kr:    "294400",
   cn:    "283580",
   in:    "453810",
-  // gold, ust10 — 코드 확인 중
+  gold:  "0072R0",
+  ust10: "0085P0",
   ust30: "458250",
   ktb30: "396600",
   cash:  "429000",
