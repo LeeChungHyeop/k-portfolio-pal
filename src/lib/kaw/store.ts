@@ -72,11 +72,10 @@ export interface StoreState {
 // ── Built-in ticker codes (KRX 6자리) ─────────────────────────────────────
 const BUILTIN_TICKERS: Partial<Record<AssetKey, string>> = {
   us:    "360750",
-  kr:    "354500",
-  cn:    "168580",
-  in:    "453890",
-  gold:  "482060",
-  ust10: "453850",
+  kr:    "294400",
+  cn:    "283580",
+  in:    "453810",
+  // gold, ust10 — 코드 확인 중
   ust30: "458250",
   ktb30: "396600",
   cash:  "429000",
