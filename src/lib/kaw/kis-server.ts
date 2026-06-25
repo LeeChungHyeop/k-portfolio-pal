@@ -5,6 +5,8 @@ interface KisToken { access_token: string; expires_at: number; }
 
 let _token: KisToken | null = null;
 
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function getToken(appKey: string, appSecret: string): Promise<string> {
   const now = Date.now();
   if (_token && _token.expires_at > now + 60_000) return _token.access_token;
@@ -29,6 +31,7 @@ async function getToken(appKey: string, appSecret: string): Promise<string> {
 }
 
 // J(KOSPI) → Q(KOSDAQ) → ETF 순으로 fallback
+// 각 시장코드 시도 사이에도 딜레이를 줘서 rate limit 방어
 const MARKET_CODES = ["J", "Q", "ETF"] as const;
 
 async function fetchSinglePrice(
@@ -44,13 +47,15 @@ async function fetchSinglePrice(
     "content-type": "application/json",
   };
 
-  for (const mktDiv of MARKET_CODES) {
+  for (let i = 0; i < MARKET_CODES.length; i++) {
+    if (i > 0) await delay(150); // 시장코드 재시도 간격
+    const mktDiv = MARKET_CODES[i];
     try {
       const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price?FID_COND_MRKT_DIV_CODE=${mktDiv}&FID_INPUT_ISCD=${code}`;
       const res = await fetch(url, { headers: { ...headers, tr_id: "FHKST01010100" } });
       if (!res.ok) continue;
       const d = await res.json() as { output?: { stck_prpr?: string }; rt_cd?: string };
-      if (d.rt_cd !== "0") continue; // KIS 오류 코드
+      if (d.rt_cd !== "0") continue;
       const price = parseInt(d.output?.stck_prpr ?? "0", 10);
       if (price > 0) return price;
     } catch {
@@ -68,13 +73,12 @@ export async function fetchKisPrices(
   const token = await getToken(appKey, appSecret);
   const results: Record<string, number> = {};
 
-  // 순차 처리로 rate limit 방지 (KIS API 권장: 초당 20건)
   for (const ticker of tickers) {
     const code = ticker.toUpperCase().slice(0, 6);
     const price = await fetchSinglePrice(code, token, appKey, appSecret);
     if (price > 0) results[ticker] = price;
-    // 50ms 간격으로 rate limit 방어
-    await new Promise((r) => setTimeout(r, 50));
+    // 200ms 간격 — KIS 개인 계정 rate limit(20req/s) 여유있게 준수
+    await delay(200);
   }
 
   return results;
