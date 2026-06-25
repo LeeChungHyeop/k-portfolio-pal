@@ -258,7 +258,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                 checked={liveMode}
                 onCheckedChange={(v) => {
                   setLiveMode(v);
-                  if (v) toast.success("실시간 모드 활성화 — 종목코드를 입력해 주세요");
+                  if (v) toast.success("실시간 모드 활성화 — 보유수량을 입력해 주세요");
                 }}
               />
             </div>
