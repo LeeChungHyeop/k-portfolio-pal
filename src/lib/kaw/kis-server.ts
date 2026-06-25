@@ -28,6 +28,38 @@ async function getToken(appKey: string, appSecret: string): Promise<string> {
   return _token.access_token;
 }
 
+// J(KOSPI) → Q(KOSDAQ) → ETF 순으로 fallback
+const MARKET_CODES = ["J", "Q", "ETF"] as const;
+
+async function fetchSinglePrice(
+  code: string,
+  token: string,
+  appKey: string,
+  appSecret: string,
+): Promise<number> {
+  const headers = {
+    authorization: `Bearer ${token}`,
+    appkey: appKey,
+    appsecret: appSecret,
+    "content-type": "application/json",
+  };
+
+  for (const mktDiv of MARKET_CODES) {
+    try {
+      const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price?FID_COND_MRKT_DIV_CODE=${mktDiv}&FID_INPUT_ISCD=${code}`;
+      const res = await fetch(url, { headers: { ...headers, tr_id: "FHKST01010100" } });
+      if (!res.ok) continue;
+      const d = await res.json() as { output?: { stck_prpr?: string }; rt_cd?: string };
+      if (d.rt_cd !== "0") continue; // KIS 오류 코드
+      const price = parseInt(d.output?.stck_prpr ?? "0", 10);
+      if (price > 0) return price;
+    } catch {
+      continue;
+    }
+  }
+  return 0;
+}
+
 export async function fetchKisPrices(
   tickers: string[],
   appKey: string,
@@ -36,27 +68,14 @@ export async function fetchKisPrices(
   const token = await getToken(appKey, appSecret);
   const results: Record<string, number> = {};
 
-  await Promise.all(tickers.map(async (ticker) => {
-    try {
-      const code = ticker.replace(/\D/g, "").slice(0, 6).padStart(6, "0");
-      const url = `https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-price?FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=${code}`;
-      const res = await fetch(url, {
-        headers: {
-          authorization: `Bearer ${token}`,
-          appkey: appKey,
-          appsecret: appSecret,
-          tr_id: "FHKST01010100",
-          "content-type": "application/json",
-        },
-      });
-      if (!res.ok) return;
-      const d = await res.json() as { output?: { stck_prpr?: string; hts_kor_isnm?: string } };
-      const price = parseInt(d.output?.stck_prpr ?? "0", 10);
-      if (price > 0) results[ticker] = price;
-    } catch {
-      // ticker failed — skip silently, caller sees missing key
-    }
-  }));
+  // 순차 처리로 rate limit 방지 (KIS API 권장: 초당 20건)
+  for (const ticker of tickers) {
+    const code = ticker.replace(/\D/g, "").slice(0, 6).padStart(6, "0");
+    const price = await fetchSinglePrice(code, token, appKey, appSecret);
+    if (price > 0) results[ticker] = price;
+    // 50ms 간격으로 rate limit 방어
+    await new Promise((r) => setTimeout(r, 50));
+  }
 
   return results;
 }
