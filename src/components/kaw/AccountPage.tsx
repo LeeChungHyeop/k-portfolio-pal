@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
 import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap } from "lucide-react";
 import { toast } from "sonner";
-import { useKisPrices } from "@/lib/kaw/useKisPrices";
+import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
@@ -137,25 +137,17 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
 
   const manualTotal = rows.reduce((s, r) => s + r.value, 0);
 
-  // ── TanStack Query: 실시간 주가 ───────────────────────────────────────
-  // Preloader(index.tsx)와 동일한 allTickers → 같은 queryKey → cache hit
-  const activeTickers = useMemo(
-    () => liveMode
-      ? [...new Set(library.map((d) => d.ticker).filter((t): t is string => typeof t === "string" && t.length === 6))]
-      : [],
-    [liveMode, library],
-  );
-  const { data: priceData, isLoading: priceLoading, isError: priceError, refetch: refetchPrices } = useKisPrices(activeTickers, liveMode);
+  // ── 실시간 주가: 전역 KisPriceContext에서 읽기 (로그인 시 선제 로딩)
+  const { prices: livePrices, configured, isLoading: priceLoading, refetch: refetchPrices } = useKisPriceContext();
 
-  // Show toast when live mode has an issue
+  // KIS API 미설정 시 안내 toast (최초 1회)
   useEffect(() => {
-    if (!liveMode) return;
-    if (priceError) toast.error("주가를 불러오지 못했습니다. 수동 입력 모드로 폴백됩니다.");
-    else if (priceData && !priceData.configured) toast.error("KIS API 인증 정보가 설정되지 않았습니다. 수동 입력 모드로 유지됩니다.");
-  }, [priceError, priceData?.configured, liveMode]);
+    if (liveMode && !configured) {
+      toast.error("KIS API 인증 정보가 설정되지 않았습니다. 수동 입력 모드로 유지됩니다.");
+    }
+  }, [liveMode, configured]);
 
-  const isLiveActive = liveMode && !priceError && !!priceData?.configured;
-  const livePrices = priceData?.prices ?? {};
+  const isLiveActive = liveMode && configured && Object.keys(livePrices).length > 0;
 
   // ── 실시간 계산 ────────────────────────────────────────────────────────
   const liveValueByRow = useMemo((): Record<string, number> => {

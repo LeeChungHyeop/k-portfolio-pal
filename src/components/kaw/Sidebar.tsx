@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, FlaskConical } from "lucide-react";
+import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, Wifi, WifiOff } from "lucide-react";
 import { usePortfolioStore, syncNow } from "@/lib/kaw/store";
 import { type FamilyData } from "@/lib/kaw/auth";
+import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 
-export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings" | "lab";
+export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
 const DEPLOY_DATE = "2026.06.25 16:54";
 
@@ -26,6 +27,7 @@ interface Props {
 
 export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose }: Props) {
   const { familyCode, currentUser, dbLoading, dbError, hasSupabase, deactivateProfile, logoutCode } = usePortfolioStore();
+  const { successCount, totalCount, configured, isLoading: priceLoading } = useKisPriceContext();
 
   const [dark, setDark] = useState(() => {
     if (typeof document === "undefined") return true;
@@ -126,21 +128,26 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
           })}
         </div>
 
-        {/* 구분선 + 실험실 */}
-        <div className="mx-1 my-3 border-t border-border/60" />
-        <p className="px-3 mb-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">분석</p>
-        <button
-          onClick={() => { onNavigate("lab"); onMobileClose?.(); }}
-          className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
-            active === "lab"
-              ? "bg-gradient-to-r from-violet-500/10 to-blue-500/10 text-foreground shadow-sm border border-violet-200/50 dark:border-violet-800/50"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          }`}
-        >
-          <FlaskConical className={`w-4 h-4 shrink-0 ${active === "lab" ? "text-violet-500" : ""}`} />
-          <span className="truncate">성과 분석 실험실</span>
-          {active === "lab" && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-violet-500" />}
-        </button>
+        {/* 구분선 + 실시간 주가 연동 현황 */}
+        {totalCount > 0 && (
+          <>
+            <div className="mx-1 my-3 border-t border-border/60" />
+            <div className="px-3 py-1.5 rounded-xl mx-1 text-xs flex items-center gap-1.5 bg-muted/40">
+              {priceLoading && successCount === 0 ? (
+                <><RefreshCw className="w-3.5 h-3.5 animate-spin text-violet-400 shrink-0" />
+                  <span className="text-muted-foreground">주가 로딩 중…</span></>
+              ) : !configured ? (
+                <><WifiOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                  <span className="text-rose-500 flex-1 truncate">KIS API 미설정</span></>
+              ) : (
+                <><Wifi className={`w-3.5 h-3.5 shrink-0 ${successCount === totalCount ? "text-emerald-500" : "text-amber-500"}`} />
+                  <span className={`flex-1 ${successCount === totalCount ? "text-muted-foreground" : "text-amber-500"}`}>
+                    실시간 주가 {successCount}/{totalCount}
+                  </span></>
+              )}
+            </div>
+          </>
+        )}
       </nav>
 
       {/* 동기화 상태 + 수동 동기화 버튼 */}
