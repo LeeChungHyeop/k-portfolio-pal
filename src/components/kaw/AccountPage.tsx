@@ -128,7 +128,9 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       const value = account.rowHoldings?.[row.id] ?? legacyValue;
       const prevValue = ASSET_ORDER.includes(row.assetId as AssetKey)
         ? (lastHistory?.holdings?.[row.assetId as AssetKey] ?? null) : null;
-      const ticker = def?.ticker ?? "";
+      // ETF명으로 먼저 찾고, 없으면 assetId로 fallback
+      const tickerByEtf = library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker;
+      const ticker = tickerByEtf ?? def?.ticker ?? "";
       return { rowId: row.id, assetId: row.assetId, etfName, group, label, alloc, value, prevValue, ticker };
     });
   }, [account, profileRows, profileAlloc, library, lastHistory]);
