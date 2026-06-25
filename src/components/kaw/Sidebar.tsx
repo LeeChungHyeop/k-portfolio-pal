@@ -6,7 +6,7 @@ import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 
 export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
-const DEPLOY_DATE = "2026.06.25 16:54";
+const DEPLOY_DATE = "2026.06.25 17:40";
 
 const NAV = [
   { id: "dashboard"  as Page, label: "대시보드",    icon: LayoutDashboard, color: "text-violet-500" },
