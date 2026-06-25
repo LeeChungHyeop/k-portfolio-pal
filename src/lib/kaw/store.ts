@@ -77,8 +77,8 @@ const BUILTIN_TICKERS: Partial<Record<AssetKey, string>> = {
   in:    "453810",
   gold:  "0072R0",
   ust10: "0085P0",
-  ust30: "458250",
-  ktb30: "396600",
+  ust30: "484790",
+  ktb30: "385560",
   cash:  "429000",
 };
 
