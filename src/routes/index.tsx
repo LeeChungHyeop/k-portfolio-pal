@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Menu, Wallet, RefreshCw } from "lucide-react";
 import { Sidebar, type Page } from "@/components/kaw/Sidebar";
 import { Dashboard } from "@/components/kaw/Dashboard";
@@ -9,7 +9,8 @@ import { LabPage } from "@/components/kaw/LabPage";
 import { AuthGate } from "@/components/kaw/AuthGate";
 import { ProfileSelect } from "@/components/kaw/ProfileSelect";
 import { PinGate } from "@/components/kaw/PinGate";
-import { usePortfolioStore, activateProfile, deactivateProfile, logoutCode } from "@/lib/kaw/store";
+import { usePortfolioStore, activateProfile, deactivateProfile, logoutCode, getOrDefaultLibrary } from "@/lib/kaw/store";
+import { useKisPrices } from "@/lib/kaw/useKisPrices";
 import {
   type ProfileConfig, type FamilyData,
   loadFamilyData, defaultFamilyData, setSessionProfile,
@@ -25,6 +26,19 @@ export const Route = createFileRoute("/")({
   }),
   component: Index,
 });
+
+// 앱 시작 시 전체 종목 가격을 선제적으로 fetch — 이후 리밸런싱 탭 진입 시 cache hit
+function KisPricePreloader() {
+  const { state } = usePortfolioStore();
+  const library = getOrDefaultLibrary(state);
+  const allTickers = useMemo(
+    () => [...new Set(library.map((d) => d.ticker).filter((t): t is string => typeof t === "string" && t.length === 6))],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.assetLibrary],
+  );
+  useKisPrices(allTickers, allTickers.length > 0);
+  return null;
+}
 
 function LoadingScreen() {
   return (
@@ -122,6 +136,7 @@ function Index() {
 
   return (
     <div className="flex bg-background overflow-hidden" style={{ height: "100dvh" }}>
+      <KisPricePreloader />
       {sidebarOpen && (
         <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setSidebarOpen(false)} />
       )}

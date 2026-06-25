@@ -109,7 +109,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     account.history.length > 0 ? account.history[account.history.length - 1] : null;
 
   // ── 실시간 모드 상태 ───────────────────────────────────────────────────
-  const [liveMode, setLiveMode] = useState(false);
+  const [liveMode, setLiveMode] = useState(true);
 
   // 보유수량 — rowId 키, 로컬 state (세션 내 유지)
   const [quantities, setQuantities] = useState<Record<string, number>>({});
@@ -138,9 +138,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   const manualTotal = rows.reduce((s, r) => s + r.value, 0);
 
   // ── TanStack Query: 실시간 주가 ───────────────────────────────────────
-  const activeTickers = liveMode
-    ? [...new Set(rows.map((r) => r.ticker).filter((t): t is string => t.length === 6))]
-    : [];
+  // Preloader(index.tsx)와 동일한 allTickers → 같은 queryKey → cache hit
+  const activeTickers = useMemo(
+    () => liveMode
+      ? [...new Set(library.map((d) => d.ticker).filter((t): t is string => typeof t === "string" && t.length === 6))]
+      : [],
+    [liveMode, library],
+  );
   const { data: priceData, isLoading: priceLoading, isError: priceError, refetch: refetchPrices } = useKisPrices(activeTickers, liveMode);
 
   // Show toast when live mode has an issue

@@ -29,8 +29,8 @@ export function useKisPrices(tickers: string[], enabled: boolean) {
     queryKey: ["kis-prices", [...tickers].sort().join(",")],
     queryFn: () => fetchPrices(tickers),
     enabled: enabled && tickers.length > 0,
-    refetchInterval: 60_000,
-    staleTime: 55_000,
+    refetchInterval: 600_000,  // 10분
+    staleTime: 595_000,        // 10분 - 5초
     retry: 2,
     retryDelay: 3_000,
   });
