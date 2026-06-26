@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, Wifi, WifiOff } from "lucide-react";
-import { usePortfolioStore, syncNow } from "@/lib/kaw/store";
+import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, Wifi, WifiOff, Info } from "lucide-react";
+import { usePortfolioStore, syncNow, getOrDefaultLibrary, formatKRW } from "@/lib/kaw/store";
 import { type FamilyData } from "@/lib/kaw/auth";
-import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
+import { useKisPriceContext, type TickerMeta } from "@/lib/kaw/KisPriceContext";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 export type Page = "dashboard" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
@@ -25,9 +27,77 @@ interface Props {
   onFamilyUpdate?: (fd: FamilyData) => void;
 }
 
+function fmtTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString("ko-KR", {
+      timeZone: "Asia/Seoul",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+  } catch { return iso; }
+}
+
+function PriceDetailDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { prices, meta, totalCount } = useKisPriceContext();
+  const { state } = usePortfolioStore();
+  const library = getOrDefaultLibrary(state);
+  const allTickers = [...new Set(
+    library.map((d) => d.ticker).filter((t): t is string => typeof t === "string" && t.length === 6),
+  )];
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="text-base">실시간 주가 연동 현황</DialogTitle>
+        </DialogHeader>
+        <ScrollArea className="max-h-[70vh]">
+          <div className="space-y-1 pr-2">
+            {totalCount === 0 ? (
+              <p className="text-sm text-muted-foreground py-4 text-center">종목 없음</p>
+            ) : allTickers.map((ticker) => {
+              const def = library.find((d) => d.ticker === ticker);
+              const m: TickerMeta | undefined = meta[ticker];
+              const price = prices[ticker] ?? 0;
+              const isLoading = !m && Object.keys(meta).length === 0;
+              const source = m?.source;
+              const srcLabel = isLoading ? "—" : source === "kis" ? "KIS" : source === "naver" ? "네이버" : "실패";
+              const srcColor = isLoading ? "text-muted-foreground" : source === "kis" ? "text-blue-500" : source === "naver" ? "text-emerald-500" : "text-rose-500";
+              return (
+                <div key={ticker} className="rounded-lg border bg-muted/30 px-3 py-2.5 space-y-0.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-semibold truncate">{def?.defaultEtf ?? def?.label ?? ticker}</p>
+                      <p className="text-[10px] text-muted-foreground">{def?.label ?? ""} · <span className="font-mono">{ticker}</span></p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-xs font-semibold tabular-nums">
+                        {price > 0 ? `₩${formatKRW(price)}` : "—"}
+                      </p>
+                      <p className={`text-[10px] font-medium ${srcColor}`}>{srcLabel}</p>
+                    </div>
+                  </div>
+                  {m && (
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] text-muted-foreground">{fmtTime(m.timestamp)}</p>
+                      {m.source === "failed" && m.error && (
+                        <p className="text-[10px] text-rose-500 truncate max-w-[60%] text-right" title={m.error}>{m.error}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </ScrollArea>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose }: Props) {
   const { familyCode, currentUser, dbLoading, dbError, hasSupabase, deactivateProfile, logoutCode } = usePortfolioStore();
   const { successCount, totalCount, configured, isLoading: priceLoading } = useKisPriceContext();
+  const [priceDetailOpen, setPriceDetailOpen] = useState(false);
 
   const [dark, setDark] = useState(() => {
     if (typeof document === "undefined") return true;
@@ -135,7 +205,7 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
             <div className="px-3 py-1.5 rounded-xl mx-1 text-xs flex items-center gap-1.5 bg-muted/40">
               {priceLoading && successCount === 0 ? (
                 <><RefreshCw className="w-3.5 h-3.5 animate-spin text-violet-400 shrink-0" />
-                  <span className="text-muted-foreground">주가 로딩 중…</span></>
+                  <span className="text-muted-foreground flex-1">주가 로딩 중…</span></>
               ) : !configured ? (
                 <><WifiOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
                   <span className="text-rose-500 flex-1 truncate">KIS API 미설정</span></>
@@ -145,9 +215,17 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
                     실시간 주가 {successCount}/{totalCount}
                   </span></>
               )}
+              <button
+                onClick={() => setPriceDetailOpen(true)}
+                className="ml-auto shrink-0 p-0.5 rounded hover:bg-muted transition-colors"
+                title="상세 보기"
+              >
+                <Info className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
+              </button>
             </div>
           </>
         )}
+        <PriceDetailDialog open={priceDetailOpen} onClose={() => setPriceDetailOpen(false)} />
       </nav>
 
       {/* 동기화 상태 + 수동 동기화 버튼 */}
