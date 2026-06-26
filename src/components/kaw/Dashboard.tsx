@@ -30,8 +30,6 @@ const ACCOUNT_COLORS_SOFT: Record<string, string> = {
   irp:        "oklch(0.78 0.12 320)",
 };
 
-type GranularityTab = "daily" | "monthly" | "yearly";
-
 function DashboardTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
   const total = payload.reduce((s: number, p: any) => s + (p.value ?? 0), 0);
@@ -103,24 +101,9 @@ function DepositTooltip({ active, payload, label }: any) {
   );
 }
 
-function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      onClick={onClick}
-      className={[
-        "px-3 py-1 text-xs rounded-lg font-medium transition-all",
-        active ? "bg-violet-500 text-white shadow-sm" : "text-muted-foreground hover:text-foreground hover:bg-muted",
-      ].join(" ")}
-    >
-      {children}
-    </button>
-  );
-}
-
 export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
   const { state } = usePortfolioStore();
   const library = useMemo(() => getOrDefaultLibrary(state), [state.assetLibrary]);
-  const [returnTab, setReturnTab] = useState<GranularityTab>("monthly");
   const [liveMode, setLiveMode] = useState(true);
 
   const { prices: livePrices, configured, isLoading: priceLoading, successCount, totalCount } = useKisPriceContext();
@@ -252,9 +235,9 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
     };
   }, [state]);
 
-  // 실시간 "현재" 수익률 포인트
+  // "현재" 수익률 포인트 (일간 기준 — 리밸런싱 날짜만 포함)
   const returnDataWithLive = useMemo(() => {
-    const base = cumulativeReturnData[returnTab];
+    const base = cumulativeReturnData.daily;
     if (!anyLive) return base;
     const livePoint: Record<string, unknown> = { key: "현재", label: "현재" };
     let hasAny = false;
@@ -273,7 +256,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       hasAny = true;
     }
     return hasAny ? [...base, livePoint as any] : base;
-  }, [cumulativeReturnData, returnTab, accountSummaries, anyLive, state.accounts]);
+  }, [cumulativeReturnData, accountSummaries, anyLive, state.accounts]);
 
   // 월별 납입 현황 (리밸런싱 기준 그대로)
   const monthlyDepositData = useMemo(() => {
@@ -372,9 +355,6 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       <Card className="p-5">
         <div className="flex items-center justify-between">
           <p className="text-sm text-muted-foreground">총 포트폴리오 자산</p>
-          {isLiveActive && anyLive && (
-            <span className="text-[10px] text-emerald-500 font-medium bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded-full">실시간</span>
-          )}
         </div>
         <p className="text-3xl font-bold tabular-nums mt-1">{formatKRW(grandTotal)} 원</p>
         {isLiveActive && anyLive && grandBase > 0 && (
@@ -398,10 +378,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               <div className="flex items-center justify-between gap-1">
                 <p className="text-sm font-medium truncate">{a.label}</p>
                 <div className="flex items-center gap-1 shrink-0">
-                  {a.hasLive && (
-                    <span className="text-[9px] text-emerald-500 font-bold bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-0.5 rounded-full">실시간</span>
-                  )}
-                  {a.latestReturnPct !== null && !a.hasLive && (
+                  {a.latestReturnPct !== null && (
                     <span className={`flex items-center gap-0.5 text-xs font-medium ${isUp ? "text-emerald-600" : "text-rose-600"}`}>
                       {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
                       {formatPct(a.latestReturnPct)}
@@ -427,9 +404,6 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
           <h3 className="font-semibold mb-4 flex items-center gap-2">
             <Wallet className="w-4 h-4 text-violet-500" />
             납입원금과 현재가치
-            {isLiveActive && anyLive && (
-              <span className="text-[10px] text-emerald-500 font-medium bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded-full ml-1">실시간</span>
-            )}
           </h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
             <div className="space-y-1">
@@ -444,7 +418,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
                 <TrendingUp className="w-3.5 h-3.5" /> 현재가치
               </p>
               <p className="text-xl font-bold tabular-nums">{formatKRW(grandTotal)}</p>
-              <p className="text-xs text-muted-foreground">{isLiveActive && anyLive ? "실시간 평가금액" : "최근 리밸런싱 기준"}</p>
+              <p className="text-xs text-muted-foreground">최근 리밸런싱 기준</p>
             </div>
             <div className="space-y-1">
               <p className="text-xs text-muted-foreground">순수익</p>
@@ -490,7 +464,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
                     }} />
                   </PieChart>
                 </div>
-                <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-1 sm:gap-x-0 lg:grid-cols-2">
+                <div className="grid grid-cols-2 gap-x-8 gap-y-3 sm:grid-cols-1 sm:gap-x-0 lg:grid-cols-2">
                   {principalChartData.map((e) => (
                     <div key={e.id} className="flex items-center gap-2 text-sm">
                       <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[e.id] }} />
@@ -506,7 +480,6 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
             <div className="flex-1 min-w-0">
               <p className="text-xs font-medium text-muted-foreground mb-3 text-center">
                 계좌별 납입원금 vs 현재가치
-                {isLiveActive && anyLive && <span className="ml-1 text-emerald-500">(실시간)</span>}
               </p>
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={barData} barCategoryGap="28%" barGap={4}>
@@ -562,15 +535,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       {/* 누적 수익률 */}
       {hasReturnData && (
         <Card className="p-5">
-          <div className="flex items-center justify-between mb-1">
-            <h3 className="font-semibold">누적 수익률</h3>
-            <div className="flex gap-1 bg-muted p-0.5 rounded-lg">
-              <TabButton active={returnTab === "daily"}   onClick={() => setReturnTab("daily")}>일간</TabButton>
-              <TabButton active={returnTab === "monthly"} onClick={() => setReturnTab("monthly")}>월간</TabButton>
-              <TabButton active={returnTab === "yearly"}  onClick={() => setReturnTab("yearly")}>연간</TabButton>
-            </div>
-          </div>
-          <p className="text-xs text-muted-foreground mb-4">납입금 제외 · 순수 투자 수익률 누적{isLiveActive && anyLive ? " · 우측 끝 포인트: 실시간" : ""}</p>
+          <h3 className="font-semibold mb-1">누적 수익률</h3>
+          <p className="text-xs text-muted-foreground mb-4">납입금 제외 · 순수 투자 수익률 누적</p>
 
           {/* 계좌별 현재 누적 수익률 요약 */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
@@ -578,8 +544,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               const cum = anyLive ? liveCumReturns[a.id] : latestCumReturns[a.id];
               if (cum === null || cum === undefined) return null;
               return (
-                <div key={a.id} className={`rounded-lg px-3 py-2 text-center ${a.hasLive ? "bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/50 dark:border-emerald-800/30" : "bg-muted/50"}`}>
-                  <p className="text-xs text-muted-foreground">{a.label}{a.hasLive ? " 🔴" : ""}</p>
+                <div key={a.id} className="rounded-lg px-3 py-2 text-center bg-muted/50">
+                  <p className="text-xs text-muted-foreground">{a.label}</p>
                   <p className={`text-base font-bold tabular-nums mt-0.5 ${cum >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
                     {cum >= 0 ? "+" : ""}{cum.toFixed(2)}%
                   </p>
@@ -639,10 +605,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       {/* 전체 자산 추이 */}
       {chartDataWithLive.length >= 2 && (
         <Card className="p-5">
-          <h3 className="font-semibold mb-4">
-            전체 자산 추이
-            {isLiveActive && anyLive && <span className="text-xs text-emerald-500 font-normal ml-2">· 우측 끝: 현재(실시간)</span>}
-          </h3>
+          <h3 className="font-semibold mb-4">전체 자산 추이</h3>
           <div className="h-72">
             <ResponsiveContainer>
               <LineChart data={chartDataWithLive}>
@@ -666,9 +629,6 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
           <h3 className="font-semibold mb-4 flex items-center gap-2">
             <TrendingUp className="w-4 h-4 text-blue-500" />
             현재가치 비중 &amp; 계좌별 수익 상세
-            {isLiveActive && anyLive && (
-              <span className="text-[10px] text-emerald-500 font-medium bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded-full">실시간</span>
-            )}
           </h3>
           <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-start sm:gap-8">
             <div className="shrink-0">
@@ -714,7 +674,6 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
                     <div className="flex items-center gap-2.5 mb-1.5">
                       <span className="w-3 h-3 rounded-full shrink-0" style={{ background: ACCOUNT_COLORS[a.id] }} />
                       <span className="text-sm font-semibold flex-1">{a.label}</span>
-                      {a.hasLive && <span className="text-[9px] text-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-0.5 rounded-full font-medium">실시간</span>}
                       <span className="text-sm font-bold tabular-nums text-muted-foreground">{pct}%</span>
                     </div>
                     <div className="grid grid-cols-3 gap-2 text-xs pl-5">
@@ -723,7 +682,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
                         <p className="tabular-nums font-medium">{formatKRW(a.baseAmount)}</p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground mb-0.5">현재가치{a.hasLive ? " 🔴" : ""}</p>
+                        <p className="text-muted-foreground mb-0.5">현재가치</p>
                         <p className="tabular-nums font-medium">{formatKRW(a.liveTotal)}</p>
                       </div>
                       <div>
