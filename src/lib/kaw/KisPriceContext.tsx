@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import React, { createContext, useContext, useMemo, useState, useCallback } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePortfolioStore, getOrDefaultLibrary } from "./store";
 import type { TickerResult } from "./kis-server";
 
@@ -16,7 +16,9 @@ export interface KisPriceCtx {
   totalCount: number;
   configured: boolean;
   isLoading: boolean;
+  retryingTickers: Set<string>;
   refetch: () => void;
+  refetchSingleTicker: (ticker: string) => Promise<void>;
 }
 
 const KisPriceContext = createContext<KisPriceCtx>({
@@ -26,7 +28,9 @@ const KisPriceContext = createContext<KisPriceCtx>({
   totalCount: 0,
   configured: true,
   isLoading: false,
+  retryingTickers: new Set(),
   refetch: () => {},
+  refetchSingleTicker: async () => {},
 });
 
 interface ServerResponse {
@@ -66,9 +70,19 @@ async function batchFetchPrices(tickers: string[]): Promise<{
   return { prices, meta, configured: true };
 }
 
+// KRX 운영시간 체크 (한국시간 평일 09:00 ~ 15:30)
+function isKrxMarketOpen(): boolean {
+  const kst = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
+  const day = kst.getDay(); // 0=일, 6=토
+  if (day === 0 || day === 6) return false;
+  const mins = kst.getHours() * 60 + kst.getMinutes();
+  return mins >= 9 * 60 && mins < 15 * 60 + 30;
+}
+
 export function KisPriceProvider({ children }: { children: React.ReactNode }) {
   const { state } = usePortfolioStore();
   const library = getOrDefaultLibrary(state);
+  const queryClient = useQueryClient();
 
   const allTickers = useMemo(
     () => [...new Set(
@@ -78,12 +92,15 @@ export function KisPriceProvider({ children }: { children: React.ReactNode }) {
     [state.assetLibrary],
   );
 
+  const queryKey = useMemo(() => ["kis-prices", [...allTickers].sort().join(",")], [allTickers]);
+
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ["kis-prices", [...allTickers].sort().join(",")],
+    queryKey,
     queryFn: () => batchFetchPrices(allTickers),
     enabled: allTickers.length > 0,
-    // 실패 종목 있으면 30초 재시도, 전부 성공이면 5분 간격
     refetchInterval: (query) => {
+      // 장 마감 후·주말·야간에는 폴링 중지
+      if (!isKrxMarketOpen()) return false;
       const prices = query.state.data?.prices;
       if (!prices) return 30_000;
       const hasFailed = allTickers.some((t) => !prices[t]);
@@ -94,6 +111,30 @@ export function KisPriceProvider({ children }: { children: React.ReactNode }) {
     retryDelay: 5_000,
   });
 
+  // 개별 종목 재시도 — 해당 ticker만 요청 후 쿼리 캐시 머지
+  const [retryingTickers, setRetryingTickers] = useState<Set<string>>(new Set());
+
+  const refetchSingleTicker = useCallback(async (ticker: string) => {
+    setRetryingTickers((prev) => new Set([...prev, ticker]));
+    try {
+      const result = await batchFetchPrices([ticker]);
+      queryClient.setQueryData(queryKey, (old: typeof data | undefined) => {
+        if (!old) return result;
+        return {
+          ...old,
+          prices: { ...old.prices, ...result.prices },
+          meta: { ...old.meta, ...result.meta },
+        };
+      });
+    } finally {
+      setRetryingTickers((prev) => {
+        const next = new Set(prev);
+        next.delete(ticker);
+        return next;
+      });
+    }
+  }, [queryClient, queryKey]);
+
   const prices = data?.prices ?? {};
   const meta = data?.meta ?? {};
   const configured = data?.configured ?? true;
@@ -101,7 +142,10 @@ export function KisPriceProvider({ children }: { children: React.ReactNode }) {
   const totalCount = allTickers.length;
 
   return (
-    <KisPriceContext.Provider value={{ prices, meta, successCount, totalCount, configured, isLoading, refetch }}>
+    <KisPriceContext.Provider value={{
+      prices, meta, successCount, totalCount, configured, isLoading,
+      retryingTickers, refetch, refetchSingleTicker,
+    }}>
       {children}
     </KisPriceContext.Provider>
   );

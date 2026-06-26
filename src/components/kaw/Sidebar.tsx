@@ -37,7 +37,7 @@ function fmtTime(iso: string): string {
 }
 
 function PriceDetailDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { prices, meta, totalCount } = useKisPriceContext();
+  const { prices, meta, totalCount, retryingTickers, refetchSingleTicker } = useKisPriceContext();
   const { state } = usePortfolioStore();
   const library = getOrDefaultLibrary(state);
   const allTickers = [...new Set(
@@ -58,10 +58,13 @@ function PriceDetailDialog({ open, onClose }: { open: boolean; onClose: () => vo
               const def = library.find((d) => d.ticker === ticker);
               const m: TickerMeta | undefined = meta[ticker];
               const price = prices[ticker] ?? 0;
-              const isLoading = !m && Object.keys(meta).length === 0;
+              const isFirstLoad = !m && Object.keys(meta).length === 0;
               const source = m?.source;
-              const srcLabel = isLoading ? "—" : source === "kis" ? "KIS" : source === "naver" ? "네이버" : "실패";
-              const srcColor = isLoading ? "text-muted-foreground" : source === "kis" ? "text-blue-500" : source === "naver" ? "text-emerald-500" : "text-rose-500";
+              const isRetrying = retryingTickers.has(ticker);
+              // 재시도 버튼 표시 조건: KIS 실패(Naver fallback) 또는 에러
+              const showRetry = !isFirstLoad && (source === "naver" || source === "failed");
+              const srcLabel = isFirstLoad ? "—" : source === "kis" ? "KIS" : source === "naver" ? "네이버" : "실패";
+              const srcColor = isFirstLoad ? "text-muted-foreground" : source === "kis" ? "text-blue-500" : source === "naver" ? "text-amber-500" : "text-rose-500";
               return (
                 <div key={ticker} className="rounded-lg border bg-muted/30 px-3 py-2.5 space-y-0.5">
                   <div className="flex items-center justify-between gap-2">
@@ -69,11 +72,23 @@ function PriceDetailDialog({ open, onClose }: { open: boolean; onClose: () => vo
                       <p className="text-xs font-semibold truncate">{def?.defaultEtf ?? def?.label ?? ticker}</p>
                       <p className="text-[10px] text-muted-foreground">{def?.label ?? ""} · <span className="font-mono">{ticker}</span></p>
                     </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-xs font-semibold tabular-nums">
-                        {price > 0 ? `₩${formatKRW(price)}` : "—"}
-                      </p>
-                      <p className={`text-[10px] font-medium ${srcColor}`}>{srcLabel}</p>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <div className="text-right">
+                        <p className="text-xs font-semibold tabular-nums">
+                          {price > 0 ? `₩${formatKRW(price)}` : "—"}
+                        </p>
+                        <p className={`text-[10px] font-medium ${srcColor}`}>{srcLabel}</p>
+                      </div>
+                      {showRetry && (
+                        <button
+                          onClick={() => refetchSingleTicker(ticker)}
+                          disabled={isRetrying}
+                          className="p-1.5 rounded-lg hover:bg-muted transition-colors border border-border/50"
+                          title="KIS 재시도"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${isRetrying ? "animate-spin text-violet-500" : "text-muted-foreground"}`} />
+                        </button>
+                      )}
                     </div>
                   </div>
                   {m && (

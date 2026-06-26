@@ -97,7 +97,7 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
    리밸런싱 탭
 ───────────────────────────────────────────── */
 function RebalanceTab({ accountId }: { accountId: AccountId }) {
-  const { state, updateAccount, updateRowHolding, addHistory } = usePortfolioStore();
+  const { state, updateAccount, updateRowHolding, addHistory, saveAccountQuantities } = usePortfolioStore();
   const account = state.accounts[accountId];
   const library = getOrDefaultLibrary(state);
 
@@ -111,8 +111,18 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   // ── 실시간 모드 상태 ───────────────────────────────────────────────────
   const [liveMode, setLiveMode] = useState(true);
 
-  // 보유수량 — rowId 키, 로컬 state (세션 내 유지)
-  const [quantities, setQuantities] = useState<Record<string, number>>({});
+  // 보유수량 — store에서 초기화, 변경 시 자동 영속화
+  const [quantities, setQuantities] = useState<Record<string, number>>(
+    () => account.liveQuantities ?? {},
+  );
+
+  // 수량 변경 시 1초 debounce 후 스토어에 저장
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      saveAccountQuantities(accountId, quantities);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [quantities, accountId, saveAccountQuantities]);
 
   // ── 기본 rows (rowHoldings 기반) ──────────────────────────────────────
   const rows = useMemo(() => {

@@ -70,6 +70,13 @@ async function fetchSingleKisPrice(
   return { price: 0, error: "KIS: J/Q 모두 0 반환" };
 }
 
+function parseKoreanPrice(raw: unknown): number {
+  if (typeof raw === "number") return isNaN(raw) ? 0 : Math.round(raw);
+  const cleaned = String(raw ?? "").replaceAll(",", "").replace(/[^0-9.]/g, "");
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? 0 : Math.round(n);
+}
+
 async function fetchNaverPrice(ticker: string): Promise<{ price: number; error?: string }> {
   try {
     const controller = new AbortController();
@@ -88,9 +95,10 @@ async function fetchNaverPrice(ticker: string): Promise<{ price: number; error?:
     clearTimeout(timer);
     if (!res.ok) return { price: 0, error: `Naver HTTP ${res.status}` };
     const d = await res.json() as Record<string, unknown>;
-    const raw = (d.closePrice ?? d.stockEndPrice ?? d.currentPrice ?? "0") as string;
-    const price = parseInt(String(raw).replace(/[^0-9]/g, ""), 10);
-    return price > 0 ? { price } : { price: 0, error: "Naver: price=0" };
+    // 여러 필드명 시도: 현재가 > 마감가 > 종가
+    const raw = d.closePrice ?? d.stockEndPrice ?? d.currentPrice ?? d.stockPrice ?? "0";
+    const price = parseKoreanPrice(raw);
+    return price > 0 ? { price } : { price: 0, error: "Naver: 가격 0 또는 필드 불일치" };
   } catch (e) {
     return { price: 0, error: `Naver: ${String(e).slice(0, 80)}` };
   }

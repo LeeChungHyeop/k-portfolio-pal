@@ -59,6 +59,7 @@ export interface AccountState {
   holdings: Holding[];
   rowHoldings?: Record<string, number>;  // row instance ID → current market value
   rowMemos?: Record<string, string>;     // key: `${profileKey}:${rowId}`
+  liveQuantities?: Record<string, number>; // rowId → 보유수량 (실시간 계산용, 영속화)
   history: HistoryEntry[];
 }
 export interface StoreState {
@@ -745,6 +746,10 @@ export function usePortfolioStore() {
         ...acc, rowHoldings: { ...(acc.rowHoldings ?? {}), [rowId]: value },
       }}};
     }), []);
+  const saveAccountQuantities = useCallback((id: AccountId, quantities: Record<string, number>) =>
+    setState((s) => ({
+      ...s, accounts: { ...s.accounts, [id]: { ...s.accounts[id], liveQuantities: { ...quantities } } },
+    })), []);
   const updateRowMemo        = useCallback((id: AccountId, memoKey: string, text: string) =>
     setState((s) => {
       const acc = s.accounts[id];
@@ -809,6 +814,7 @@ export function usePortfolioStore() {
     updateAssetLibrary,
     updateRowHolding,
     updateRowMemo,
+    saveAccountQuantities,
     activateProfile: useCallback((id: string) => activateProfile(id), []),
     deactivateProfile: useCallback(() => deactivateProfile(), []),
     logoutCode:    useCallback(() => logoutCode(), []),
