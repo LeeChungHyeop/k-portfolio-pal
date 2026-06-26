@@ -209,6 +209,10 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       totalValue: effectiveTotal,
       deposit: account.deposit,
       holdings: holdingsSnap,
+      rowHoldingsSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.value])),
+      rowQuantitiesSnap: { ...quantities },
+      rowEtfSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.etfName])),
+      rowLabelSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.label])),
     });
     toast.success("리밸런싱이 저장됐습니다");
   }
@@ -574,7 +578,9 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
               <TableBody>
                 {reversed.map((h) => {
                   const isExpanded = expandedId === h.id;
-                  const hasHoldings = h.holdings && Object.keys(h.holdings).length > 0;
+                  const hasHoldings =
+                    (h.holdings && Object.keys(h.holdings).length > 0) ||
+                    (h.rowHoldingsSnap && Object.keys(h.rowHoldingsSnap).length > 0);
                   return (
                     <>
                       <TableRow
@@ -623,24 +629,46 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
                           <TableCell colSpan={7} className="p-0">
                             <div className="px-8 py-3">
                               <p className="text-xs font-semibold text-muted-foreground mb-2 uppercase tracking-wide">
-                                {h.date} 종목별 평가금액
+                                {h.date} 종목별 보유현황
                               </p>
-                              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2">
-                                {ASSET_ORDER.map((k) => {
-                                  const val = h.holdings?.[k];
-                                  if (val == null) return null;
-                                  return (
-                                    <div key={k} className="flex items-center gap-2 bg-background rounded-lg px-3 py-2 border text-sm">
-                                      <span className="w-2 h-2 rounded-full shrink-0"
-                                        style={{ background: GROUP_COLORS[ASSET_GROUPS[k].group] }} />
-                                      <div className="min-w-0">
-                                        <p className="text-xs text-muted-foreground truncate">{ASSET_GROUPS[k].label}</p>
-                                        <p className="font-semibold tabular-nums">{formatKRW(val)}</p>
+                              {h.rowHoldingsSnap && Object.keys(h.rowHoldingsSnap).length > 0 ? (
+                                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                                  {Object.entries(h.rowHoldingsSnap)
+                                    .filter(([, v]) => v > 0)
+                                    .map(([rowId, val]) => {
+                                      const etfName = h.rowEtfSnap?.[rowId] ?? rowId;
+                                      const label = h.rowLabelSnap?.[rowId] ?? rowId;
+                                      const qty = h.rowQuantitiesSnap?.[rowId] ?? 0;
+                                      return (
+                                        <div key={rowId} className="bg-background rounded-lg px-3 py-2 border text-sm">
+                                          <p className="text-xs text-muted-foreground truncate">{label}</p>
+                                          <p className="text-[10px] text-muted-foreground/60 truncate mb-0.5">{etfName}</p>
+                                          {qty > 0 && (
+                                            <p className="text-xs text-violet-500 font-medium">{qty}주</p>
+                                          )}
+                                          <p className="font-semibold tabular-nums">{formatKRW(val)}</p>
+                                        </div>
+                                      );
+                                    })}
+                                </div>
+                              ) : (
+                                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2">
+                                  {ASSET_ORDER.map((k) => {
+                                    const val = h.holdings?.[k];
+                                    if (val == null) return null;
+                                    return (
+                                      <div key={k} className="flex items-center gap-2 bg-background rounded-lg px-3 py-2 border text-sm">
+                                        <span className="w-2 h-2 rounded-full shrink-0"
+                                          style={{ background: GROUP_COLORS[ASSET_GROUPS[k].group] }} />
+                                        <div className="min-w-0">
+                                          <p className="text-xs text-muted-foreground truncate">{ASSET_GROUPS[k].label}</p>
+                                          <p className="font-semibold tabular-nums">{formatKRW(val)}</p>
+                                        </div>
                                       </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
                             </div>
                           </TableCell>
                         </TableRow>

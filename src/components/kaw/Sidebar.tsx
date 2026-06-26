@@ -213,39 +213,34 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
           })}
         </div>
 
-        {/* 구분선 + 실시간 주가 연동 현황 */}
-        {totalCount > 0 && (
-          <>
-            <div className="mx-1 my-3 border-t border-border/60" />
-            <div className="px-3 py-1.5 rounded-xl mx-1 text-xs flex items-center gap-1.5 bg-muted/40">
-              {priceLoading && successCount === 0 ? (
-                <><RefreshCw className="w-3.5 h-3.5 animate-spin text-violet-400 shrink-0" />
-                  <span className="text-muted-foreground flex-1">주가 로딩 중…</span></>
-              ) : !configured ? (
-                <><WifiOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                  <span className="text-rose-500 flex-1 truncate">KIS API 미설정</span></>
-              ) : (
-                <><Wifi className={`w-3.5 h-3.5 shrink-0 ${successCount === totalCount ? "text-emerald-500" : "text-amber-500"}`} />
-                  <span className={`flex-1 ${successCount === totalCount ? "text-muted-foreground" : "text-amber-500"}`}>
-                    실시간 주가 {successCount}/{totalCount}
-                  </span></>
-              )}
-              <button
-                onClick={() => setPriceDetailOpen(true)}
-                className="ml-auto shrink-0 p-0.5 rounded hover:bg-muted transition-colors"
-                title="상세 보기"
-              >
-                <Info className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
-              </button>
-            </div>
-          </>
-        )}
-        <PriceDetailDialog open={priceDetailOpen} onClose={() => setPriceDetailOpen(false)} />
       </nav>
 
-      {/* 동기화 상태 + 수동 동기화 버튼 */}
-      {familyCode && (
-        <div className="mx-2 mb-1 space-y-1">
+      {/* 실시간 주가 + 클라우드 동기화 — 하단 고정 */}
+      <div className="mx-2 mb-1 space-y-1">
+        {totalCount > 0 && (
+          <div className="px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 bg-muted/40">
+            {priceLoading && successCount === 0 ? (
+              <><RefreshCw className="w-3.5 h-3.5 animate-spin text-violet-400 shrink-0" />
+                <span className="text-muted-foreground flex-1">주가 로딩 중…</span></>
+            ) : !configured ? (
+              <><WifiOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                <span className="text-rose-500 flex-1 truncate">KIS API 미설정</span></>
+            ) : (
+              <><Wifi className={`w-3.5 h-3.5 shrink-0 ${successCount === totalCount ? "text-emerald-500" : "text-amber-500"}`} />
+                <span className={`flex-1 ${successCount === totalCount ? "text-muted-foreground" : "text-amber-500"}`}>
+                  실시간 주가 {successCount}/{totalCount}
+                </span></>
+            )}
+            <button
+              onClick={() => setPriceDetailOpen(true)}
+              className="ml-auto shrink-0 p-0.5 rounded hover:bg-muted transition-colors"
+              title="상세 보기"
+            >
+              <Info className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
+            </button>
+          </div>
+        )}
+        {familyCode && (
           <div className="px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 bg-muted/40">
             {dbError ? (
               <><CloudOff className="w-3.5 h-3.5 text-rose-500 shrink-0" />
@@ -260,21 +255,20 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
               <><CloudOff className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                 <span className="text-amber-500 flex-1">로컬 전용</span></>
             )}
+            {hasSupabase && (
+              <button
+                onClick={() => syncNow()}
+                disabled={dbLoading}
+                className="ml-auto shrink-0 p-1 rounded hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="지금 동기화"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${dbLoading ? "animate-spin text-violet-400" : "text-muted-foreground"}`} />
+              </button>
+            )}
           </div>
-          {hasSupabase && (
-            <button
-              onClick={() => syncNow()}
-              disabled={dbLoading}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-all
-                bg-violet-500/10 text-violet-600 dark:text-violet-400 hover:bg-violet-500/20 active:bg-violet-500/30
-                disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${dbLoading ? "animate-spin" : ""}`} />
-              {dbLoading ? "동기화 중…" : "지금 동기화"}
-            </button>
-          )}
-        </div>
-      )}
+        )}
+      </div>
+      <PriceDetailDialog open={priceDetailOpen} onClose={() => setPriceDetailOpen(false)} />
 
       {/* 하단 */}
       <div className="px-2 py-3 border-t space-y-0.5">

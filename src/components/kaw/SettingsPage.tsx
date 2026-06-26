@@ -750,6 +750,21 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
   }
 
   // ── Memo handlers ───────────────────────────────────────────────────────
+  function handleRowEtfChange(rowId: string, newEtfName: string) {
+    setDraft((d) => {
+      const nextProfileData = { ...d.profileData };
+      for (const p of Object.keys(nextProfileData) as ProfileKey[]) {
+        nextProfileData[p] = {
+          ...nextProfileData[p],
+          rows: nextProfileData[p].rows.map((r) =>
+            r.id === rowId ? { ...r, etfName: newEtfName } : r,
+          ),
+        };
+      }
+      return { ...d, profileData: nextProfileData };
+    });
+  }
+
   function handleMemoOpen(rowId: string) {
     setMemoText(storeAccount.rowMemos?.[`${currentProfile}:${rowId}`] ?? "");
     setMemoRowId(rowId);
@@ -965,7 +980,29 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                         </td>
                         <td className="hidden sm:table-cell px-4 py-2">
                           <div className="flex items-center gap-1.5 min-w-0">
-                            <span className="text-sm truncate max-w-[210px]">{row.etfName}</span>
+                            {(() => {
+                              const alternatives = library.filter(
+                                (d) => def && d.label === def.label && d.defaultEtf && d.ticker,
+                              );
+                              if (alternatives.length <= 1) {
+                                return <span className="text-sm truncate max-w-[210px]">{row.etfName}</span>;
+                              }
+                              return (
+                                <Select value={row.etfName} onValueChange={(v) => handleRowEtfChange(row.id, v)}>
+                                  <SelectTrigger className="h-8 w-[200px] text-sm">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {alternatives.map((d) => (
+                                      <SelectItem key={d.id} value={d.defaultEtf}>
+                                        {d.defaultEtf}
+                                        <span className="ml-1 text-xs opacity-50">({d.ticker})</span>
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              );
+                            })()}
                             <button
                               onClick={() => handleMemoOpen(row.id)}
                               title="메모"

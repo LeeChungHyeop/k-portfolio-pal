@@ -18,6 +18,11 @@ export interface HistoryEntry {
   deposit: number;
   returnPct: number | null;
   holdings?: Partial<Record<AssetKey, number>>;
+  // 리밸런싱 당시 종목별 스냅샷 (rowId 기반)
+  rowHoldingsSnap?: Record<string, number>;   // rowId → KRW 평가금액
+  rowQuantitiesSnap?: Record<string, number>; // rowId → 보유수량
+  rowEtfSnap?: Record<string, string>;        // rowId → ETF명
+  rowLabelSnap?: Record<string, string>;      // rowId → 자산명
 }
 export interface AssetRowDef {
   id: string;
