@@ -128,7 +128,10 @@ async function fetchNaverHistoryPrice(ticker: string, date: string): Promise<{ p
     clearTimeout(timer);
     if (res.ok) {
       const data = await res.json() as Array<{ localTradedAt: string; closePrice: string }>;
-      const entry = data.find(d => d.localTradedAt === targetISO);
+      // 정확한 날짜 우선, 없으면 타겟 이전 가장 최근 거래일 종가
+      const entry = data
+        .filter(d => d.localTradedAt <= targetISO)
+        .sort((a, b) => b.localTradedAt.localeCompare(a.localTradedAt))[0];
       if (entry) {
         const price = parseKoreanPrice(entry.closePrice);
         if (price > 0) return { price };
@@ -160,18 +163,27 @@ async function fetchNaverHistoryPrice(ticker: string, date: string): Promise<{ p
       clearTimeout(timer);
       if (!res.ok) continue;
       const html = await res.text();
-      const idx = html.indexOf(targetDot);
-      if (idx === -1) continue;
-      const after = html.slice(idx + targetDot.length, idx + targetDot.length + 400);
-      const m = after.match(/>([\d,]+)</);
-      if (m) {
-        const price = parseKoreanPrice(m[1]);
-        if (price > 0) return { price };
+      // 페이지에서 모든 날짜 추출 → 타겟 이하 중 가장 최근 날짜의 종가 사용
+      const dateRe = /(\d{4})\.(\d{2})\.(\d{2})/g;
+      const candidates: Array<{ iso: string; dotEnd: number }> = [];
+      let m: RegExpExecArray | null;
+      while ((m = dateRe.exec(html)) !== null) {
+        const iso = `${m[1]}-${m[2]}-${m[3]}`;
+        if (iso <= targetISO) candidates.push({ iso, dotEnd: m.index + m[0].length });
+      }
+      candidates.sort((a, b) => b.iso.localeCompare(a.iso));
+      for (const c of candidates) {
+        const after = html.slice(c.dotEnd, c.dotEnd + 400);
+        const pm = after.match(/>([\d,]+)</);
+        if (pm) {
+          const price = parseKoreanPrice(pm[1]);
+          if (price > 0) return { price };
+        }
       }
     } catch { continue; }
   }
 
-  return { price: 0, error: "Naver history: 해당일 종가 없음 (휴장일이거나 너무 오래된 날짜)" };
+  return { price: 0, error: "Naver history: 해당일 이전 종가 없음 (너무 오래된 날짜)" };
 }
 
 export async function fetchNaverHistoryPrices(

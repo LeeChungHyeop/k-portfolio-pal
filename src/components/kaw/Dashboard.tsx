@@ -188,38 +188,21 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
     return hasAny ? [...chartData, livePoint as any] : chartData;
   }, [chartData, accountSummaries, anyLive]);
 
-  // 누적 수익률 데이터
+  // 누적 수익률 데이터 — 정의: (현재가치 - 누적납입원금) / 누적납입원금 × 100
   const cumulativeReturnData = useMemo(() => {
-    const accCumReturns = new Map<string, Map<string, number>>();
-    ACCOUNT_IDS.forEach((id) => {
-      const history = [...state.accounts[id].history].sort((a, b) => a.date.localeCompare(b.date));
-      const cumMap = new Map<string, number>();
-      let cum = 0;
-      history.forEach((h, i) => {
-        if (i === 0) { cumMap.set(h.date, 0); return; }
-        if (h.returnPct != null) cum = (1 + cum / 100) * (1 + h.returnPct / 100) * 100 - 100;
-        cumMap.set(h.date, cum);
-      });
-      accCumReturns.set(id, cumMap);
-    });
-
+    // 각 날짜 시점의 누적납입원금 = 첫 baseAmount + 이후 각 시점 deposit 합산
     const buildData = (keyFn: (date: string) => string, labelFn: (key: string) => string) => {
       const keyMap = new Map<string, Record<string, number>>();
       ACCOUNT_IDS.forEach((id) => {
         const history = [...state.accounts[id].history].sort((a, b) => a.date.localeCompare(b.date));
-        const byKey = new Map<string, string>();
-        history.forEach((h) => {
+        let cumDeposit = 0;
+        history.forEach((h, i) => {
+          cumDeposit += i === 0 ? (h.baseAmount ?? 0) : Math.max(0, h.deposit ?? 0);
+          if (cumDeposit <= 0) return;
+          const ret = Math.round((h.totalValue - cumDeposit) / cumDeposit * 10000) / 100;
           const k = keyFn(h.date);
-          const ex = byKey.get(k);
-          if (!ex || h.date > ex) byKey.set(k, h.date);
-        });
-        history.forEach((h) => {
-          const k = keyFn(h.date);
-          if (byKey.get(k) !== h.date) return;
-          const cumVal = accCumReturns.get(id)?.get(h.date);
-          if (cumVal === undefined) return;
           if (!keyMap.has(k)) keyMap.set(k, {});
-          keyMap.get(k)![id] = Math.round(cumVal * 100) / 100;
+          keyMap.get(k)![id] = ret; // 같은 키면 나중(최신) 값으로 덮어쓰기
         });
       });
       return [...keyMap.entries()]
@@ -231,32 +214,22 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       daily:   buildData((d) => d, (k) => k.slice(5)),
       monthly: buildData((d) => d.slice(0, 7), (k) => k.replace("-", ".")),
       yearly:  buildData((d) => d.slice(0, 4), (k) => k + "년"),
-      _cumReturns: accCumReturns,
     };
   }, [state]);
 
-  // "현재" 수익률 포인트 (일간 기준 — 리밸런싱 날짜만 포함)
+  // "현재" 수익률 포인트 — 실시간 가치 기준 (현재가치 - 납입원금) / 납입원금
   const returnDataWithLive = useMemo(() => {
     const base = cumulativeReturnData.daily;
     if (!anyLive) return base;
     const livePoint: Record<string, unknown> = { key: "현재", label: "현재" };
     let hasAny = false;
     for (const a of accountSummaries) {
-      if (!a.hasLive) continue;
-      const sorted = [...state.accounts[a.id].history].sort((x, y) => x.date.localeCompare(y.date));
-      const last = sorted[sorted.length - 1];
-      if (!last) continue;
-      const lastCumReturns = cumulativeReturnData._cumReturns.get(a.id);
-      const lastCum = lastCumReturns?.get(last.date) ?? 0;
-      const lastTotal = last.totalValue;
-      if (!lastTotal) continue;
-      const periodReturn = (a.liveTotal - lastTotal) / lastTotal * 100;
-      const newCum = (1 + lastCum / 100) * (1 + periodReturn / 100) * 100 - 100;
-      livePoint[a.id] = Math.round(newCum * 100) / 100;
+      if (!a.hasLive || a.baseAmount <= 0) continue;
+      livePoint[a.id] = Math.round(a.gain / a.baseAmount * 10000) / 100;
       hasAny = true;
     }
     return hasAny ? [...base, livePoint as any] : base;
-  }, [cumulativeReturnData, accountSummaries, anyLive, state.accounts]);
+  }, [cumulativeReturnData, accountSummaries, anyLive]);
 
   // 월별 납입 현황 (리밸런싱 기준 그대로)
   const monthlyDepositData = useMemo(() => {
@@ -298,31 +271,17 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
     [accountSummaries],
   );
 
-  // 계좌별 최근 누적 수익률 요약
+  // 계좌별 누적 수익률 — (현재가치 - 납입원금) / 납입원금, 실시간 반영
   const latestCumReturns = useMemo(() => {
     const result: Record<string, number | null> = {};
-    ACCOUNT_IDS.forEach((id) => {
-      const last = cumulativeReturnData.monthly.filter((d) => d[id as keyof typeof d] !== undefined).slice(-1)[0];
-      result[id] = last ? ((last[id as keyof typeof last] as unknown as number) ?? null) : null;
-    });
-    return result;
-  }, [cumulativeReturnData]);
-
-  // 실시간 누적 수익률 (현재 기준)
-  const liveCumReturns = useMemo(() => {
-    if (!anyLive) return latestCumReturns;
-    const result: Record<string, number | null> = { ...latestCumReturns };
     for (const a of accountSummaries) {
-      if (!a.hasLive) continue;
-      const sorted = [...state.accounts[a.id].history].sort((x, y) => x.date.localeCompare(y.date));
-      const last = sorted[sorted.length - 1];
-      if (!last || !last.totalValue) continue;
-      const lastCum = latestCumReturns[a.id] ?? 0;
-      const periodReturn = (a.liveTotal - last.totalValue) / last.totalValue * 100;
-      result[a.id] = Math.round((1 + lastCum / 100) * (1 + periodReturn / 100) * 100 - 100) / 100 * 100 / 100;
+      result[a.id] = a.baseAmount > 0 ? Math.round(a.gain / a.baseAmount * 10000) / 100 : null;
     }
     return result;
-  }, [anyLive, latestCumReturns, accountSummaries, state.accounts]);
+  }, [accountSummaries]);
+
+  // accountSummaries.liveTotal이 이미 실시간 반영이므로 별도 계산 불필요
+  const liveCumReturns = latestCumReturns;
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-5xl mx-auto">
@@ -367,7 +326,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       {/* 계좌별 카드 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         {accountSummaries.map((a) => {
-          const isUp = (a.latestReturnPct ?? 0) >= 0;
+          const cum = latestCumReturns[a.id];
+          const isUp = (cum ?? 0) >= 0;
           const targetPage = a.id as Page;
           return (
             <Card
@@ -378,10 +338,10 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               <div className="flex items-center justify-between gap-1">
                 <p className="text-sm font-medium truncate">{a.label}</p>
                 <div className="flex items-center gap-1 shrink-0">
-                  {a.latestReturnPct !== null && (
+                  {cum !== null && cum !== undefined && (
                     <span className={`flex items-center gap-0.5 text-xs font-medium ${isUp ? "text-emerald-600" : "text-rose-600"}`}>
                       {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                      {formatPct(a.latestReturnPct)}
+                      {cum >= 0 ? "+" : ""}{cum.toFixed(2)}%
                     </span>
                   )}
                   {onNavigate && <ChevronRight className="w-3.5 h-3.5 text-muted-foreground/50" />}
@@ -532,11 +492,32 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
         </Card>
       )}
 
+      {/* 전체 자산 추이 */}
+      {chartDataWithLive.length >= 2 && (
+        <Card className="p-5">
+          <h3 className="font-semibold mb-4">전체 자산 추이</h3>
+          <div className="h-72">
+            <ResponsiveContainer>
+              <LineChart data={chartDataWithLive}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+                <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={50} />
+                <Tooltip content={<DashboardTooltip />} />
+                <Legend formatter={(name) => ACCOUNT_LABELS_SHORT[name as keyof typeof ACCOUNT_LABELS_SHORT] ?? name} />
+                {ACCOUNT_IDS.map((id) => (
+                  <Line key={id} type="monotone" dataKey={id} stroke={ACCOUNT_COLORS[id]} strokeWidth={2} dot={{ r: 2 }} connectNulls />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
+
       {/* 누적 수익률 */}
       {hasReturnData && (
         <Card className="p-5">
           <h3 className="font-semibold mb-1">누적 수익률</h3>
-          <p className="text-xs text-muted-foreground mb-4">납입금 제외 · 순수 투자 수익률 누적</p>
+          <p className="text-xs text-muted-foreground mb-4">납입원금 대비 현재가치 수익률 (중간 불입액 포함)</p>
 
           {/* 계좌별 현재 누적 수익률 요약 */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
@@ -602,27 +583,6 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
         </Card>
       )}
 
-      {/* 전체 자산 추이 */}
-      {chartDataWithLive.length >= 2 && (
-        <Card className="p-5">
-          <h3 className="font-semibold mb-4">전체 자산 추이</h3>
-          <div className="h-72">
-            <ResponsiveContainer>
-              <LineChart data={chartDataWithLive}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis dataKey="label" tick={{ fontSize: 10 }} />
-                <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={50} />
-                <Tooltip content={<DashboardTooltip />} />
-                <Legend formatter={(name) => ACCOUNT_LABELS_SHORT[name as keyof typeof ACCOUNT_LABELS_SHORT] ?? name} />
-                {ACCOUNT_IDS.map((id) => (
-                  <Line key={id} type="monotone" dataKey={id} stroke={ACCOUNT_COLORS[id]} strokeWidth={2} dot={{ r: 2 }} connectNulls />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-      )}
-
       {/* 현재가치 비중 & 계좌별 수익 상세 */}
       {donutData.length > 0 && (
         <Card className="p-5">
@@ -630,12 +590,12 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
             <TrendingUp className="w-4 h-4 text-blue-500" />
             현재가치 비중 &amp; 계좌별 수익 상세
           </h3>
-          <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-start sm:gap-8">
-            <div className="shrink-0">
-              <PieChart width={210} height={210}>
+          <div className="flex flex-col items-center gap-6 lg:flex-row lg:items-start">
+            <div className="flex justify-center lg:w-1/2 shrink-0">
+              <PieChart width={300} height={300}>
                 <Pie
                   data={donutData} cx="50%" cy="50%"
-                  innerRadius={65} outerRadius={90}
+                  innerRadius={92} outerRadius={135}
                   dataKey="value" nameKey="name"
                   strokeWidth={0} startAngle={90} endAngle={-270}
                 >
@@ -647,15 +607,15 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
                     const id = (payload[0].payload as any).id as string;
                     const v = payload[0].value as number;
                     const pct = grandTotal > 0 ? (v / grandTotal * 100).toFixed(1) : "0";
-                    const s = accountSummaries.find((a) => a.id === id);
+                    const cum = latestCumReturns[id];
                     return (
                       <div className="rounded-xl border bg-popover p-3 shadow-md text-xs space-y-1">
                         <p className="font-semibold mb-0.5">{payload[0].name}</p>
                         <p className="tabular-nums">{formatKRW(v)}원</p>
                         <p className="text-muted-foreground">비중 {pct}%</p>
-                        {s?.latestReturnPct !== null && s?.latestReturnPct !== undefined && (
-                          <p className={s.latestReturnPct >= 0 ? "text-emerald-500" : "text-rose-500"}>
-                            수익률 {s.latestReturnPct >= 0 ? "+" : ""}{s.latestReturnPct.toFixed(2)}%
+                        {cum !== null && cum !== undefined && (
+                          <p className={cum >= 0 ? "text-emerald-500" : "text-rose-500"}>
+                            누적수익률 {cum >= 0 ? "+" : ""}{cum.toFixed(2)}%
                           </p>
                         )}
                       </div>
@@ -664,7 +624,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
                 />
               </PieChart>
             </div>
-            <div className="w-full space-y-2">
+            <div className="w-full lg:w-1/2 space-y-2">
               {accountSummaries.filter((a) => a.baseAmount > 0 || a.liveTotal > 0).map((a) => {
                 const pct = grandTotal > 0 ? (a.liveTotal / grandTotal * 100).toFixed(1) : "0";
                 const isUp = a.gain >= 0;

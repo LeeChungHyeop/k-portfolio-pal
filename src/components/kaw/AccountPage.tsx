@@ -108,12 +108,39 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   const lastHistory: HistoryEntry | null =
     account.history?.length ? account.history[account.history.length - 1] : null;
 
-  // ── 날짜 모드 ─────────────────────────────────────────────────────────
+  // ── 날짜 모드 (SSR hydration mismatch 방지: 마운트 후에만 과거/미래 판별) ──
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  // 주말이면 직전 금요일로 롤백 (토=6→-1일, 일=0→-2일)
+  const lastTradingDay = useMemo(() => {
+    const d = new Date();
+    const day = d.getDay();
+    if (day === 6) d.setDate(d.getDate() - 1);
+    if (day === 0) d.setDate(d.getDate() - 2);
+    return d.toISOString().slice(0, 10);
+  }, []);
+  const todayIsNonTrading = today !== lastTradingDay;
+
   const dateMode = useMemo((): "today" | "past" | "future" => {
-    if (!account.rebalanceDate || account.rebalanceDate === today) return "today";
-    return account.rebalanceDate < today ? "past" : "future";
-  }, [account.rebalanceDate, today]);
+    if (!mounted) return "today";
+    const rd = account.rebalanceDate;
+    if (!rd || rd === today) {
+      // 오늘이 주말/비거래일이면 직전 금요일 종가 모드
+      return todayIsNonTrading ? "past" : "today";
+    }
+    return rd < today ? "past" : "future";
+  }, [mounted, account.rebalanceDate, today, todayIsNonTrading]);
+
+  // 과거 종가 조회에 사용할 실제 날짜
+  // - 오늘이 주말이고 rebalanceDate=오늘(또는 미설정): 직전 금요일
+  // - 그 외 과거일: 선택한 날짜 그대로 (서버에서 비거래일 fallback)
+  const historyFetchDate = useMemo(() => {
+    if (dateMode !== "past") return "";
+    const rd = account.rebalanceDate || today;
+    if (todayIsNonTrading && (rd === today || !account.rebalanceDate)) return lastTradingDay;
+    return rd;
+  }, [dateMode, account.rebalanceDate, today, todayIsNonTrading, lastTradingDay]);
 
   // ── 실시간 모드 상태 ───────────────────────────────────────────────────
   const [liveMode, setLiveMode] = useState(true);
@@ -165,21 +192,24 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   const { prices: livePrices, configured, isLoading: priceLoading, refetch: refetchPrices } = useKisPriceContext();
 
   const tickers = useMemo(() => rows.map(r => r.ticker).filter(Boolean) as string[], [rows]);
+  // 배열 대신 문자열 키로 useEffect 의존성 안정화 (배열은 매 렌더마다 새 참조)
+  const tickerKey = tickers.join(",");
 
   // ── 과거 종가 조회 (날짜가 과거일 때만) ──────────────────────────────
   useEffect(() => {
-    if (dateMode !== "past" || !liveMode || !tickers.length) {
+    if (dateMode !== "past" || !liveMode || !tickerKey || !historyFetchDate) {
       if (dateMode !== "past") { setHistoryPrices({}); setHistoryError(false); }
       return;
     }
-    const dateStr = account.rebalanceDate.replace(/-/g, "");
+    const dateStr = historyFetchDate.replace(/-/g, "");
+    const tickerArr = tickerKey.split(",");
     let cancelled = false;
     setHistoryLoading(true);
     setHistoryError(false);
     fetch("/api/naver/history-price", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tickers, date: dateStr }),
+      body: JSON.stringify({ tickers: tickerArr, date: dateStr }),
     })
       .then(r => r.json())
       .then((data: { results?: Record<string, { price: number }> }) => {
@@ -197,7 +227,8 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       .catch(() => { if (!cancelled) { setHistoryError(true); toast.error("과거 종가 조회에 실패했습니다"); } })
       .finally(() => { if (!cancelled) setHistoryLoading(false); });
     return () => { cancelled = true; };
-  }, [dateMode, liveMode, account.rebalanceDate, tickers, historyFetchKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateMode, liveMode, historyFetchDate, tickerKey, historyFetchKey]);
 
   // KIS API 미설정 시 안내 toast (오늘 날짜 + liveMode 켤 때만)
   useEffect(() => {
@@ -329,7 +360,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                   : historyError
                     ? <><WifiOff className="w-3 h-3" /> 일부 실패</>
                     : isLiveActive
-                      ? <><Wifi className="w-3 h-3" /> 종가 조회됨</>
+                      ? <><Wifi className="w-3 h-3" /> {todayIsNonTrading && historyFetchDate === lastTradingDay ? `${lastTradingDay} 종가` : "종가 조회됨"}</>
                       : <><WifiOff className="w-3 h-3" /> 대기 중</>
                 }
               </span>
@@ -342,7 +373,9 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                   : <Zap className={`w-3.5 h-3.5 ${liveMode ? "text-violet-500" : "text-muted-foreground"}`} />
                 }
                 <span className="text-xs font-medium text-muted-foreground">
-                  {dateMode === "past" ? "과거일 종가 계산" : "실시간 주가 계산"}
+                  {dateMode === "past"
+                    ? (todayIsNonTrading && historyFetchDate === lastTradingDay ? "최근 장 종가 계산" : "과거일 종가 계산")
+                    : "실시간 주가 계산"}
                 </span>
                 <Switch
                   checked={liveMode}
