@@ -231,6 +231,7 @@ function migrateState(parsed: StoreState, injectSeed = false): StoreState {
     }
     if (!acc.etfNames) acc.etfNames = defaultEtfNames();
     if (!acc.enabledAssets?.length) acc.enabledAssets = [...ASSET_ORDER];
+    if (!Array.isArray(acc.holdings)) acc.holdings = [];
 
     const existing = new Map(acc.holdings.map((h) => [h.assetKey, h]));
     // Sync ETF names from holdings if etfNames not yet set from DB
@@ -477,7 +478,8 @@ function subscribeRealtime(code: string) {
         const m = row.data as { profile: ProfileKey; allocations: typeof PROFILE_PRESETS };
         memState = { ...memState, profile: m.profile, allocations: m.allocations };
       } else if (ACCOUNT_IDS.includes(row.account_type as AccountId)) {
-        memState = { ...memState, accounts: { ...memState.accounts, [row.account_type]: row.data as AccountState } };
+        const next = { ...memState, accounts: { ...memState.accounts, [row.account_type]: row.data as AccountState } };
+        try { memState = migrateState(next); } catch { memState = next; }
       }
       saveLocal(memState);
       isReceivingRealtime = false;

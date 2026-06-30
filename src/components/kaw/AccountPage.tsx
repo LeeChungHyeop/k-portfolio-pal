@@ -106,7 +106,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   const profileAlloc = account.profileAllocations?.[profile] ?? {};
 
   const lastHistory: HistoryEntry | null =
-    account.history.length > 0 ? account.history[account.history.length - 1] : null;
+    account.history?.length ? account.history[account.history.length - 1] : null;
 
   // ── 실시간 모드 상태 ───────────────────────────────────────────────────
   const [liveMode, setLiveMode] = useState(true);
@@ -134,7 +134,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       const label = def?.label ?? row.assetId;
       const alloc = profileAlloc[row.id] ?? 0;
       const legacyValue = ASSET_ORDER.includes(row.assetId as AssetKey)
-        ? (account.holdings.find((h) => h.assetKey === row.assetId)?.value ?? 0) : 0;
+        ? ((account.holdings ?? []).find((h) => h.assetKey === row.assetId)?.value ?? 0) : 0;
       const value = account.rowHoldings?.[row.id] ?? legacyValue;
       const prevValue = ASSET_ORDER.includes(row.assetId as AssetKey)
         ? (lastHistory?.holdings?.[row.assetId as AssetKey] ?? null) : null;
@@ -493,13 +493,14 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
     setManualTotal(""); setManualDeposit("");
   }
 
-  const reversed = [...account.history].reverse();
-  const returnData = account.history.filter(h => h.returnPct !== null);
+  const safeHistory = account.history ?? [];
+  const reversed = [...safeHistory].reverse();
+  const returnData = safeHistory.filter(h => h.returnPct !== null);
 
   return (
     <div className="space-y-5">
       {/* 차트 */}
-      {account.history.length >= 2 && (
+      {safeHistory.length >= 2 && (
         <Card className="p-5">
           <div className="flex items-center justify-between mb-3">
             <p className="text-sm font-semibold">자산 추이</p>
@@ -517,7 +518,7 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
           <div className="h-52">
             {chartMode === "value" ? (
               <ResponsiveContainer>
-                <LineChart data={account.history}>
+                <LineChart data={safeHistory}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                   <XAxis dataKey="date" tick={{ fontSize: 10 }} />
                   <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={52} />

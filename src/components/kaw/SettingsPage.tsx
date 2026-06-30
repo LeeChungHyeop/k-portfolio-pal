@@ -1247,7 +1247,7 @@ function DataTab() {
       history.forEach((h, i) => str(ROW.dateHeader, COL.dataStart + i * 2, h.date));
       history.forEach((_, i) => { str(ROW.subHeader, COL.dataStart + i * 2, '평가 금액'); str(ROW.subHeader, COL.dataStart + i * 2 + 1, '기준 금액'); });
       ASSET_ORDER.forEach((k, ai) => {
-        const r = ROW.assetStart + ai; const exR = r + 1; const pct = alloc[k] || 0; const ag = ASSET_GROUPS[k]; const hold = acc.holdings.find(h => h.assetKey === k);
+        const r = ROW.assetStart + ai; const exR = r + 1; const pct = alloc[k] || 0; const ag = ASSET_GROUPS[k]; const hold = (acc.holdings ?? []).find(h => h.assetKey === k);
         str(r, COL.group, ag.group); str(r, COL.asset, ag.label); str(r, COL.etf, hold?.etfName ?? ag.defaultEtf); str(r, COL.weight, `${pct}%`);
         history.forEach((h, i) => {
           const evalCol = COL.dataStart + i * 2; const baseCol = COL.dataStart + i * 2 + 1;
