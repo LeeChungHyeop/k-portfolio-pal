@@ -493,6 +493,15 @@ function unsubscribeRealtime() {
   }
 }
 
+// ── Supabase 익명 인증 (RLS 통과용) ─────────────────────────────────────────
+async function ensureSupabaseAuth(): Promise<void> {
+  if (!supabase) return;
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session) return;
+  const { error } = await supabase.auth.signInAnonymously();
+  if (error) console.error("[kaw] Supabase 익명 로그인 실패:", error.message);
+}
+
 // ── Auth actions ───────────────────────────────────────────────────────────
 export async function loginWithCode(code: string): Promise<"new" | "existing"> {
   if (typeof window === "undefined") throw new Error("Client only");
@@ -508,6 +517,9 @@ export async function loginWithCode(code: string): Promise<"new" | "existing"> {
   notify();
 
   try {
+    // RLS 정책 통과를 위해 Supabase Auth 세션 확보 (익명 로그인)
+    await ensureSupabaseAuth();
+
     let isNew = false;
 
     if (supabase) {
@@ -613,6 +625,7 @@ export function deactivateProfile(): void {
 export function logoutCode() {
   if (typeof window === "undefined") return;
   unsubscribeRealtime();
+  supabase?.auth.signOut().catch(() => {});
   localStorage.removeItem(AUTH_CODE_KEY);
   localStorage.removeItem(AUTH_USER_KEY);
   sessionStorage.removeItem(SESSION_AUTH_KEY);
@@ -663,6 +676,9 @@ async function initFromStorage() {
 
   familyCode = code;
   setupVisibilityRefresh();
+
+  // 페이지 새로고침 시 Supabase 세션 복원 대기 (RLS 통과용)
+  if (hasSupabase) await ensureSupabaseAuth();
 
   // sessionStorage에 프로필 인증 기록이 있으면 세션 복원 (같은 탭 새로고침)
   const sessionProfile = sessionStorage.getItem(SESSION_AUTH_KEY);
