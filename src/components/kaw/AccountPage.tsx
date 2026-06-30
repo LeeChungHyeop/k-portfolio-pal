@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useCallback } from "react";
 import { ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS, ACCOUNT_LABELS, type AccountId, type AssetKey } from "@/lib/kaw/constants";
 import { usePortfolioStore, formatKRW, formatPct, getOrDefaultLibrary, type HistoryEntry } from "@/lib/kaw/store";
 import { Input } from "@/components/ui/input";
@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap } from "lucide-react";
+import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History } from "lucide-react";
 import { toast } from "sonner";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 
@@ -108,6 +108,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   const lastHistory: HistoryEntry | null =
     account.history?.length ? account.history[account.history.length - 1] : null;
 
+  // ── 날짜 모드 ─────────────────────────────────────────────────────────
+  const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const dateMode = useMemo((): "today" | "past" | "future" => {
+    if (!account.rebalanceDate || account.rebalanceDate === today) return "today";
+    return account.rebalanceDate < today ? "past" : "future";
+  }, [account.rebalanceDate, today]);
+
   // ── 실시간 모드 상태 ───────────────────────────────────────────────────
   const [liveMode, setLiveMode] = useState(true);
 
@@ -123,6 +130,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     }, 1000);
     return () => clearTimeout(timer);
   }, [quantities, accountId, saveAccountQuantities]);
+
+  // ── 과거 종가 상태 ────────────────────────────────────────────────────
+  const [historyPrices, setHistoryPrices] = useState<Record<string, number>>({});
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  const [historyFetchKey, setHistoryFetchKey] = useState(0);
+  const refetchHistoryPrices = useCallback(() => setHistoryFetchKey(k => k + 1), []);
 
   // ── 기본 rows (rowHoldings 기반) ──────────────────────────────────────
   const rows = useMemo(() => {
@@ -150,31 +164,69 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   // ── 실시간 주가: 전역 KisPriceContext에서 읽기 (로그인 시 선제 로딩)
   const { prices: livePrices, configured, isLoading: priceLoading, refetch: refetchPrices } = useKisPriceContext();
 
-  // KIS API 미설정 시 안내 toast (최초 1회)
+  const tickers = useMemo(() => rows.map(r => r.ticker).filter(Boolean) as string[], [rows]);
+
+  // ── 과거 종가 조회 (날짜가 과거일 때만) ──────────────────────────────
   useEffect(() => {
-    if (liveMode && !configured) {
+    if (dateMode !== "past" || !liveMode || !tickers.length) {
+      if (dateMode !== "past") { setHistoryPrices({}); setHistoryError(false); }
+      return;
+    }
+    const dateStr = account.rebalanceDate.replace(/-/g, "");
+    let cancelled = false;
+    setHistoryLoading(true);
+    setHistoryError(false);
+    fetch("/api/naver/history-price", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tickers, date: dateStr }),
+    })
+      .then(r => r.json())
+      .then((data: { results?: Record<string, { price: number }> }) => {
+        if (cancelled) return;
+        if (data.results) {
+          const prices: Record<string, number> = {};
+          for (const [ticker, result] of Object.entries(data.results)) {
+            prices[ticker] = (result as { price: number }).price;
+          }
+          setHistoryPrices(prices);
+          const anyFailed = Object.values(data.results).some(r => (r as { price: number }).price === 0);
+          setHistoryError(anyFailed);
+        }
+      })
+      .catch(() => { if (!cancelled) { setHistoryError(true); toast.error("과거 종가 조회에 실패했습니다"); } })
+      .finally(() => { if (!cancelled) setHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [dateMode, liveMode, account.rebalanceDate, tickers, historyFetchKey]);
+
+  // KIS API 미설정 시 안내 toast (오늘 날짜 + liveMode 켤 때만)
+  useEffect(() => {
+    if (dateMode === "today" && liveMode && !configured) {
       toast.error("KIS API 인증 정보가 설정되지 않았습니다. 수동 입력 모드로 유지됩니다.");
     }
-  }, [liveMode, configured]);
+  }, [dateMode, liveMode, configured]);
 
-  const isLiveActive = liveMode && configured && Object.keys(livePrices).length > 0;
+  // 날짜 모드별 유효 가격
+  const effectivePrices = dateMode === "past" ? historyPrices : livePrices;
+  const isLiveActive = dateMode !== "future" && liveMode
+    && (dateMode === "past" ? Object.keys(historyPrices).length > 0 : configured && Object.keys(livePrices).length > 0);
 
-  // ── 실시간 계산 ────────────────────────────────────────────────────────
+  // ── 실시간/과거 계산 ────────────────────────────────────────────────────
   const liveValueByRow = useMemo((): Record<string, number> => {
     if (!isLiveActive) return {};
     return Object.fromEntries(
       rows.map((r) => {
-        const price = r.ticker && livePrices[r.ticker] ? livePrices[r.ticker] : 0;
+        const price = r.ticker && effectivePrices[r.ticker] ? effectivePrices[r.ticker] : 0;
         return [r.rowId, (quantities[r.rowId] ?? 0) * price];
       }),
     );
-  }, [isLiveActive, livePrices, quantities, rows]);
+  }, [isLiveActive, effectivePrices, quantities, rows]);
 
   const liveTotal = isLiveActive
     ? Object.values(liveValueByRow).reduce((s, v) => s + v, 0)
     : manualTotal;
 
-  // effectiveBase: 실시간 모드 = (현재 평가금액 + 불입액), 수동 = baseAmount
+  // effectiveBase: 수량 모드 = (현재/과거가치 + 불입액), 수동 = baseAmount
   const effectiveBase = isLiveActive ? liveTotal + account.deposit : account.baseAmount;
 
   // 최종 effective rows (target/diff 재계산 포함)
@@ -182,7 +234,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     const value = isLiveActive ? (liveValueByRow[r.rowId] ?? 0) : r.value;
     const target = (effectiveBase * r.alloc) / 100;
     const diff = target - value;
-    const livePrice = isLiveActive && r.ticker ? (livePrices[r.ticker] ?? 0) : 0;
+    const livePrice = isLiveActive && r.ticker ? (effectivePrices[r.ticker] ?? 0) : 0;
     return { ...r, value, target, diff, livePrice };
   });
   const effectiveTotal = effectiveRows.reduce((s, r) => s + r.value, 0);
@@ -243,11 +295,12 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
 
       {/* 이번 리밸런싱 */}
       <Card className="p-5 space-y-4">
-        {/* 헤더: 타이틀 + 실시간 모드 토글 */}
+        {/* 헤더: 타이틀 + 모드 토글 */}
         <div className="flex items-center justify-between flex-wrap gap-3">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">이번 리밸런싱</p>
           <div className="flex items-center gap-2">
-            {liveMode && (
+            {/* 오늘 날짜만: 실시간 새로고침 버튼 */}
+            {liveMode && dateMode === "today" && (
               <button
                 onClick={() => refetchPrices()}
                 disabled={priceLoading}
@@ -257,25 +310,62 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                 <RefreshCw className={`w-3.5 h-3.5 ${priceLoading ? "animate-spin" : ""}`} />
               </button>
             )}
-            {liveMode && (
+            {/* 연결 상태 표시 */}
+            {liveMode && dateMode === "today" && (
               <span className={`flex items-center gap-1 text-[10px] font-medium ${isLiveActive ? "text-emerald-500" : "text-amber-500"}`}>
                 {isLiveActive ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
                 {isLiveActive ? "실시간 연결" : "연결 안 됨"}
               </span>
             )}
-            <div className="flex items-center gap-1.5">
-              <Zap className={`w-3.5 h-3.5 ${liveMode ? "text-violet-500" : "text-muted-foreground"}`} />
-              <span className="text-xs font-medium text-muted-foreground">실시간 주가 계산</span>
-              <Switch
-                checked={liveMode}
-                onCheckedChange={(v) => {
-                  setLiveMode(v);
-                  if (v) toast.success("실시간 모드 활성화 — 보유수량을 입력해 주세요");
-                }}
-              />
-            </div>
+            {/* 과거 날짜: 종가 조회 상태 플래그 */}
+            {liveMode && dateMode === "past" && (
+              <span className={`flex items-center gap-1 text-[10px] font-medium ${
+                historyLoading ? "text-muted-foreground" :
+                historyError ? "text-amber-500" :
+                isLiveActive ? "text-emerald-500" : "text-muted-foreground"
+              }`}>
+                {historyLoading
+                  ? <><RefreshCw className="w-3 h-3 animate-spin" /> 조회 중</>
+                  : historyError
+                    ? <><WifiOff className="w-3 h-3" /> 일부 실패</>
+                    : isLiveActive
+                      ? <><Wifi className="w-3 h-3" /> 종가 조회됨</>
+                      : <><WifiOff className="w-3 h-3" /> 대기 중</>
+                }
+              </span>
+            )}
+            {/* 토글 */}
+            {dateMode !== "future" && (
+              <div className="flex items-center gap-1.5">
+                {dateMode === "past"
+                  ? <History className={`w-3.5 h-3.5 ${liveMode ? "text-violet-500" : "text-muted-foreground"}`} />
+                  : <Zap className={`w-3.5 h-3.5 ${liveMode ? "text-violet-500" : "text-muted-foreground"}`} />
+                }
+                <span className="text-xs font-medium text-muted-foreground">
+                  {dateMode === "past" ? "과거일 종가 계산" : "실시간 주가 계산"}
+                </span>
+                <Switch
+                  checked={liveMode}
+                  onCheckedChange={(v) => {
+                    setLiveMode(v);
+                    if (v) {
+                      if (dateMode === "past") {
+                        toast.success("과거일 종가 계산 활성화 — 보유수량을 입력해 주세요");
+                        setHistoryFetchKey(k => k + 1);
+                      } else {
+                        toast.success("실시간 모드 활성화 — 보유수량을 입력해 주세요");
+                      }
+                    }
+                  }}
+                />
+              </div>
+            )}
           </div>
         </div>
+        {/* 미래 날짜 경고 */}
+        {dateMode === "future" && (
+          <p className="text-xs text-amber-500 font-medium">선택한 날짜가 미래입니다. 리밸런싱을 저장할 수 없습니다.</p>
+        )}
 
         {/* 입력 폼 */}
         <div className="grid sm:grid-cols-3 gap-3">
@@ -306,11 +396,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           </div>
         </div>
 
-        {/* 실시간 기준금액 계산 근거 */}
+        {/* 기준금액 자동계산 근거 */}
         {isLiveActive && (
           <div className="rounded-lg bg-violet-500/8 border border-violet-500/20 px-4 py-2.5 flex flex-wrap gap-3 items-center text-xs">
             <span className="text-muted-foreground">💡 기준금액 자동계산:</span>
-            <span className="tabular-nums font-medium text-emerald-600">현재가치 {formatKRW(liveTotal)}</span>
+            <span className="tabular-nums font-medium text-emerald-600">
+              {dateMode === "past" ? "과거 평가금액" : "현재가치"} {formatKRW(liveTotal)}
+            </span>
             <span className="text-muted-foreground">+</span>
             <span className="tabular-nums font-medium">불입액 {formatKRW(account.deposit)}</span>
             <span className="text-muted-foreground">=</span>
@@ -459,7 +551,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         </div>
 
         <div className="flex items-center justify-end gap-3">
-          <Button onClick={snapshotNow} disabled={effectiveTotal <= 0}>
+          <Button onClick={snapshotNow} disabled={effectiveTotal <= 0 || dateMode === "future"}>
             <Camera className="w-4 h-4 mr-1.5" /> 리밸런싱 저장
           </Button>
         </div>

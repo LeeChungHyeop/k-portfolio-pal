@@ -3,7 +3,7 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleWebhookRequest } from "./lib/telegram";
-import { fetchKisPrices } from "./lib/kaw/kis-server";
+import { fetchKisPrices, fetchNaverHistoryPrices } from "./lib/kaw/kis-server";
 
 // Cloudflare Workers environment bindings
 export interface Env {
@@ -99,6 +99,23 @@ export default {
         return Response.json({ results, timestamp }, { headers: { "Cache-Control": "no-store" } });
       } catch (err) {
         console.error("KIS price error:", err);
+        return Response.json({ error: String(err) }, { status: 500 });
+      }
+    }
+
+    // ── Naver 과거 종가 프록시 (KIS 불필요) ───────────────────────────────
+    if (pathname === "/api/naver/history-price" && request.method === "POST") {
+      try {
+        const body = await request.json() as { tickers?: unknown; date?: unknown };
+        const tickers = Array.isArray(body?.tickers)
+          ? (body.tickers as string[]).filter(t => typeof t === "string" && /^[A-Z0-9]{6}$/i.test(t)).slice(0, 20)
+          : [];
+        const date = typeof body?.date === "string" && /^\d{8}$/.test(body.date) ? body.date : "";
+        if (!tickers.length || !date) return Response.json({ results: {}, timestamp: new Date().toISOString() });
+        const { results, timestamp } = await fetchNaverHistoryPrices(tickers, date);
+        return Response.json({ results, timestamp }, { headers: { "Cache-Control": "no-store" } });
+      } catch (err) {
+        console.error("Naver history price error:", err);
         return Response.json({ error: String(err) }, { status: 500 });
       }
     }

@@ -104,6 +104,94 @@ async function fetchNaverPrice(ticker: string): Promise<{ price: number; error?:
   }
 }
 
+// ── Naver 과거 종가 조회 (KIS 불필요) ──────────────────────────────────────
+async function fetchNaverHistoryPrice(ticker: string, date: string): Promise<{ price: number; error?: string }> {
+  // date: YYYYMMDD
+  const targetISO = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
+  const targetDot = `${date.slice(0, 4)}.${date.slice(4, 6)}.${date.slice(6, 8)}`;
+
+  // 1) 최근 20 거래일 JSON API (빠름)
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(
+      `https://m.stock.naver.com/api/stock/${ticker}/price?code=${ticker}`,
+      {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+          "Referer": "https://m.stock.naver.com/",
+          "Accept": "application/json",
+        },
+      },
+    );
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json() as Array<{ localTradedAt: string; closePrice: string }>;
+      const entry = data.find(d => d.localTradedAt === targetISO);
+      if (entry) {
+        const price = parseKoreanPrice(entry.closePrice);
+        if (price > 0) return { price };
+      }
+    }
+  } catch { /* fall through to HTML */ }
+
+  // 2) HTML 파싱 (오래된 날짜 fallback)
+  // 날짜 차이로 페이지 추정 (20 거래일/page ≈ 1달)
+  const targetDate = new Date(targetISO);
+  const today = new Date();
+  const daysDiff = Math.max(0, Math.floor((today.getTime() - targetDate.getTime()) / 86400000));
+  const approxPage = Math.max(1, Math.floor(daysDiff * 5 / 7 / 20));
+
+  for (let page = approxPage; page <= approxPage + 2; page++) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(
+        `https://finance.naver.com/item/sise_day.nhn?code=${ticker}&page=${page}`,
+        {
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer": "https://finance.naver.com/",
+          },
+        },
+      );
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const html = await res.text();
+      const idx = html.indexOf(targetDot);
+      if (idx === -1) continue;
+      const after = html.slice(idx + targetDot.length, idx + targetDot.length + 400);
+      const m = after.match(/>([\d,]+)</);
+      if (m) {
+        const price = parseKoreanPrice(m[1]);
+        if (price > 0) return { price };
+      }
+    } catch { continue; }
+  }
+
+  return { price: 0, error: "Naver history: 해당일 종가 없음 (휴장일이거나 너무 오래된 날짜)" };
+}
+
+export async function fetchNaverHistoryPrices(
+  tickers: string[],
+  date: string,
+): Promise<{ results: Record<string, TickerResult>; timestamp: string }> {
+  const results: Record<string, TickerResult> = {};
+  const timestamp = new Date().toISOString();
+
+  for (const ticker of tickers) {
+    const { price, error } = await fetchNaverHistoryPrice(ticker, date);
+    results[ticker] = price > 0
+      ? { price, source: "naver" }
+      : { price: 0, source: "failed", error };
+    await delay(80);
+  }
+
+  return { results, timestamp };
+}
+
 export async function fetchKisPrices(
   tickers: string[],
   appKey: string,
