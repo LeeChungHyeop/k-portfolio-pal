@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import { Menu, Wallet, RefreshCw } from "lucide-react";
 import { Sidebar, type Page } from "@/components/kaw/Sidebar";
 import { Dashboard } from "@/components/kaw/Dashboard";
+import { IndexComparison } from "@/components/kaw/IndexComparison";
 import { AccountPage } from "@/components/kaw/AccountPage";
 import { SettingsPage } from "@/components/kaw/SettingsPage";
 
@@ -152,6 +153,7 @@ function Index() {
         </div>
 
         {page === "dashboard"  && <Dashboard onNavigate={navigate} />}
+        {page === "compare"    && <IndexComparison />}
         {page === "retirement" && <AccountPage accountId="retirement" />}
         {page === "isa"        && <AccountPage accountId="isa" />}
         {page === "pension"    && <AccountPage accountId="pension" />}

@@ -76,7 +76,7 @@ export interface StoreState {
 }
 
 // ── Built-in ticker codes (KRX 6자리) ─────────────────────────────────────
-const BUILTIN_TICKERS: Partial<Record<AssetKey, string>> = {
+export const BUILTIN_TICKERS: Partial<Record<AssetKey, string>> = {
   us:    "360750",
   kr:    "294400",
   cn:    "283580",
