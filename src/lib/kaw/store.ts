@@ -23,6 +23,8 @@ export interface HistoryEntry {
   rowQuantitiesSnap?: Record<string, number>; // rowId → 보유수량
   rowEtfSnap?: Record<string, string>;        // rowId → ETF명
   rowLabelSnap?: Record<string, string>;      // rowId → 자산명
+  // "성장형(케이올웨더)으로 쭉 운용했다면" 백테스트 스냅샷 — 리밸런싱 시점에 계산해 영구 저장
+  backtestGrowth?: { totalValue: number; returnPct: number | null; units: Partial<Record<AssetKey, number>> };
 }
 export interface AssetRowDef {
   id: string;
@@ -746,15 +748,26 @@ export function usePortfolioStore() {
   const removeHistory   = useCallback((id: AccountId, hid: string) =>
     setState((s) => {
       const acc = s.accounts[id];
-      const filtered = acc.history.filter((h) => h.id !== hid);
+      // 히스토리가 바뀌면 이후 시점들의 백테스트 유닛 체인이 무효화되므로 전부 초기화 (다음 조회 시 재계산)
+      const filtered = acc.history.filter((h) => h.id !== hid).map((h) => ({ ...h, backtestGrowth: undefined }));
       return { ...s, accounts: { ...s.accounts, [id]: { ...acc, history: recalcReturns(filtered) } } };
     }), []);
   const updateHistory   = useCallback((id: AccountId, entry: HistoryEntry) =>
     setState((s) => {
       const acc = s.accounts[id];
-      const updated = acc.history.map((h) => h.id === entry.id ? { ...entry } : h);
+      const updated = acc.history.map((h) => (h.id === entry.id ? { ...entry, backtestGrowth: undefined } : { ...h, backtestGrowth: undefined }));
       return { ...s, accounts: { ...s.accounts, [id]: { ...acc, history: recalcReturns(updated) } } };
     }), []);
+  const setHistoryBacktest = useCallback((id: AccountId, updates: Record<string, NonNullable<HistoryEntry["backtestGrowth"]>>) => {
+    setState((s) => {
+      const acc = s.accounts[id];
+      const patched = acc.history.map((h) => (updates[h.id] ? { ...h, backtestGrowth: updates[h.id] } : h));
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, history: patched } } };
+    });
+    if (familyCode && currentUser && memState) {
+      dbSave(familyCode, currentUser, memState).catch(console.error);
+    }
+  }, []);
   const resetAll        = useCallback(() => {
     memState = null;
     setState(() => currentUser === "hyeobi" ? seedState() : emptyState());
@@ -829,7 +842,7 @@ export function usePortfolioStore() {
     hasSupabase,
     setProfile, setAllocation, resetAllocation,
     updateAccount, updateHolding,
-    addHistory, removeHistory, updateHistory,
+    addHistory, removeHistory, updateHistory, setHistoryBacktest,
     resetAll, importJson,
     setAccountActive, setAccountProfile,
     setAccountAllocation, resetAccountAllocations,

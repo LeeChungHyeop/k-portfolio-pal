@@ -11,6 +11,7 @@ import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, Responsive
 import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History } from "lucide-react";
 import { toast } from "sonner";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
+import { syncGrowthBacktest } from "@/lib/kaw/backtest";
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
@@ -97,7 +98,7 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
    리밸런싱 탭
 ───────────────────────────────────────────── */
 function RebalanceTab({ accountId }: { accountId: AccountId }) {
-  const { state, updateAccount, updateRowHolding, addHistory, saveAccountQuantities } = usePortfolioStore();
+  const { state, updateAccount, updateRowHolding, addHistory, saveAccountQuantities, setHistoryBacktest } = usePortfolioStore();
   const account = state.accounts[accountId];
   const library = getOrDefaultLibrary(state);
 
@@ -285,7 +286,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         holdingsSnap[k] = (holdingsSnap[k] ?? 0) + r.value;
       }
     });
-    addHistory(accountId, {
+    const newEntry: Omit<HistoryEntry, "returnPct"> = {
       id: crypto.randomUUID(),
       date: account.rebalanceDate,
       baseAmount: effectiveBase,
@@ -296,8 +297,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       rowQuantitiesSnap: { ...quantities },
       rowEtfSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.etfName])),
       rowLabelSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.label])),
-    });
+    };
+    addHistory(accountId, newEntry);
     toast.success("리밸런싱이 저장됐습니다");
+    // 케이올웨더 성장형 백테스트 값도 조용히 같이 계산해서 저장 (지수비교 메뉴에서 재사용)
+    syncGrowthBacktest([...account.history, { ...newEntry, returnPct: null }])
+      .then((result) => setHistoryBacktest(accountId, result))
+      .catch(() => { /* 실패해도 무시 — 지수비교 메뉴에서 다시 시도됨 */ });
   }
 
   const colCount = 7 + (isLiveActive ? 1 : 0);
@@ -597,7 +603,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
    히스토리 탭
 ───────────────────────────────────────────── */
 function HistoryTab({ accountId }: { accountId: AccountId }) {
-  const { state, addHistory, removeHistory, updateHistory } = usePortfolioStore();
+  const { state, addHistory, removeHistory, updateHistory, setHistoryBacktest } = usePortfolioStore();
   const account = state.accounts[accountId];
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editingEntry, setEditingEntry] = useState<HistoryEntry | null>(null);
@@ -609,13 +615,17 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
 
   function addManual() {
     if (!manualDate || !manualTotal) return;
-    addHistory(accountId, {
+    const newEntry: Omit<HistoryEntry, "returnPct"> = {
       id: crypto.randomUUID(), date: manualDate,
       baseAmount: parseFloat(manualTotal) || 0,
       totalValue: parseFloat(manualTotal) || 0,
       deposit: parseFloat(manualDeposit) || 0,
-    });
+    };
+    addHistory(accountId, newEntry);
     setManualTotal(""); setManualDeposit("");
+    syncGrowthBacktest([...account.history, { ...newEntry, returnPct: null }])
+      .then((result) => setHistoryBacktest(accountId, result))
+      .catch(() => { /* 실패해도 무시 — 지수비교 메뉴에서 다시 시도됨 */ });
   }
 
   const safeHistory = account.history ?? [];

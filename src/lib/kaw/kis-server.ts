@@ -140,13 +140,16 @@ async function fetchNaverHistoryPrice(ticker: string, date: string): Promise<{ p
   } catch { /* fall through to HTML */ }
 
   // 2) HTML 파싱 (오래된 날짜 fallback)
-  // 날짜 차이로 페이지 추정 (20 거래일/page ≈ 1달)
+  // 날짜 차이로 페이지 추정 (실측: finance.naver.com sise_day 1페이지 = 10거래일).
+  // 공휴일 등으로 추정치가 어긋날 수 있어 넉넉한 범위로 탐색한다.
   const targetDate = new Date(targetISO);
   const today = new Date();
   const daysDiff = Math.max(0, Math.floor((today.getTime() - targetDate.getTime()) / 86400000));
-  const approxPage = Math.max(1, Math.floor(daysDiff * 5 / 7 / 20));
+  const approxPage = Math.max(1, Math.floor(daysDiff * 5 / 7 / 10));
+  const pageFrom = Math.max(1, approxPage - 3);
+  const pageTo = approxPage + 10;
 
-  for (let page = approxPage; page <= approxPage + 2; page++) {
+  for (let page = pageFrom; page <= pageTo; page++) {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);

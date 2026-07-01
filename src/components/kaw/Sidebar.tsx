@@ -8,7 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 export type Page = "dashboard" | "compare" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
-const DEPLOY_DATE = "2026.07.01 17:41";
+const DEPLOY_DATE = "2026.07.01 18:18";
 
 const NAV = [
   { id: "dashboard"  as Page, label: "대시보드",    icon: LayoutDashboard, color: "text-violet-500" },
