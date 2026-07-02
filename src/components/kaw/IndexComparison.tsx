@@ -24,6 +24,8 @@ const fmtAxis = (v: number) =>
 
 const COLOR_ACTUAL = "oklch(0.62 0.18 250)";
 const COLOR_GROWTH = "oklch(0.72 0.17 80)";
+const COLOR_KOSPI = "oklch(0.62 0.20 20)";
+const COLOR_SP500 = "oklch(0.55 0.16 300)";
 
 interface ComparePoint {
   label: string;
@@ -31,6 +33,8 @@ interface ComparePoint {
   성장형자산: number;
   실제수익률: number | null;
   성장형수익률: number | null;
+  코스피200: number | null;
+  "S&P500": number | null;
 }
 
 // 기존 대시보드의 "전체자산추이"와 동일한 규칙: 월별 최신 리밸런싱 시점 하나만 채택.
@@ -66,6 +70,8 @@ function buildComparePoints(history: HistoryEntry[]): ComparePoint[] {
         성장형자산: bt?.totalValue ?? 0,
         실제수익률,
         성장형수익률: bt?.returnPct ?? null,
+        코스피200: bt?.kospi200Pct ?? null,
+        "S&P500": bt?.sp500Pct ?? null,
       };
     });
 }
@@ -75,17 +81,30 @@ export function IndexComparison() {
   const [tab, setTab] = useState<AccountId>("retirement");
 
   // 계좌별로 backtestGrowth가 없는 히스토리가 있으면 (신규 계좌 또는 최초 1회) 조용히 계산해서 저장
-  const retirementSync = useEnsureGrowthBacktest(state.accounts.retirement.history, (r) => setHistoryBacktest("retirement", r));
-  const isaSync = useEnsureGrowthBacktest(state.accounts.isa.history, (r) => setHistoryBacktest("isa", r));
-  const pensionSync = useEnsureGrowthBacktest(state.accounts.pension.history, (r) => setHistoryBacktest("pension", r));
-  const irpSync = useEnsureGrowthBacktest(state.accounts.irp.history, (r) => setHistoryBacktest("irp", r));
+  const retirementSync = useEnsureGrowthBacktest(state.accounts.retirement.history, (r) =>
+    setHistoryBacktest("retirement", r),
+  );
+  const isaSync = useEnsureGrowthBacktest(state.accounts.isa.history, (r) =>
+    setHistoryBacktest("isa", r),
+  );
+  const pensionSync = useEnsureGrowthBacktest(state.accounts.pension.history, (r) =>
+    setHistoryBacktest("pension", r),
+  );
+  const irpSync = useEnsureGrowthBacktest(state.accounts.irp.history, (r) =>
+    setHistoryBacktest("irp", r),
+  );
   const syncByAccount: Record<AccountId, { syncing: boolean; error: boolean }> = {
-    retirement: retirementSync, isa: isaSync, pension: pensionSync, irp: irpSync,
+    retirement: retirementSync,
+    isa: isaSync,
+    pension: pensionSync,
+    irp: irpSync,
   };
 
   const dataByAccount = useMemo(() => {
     const out = {} as Record<AccountId, ComparePoint[]>;
-    ACCOUNT_IDS.forEach((id) => { out[id] = buildComparePoints(state.accounts[id].history); });
+    ACCOUNT_IDS.forEach((id) => {
+      out[id] = buildComparePoints(state.accounts[id].history);
+    });
     return out;
   }, [state]);
 
@@ -113,7 +132,8 @@ export function IndexComparison() {
           <TabsContent key={id} value={id} className="space-y-6 mt-4">
             {syncByAccount[id].syncing && (
               <p className="text-sm text-muted-foreground flex items-center gap-1.5">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 성장형 백테스트 처음 계산 중... (한 번만 계산되고 저장돼)
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 성장형 백테스트 처음 계산 중...
+                (한 번만 계산되고 저장돼)
               </p>
             )}
             {syncByAccount[id].error && (
@@ -128,7 +148,7 @@ export function IndexComparison() {
             {dataByAccount[id].length >= 1 && (
               <>
                 <Card className="p-5">
-                  <h3 className="font-semibold mb-4">자산총액 비교</h3>
+                  <h3 className="font-semibold mb-4">자산총액 비교 (vs K-All Weather)</h3>
                   <div className="h-72">
                     <ResponsiveContainer>
                       <BarChart data={dataByAccount[id]}>
@@ -191,6 +211,26 @@ export function IndexComparison() {
                           name="케이올웨더 성장형"
                           stroke={COLOR_GROWTH}
                           strokeWidth={2}
+                          dot={{ r: 2 }}
+                          connectNulls
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="코스피200"
+                          name="코스피200"
+                          stroke={COLOR_KOSPI}
+                          strokeWidth={1.5}
+                          strokeDasharray="5 3"
+                          dot={{ r: 2 }}
+                          connectNulls
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="S&P500"
+                          name="S&P500"
+                          stroke={COLOR_SP500}
+                          strokeWidth={1.5}
+                          strokeDasharray="5 3"
                           dot={{ r: 2 }}
                           connectNulls
                         />

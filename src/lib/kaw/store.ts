@@ -24,7 +24,10 @@ export interface HistoryEntry {
   rowEtfSnap?: Record<string, string>;        // rowId → ETF명
   rowLabelSnap?: Record<string, string>;      // rowId → 자산명
   // "성장형(케이올웨더)으로 쭉 운용했다면" 백테스트 스냅샷 — 리밸런싱 시점에 계산해 영구 저장
-  backtestGrowth?: { totalValue: number; returnPct: number | null; units: Partial<Record<AssetKey, number>> };
+  backtestGrowth?: {
+    totalValue: number; returnPct: number | null; units: Partial<Record<AssetKey, number>>;
+    kospi200Pct: number | null; sp500Pct: number | null;
+  };
 }
 export interface AssetRowDef {
   id: string;

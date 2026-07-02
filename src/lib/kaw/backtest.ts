@@ -9,6 +9,8 @@ export interface BacktestGrowth {
   totalValue: number;
   returnPct: number | null;
   units: Partial<Record<AssetKey, number>>; // 다음 시점 드리프트 계산을 위한 보유 유닛 스냅샷
+  kospi200Pct: number | null; // 계좌 시작일 대비 코스피200(KIWOOM 200TR) 등락률
+  sp500Pct: number | null; // 계좌 시작일 대비 S&P500(TIGER 미국S&P500, KRW 환산) 등락률
 }
 
 interface DatedBacktestPoint extends BacktestGrowth {
@@ -25,6 +27,13 @@ export function computeGrowthBacktest(
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const units: Partial<Record<AssetKey, number>> = {};
   let cumDeposit = 0;
+
+  // 지수 등락률 기준선: 계좌 시작일의 코스피200/S&P500 프록시 가격
+  const basePrices = sorted.length ? (pricesByDate[sorted[0].date] ?? {}) : {};
+  const baseKospi = basePrices.kr;
+  const baseSp500 = basePrices.us;
+  const pctSince = (base: number | undefined, cur: number | undefined) =>
+    base && base > 0 && cur && cur > 0 ? Math.round(((cur - base) / base) * 10000) / 100 : null;
 
   return sorted.map((h, i) => {
     const prices = pricesByDate[h.date] ?? {};
@@ -49,7 +58,14 @@ export function computeGrowthBacktest(
     const returnPct =
       cumDeposit > 0 ? Math.round(((totalValue - cumDeposit) / cumDeposit) * 10000) / 100 : null;
 
-    return { date: h.date, totalValue, returnPct, units: { ...units } };
+    return {
+      date: h.date,
+      totalValue,
+      returnPct,
+      units: { ...units },
+      kospi200Pct: pctSince(baseKospi, prices.kr),
+      sp500Pct: pctSince(baseSp500, prices.us),
+    };
   });
 }
 
@@ -129,8 +145,8 @@ export async function syncGrowthBacktest(
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const result: Record<string, BacktestGrowth> = {};
   sorted.forEach((h, i) => {
-    const { totalValue, returnPct, units } = points[i];
-    result[h.id] = { totalValue, returnPct, units };
+    const { totalValue, returnPct, units, kospi200Pct, sp500Pct } = points[i];
+    result[h.id] = { totalValue, returnPct, units, kospi200Pct, sp500Pct };
   });
   return result;
 }
@@ -145,7 +161,11 @@ export function useEnsureGrowthBacktest(
   const [error, setError] = useState(false);
 
   const missingKey = useMemo(
-    () => history.filter((h) => !h.backtestGrowth).map((h) => h.id).join(","),
+    () =>
+      history
+        .filter((h) => !h.backtestGrowth)
+        .map((h) => h.id)
+        .join(","),
     [history],
   );
 
@@ -155,10 +175,18 @@ export function useEnsureGrowthBacktest(
     setSyncing(true);
     setError(false);
     syncGrowthBacktest(history)
-      .then((result) => { if (!cancelled) onResult(result); })
-      .catch(() => { if (!cancelled) setError(true); })
-      .finally(() => { if (!cancelled) setSyncing(false); });
-    return () => { cancelled = true; };
+      .then((result) => {
+        if (!cancelled) onResult(result);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setSyncing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [missingKey]);
 
