@@ -29,6 +29,7 @@ const COLOR_SP500 = "oklch(0.55 0.16 300)";
 
 interface ComparePoint {
   label: string;
+  date: string; // 해당 포인트의 실제 리밸런싱 일자 (YYYY-MM-DD) — 툴팁 표시용
   실제자산: number;
   성장형자산: number;
   실제수익률: number | null;
@@ -145,6 +146,7 @@ function buildComparePoints(history: HistoryEntry[]): ComparePoint[] {
       const bt = h.backtestGrowth;
       return {
         label: month.replace("-", "."),
+        date,
         실제자산: h.totalValue,
         성장형자산: bt?.totalValue ?? 0,
         실제수익률,
@@ -246,7 +248,10 @@ export function IndexComparison() {
                           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                           <XAxis dataKey="label" tick={{ fontSize: 10 }} />
                           <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={50} />
-                          <Tooltip formatter={(v: number) => `${v.toLocaleString()}원`} />
+                          <Tooltip
+                            formatter={(v: number) => `${v.toLocaleString()}원`}
+                            labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ""}
+                          />
                           <Legend />
                           <Bar
                             dataKey="실제자산"
@@ -292,6 +297,7 @@ export function IndexComparison() {
                               const real = inverseAxisValue(v, brk);
                               return `${real >= 0 ? "+" : ""}${real.toFixed(2)}%`;
                             }}
+                            labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ""}
                           />
                           <ReferenceLine
                             y={transformValue(0, brk)}
