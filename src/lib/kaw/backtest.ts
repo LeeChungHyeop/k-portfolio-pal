@@ -160,10 +160,11 @@ export function useEnsureGrowthBacktest(
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(false);
 
+  // backtestGrowth가 아예 없거나, 코스피200/S&P500 필드 추가 이전 버전(구 스키마)으로 저장된 경우 재계산 대상
   const missingKey = useMemo(
     () =>
       history
-        .filter((h) => !h.backtestGrowth)
+        .filter((h) => !h.backtestGrowth || h.backtestGrowth.kospi200Pct === undefined)
         .map((h) => h.id)
         .join(","),
     [history],
