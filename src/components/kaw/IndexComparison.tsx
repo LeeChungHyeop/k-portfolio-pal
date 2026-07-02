@@ -37,6 +37,85 @@ interface ComparePoint {
   "S&P500": number | null;
 }
 
+const RETURN_SERIES_KEYS = ["실제수익률", "성장형수익률", "코스피200", "S&P500"] as const;
+
+// 1등(최고점)이 나머지보다 압도적으로 높을 때, "2등 바로 위 ~ 1등 바로 아래" 구간을
+// y축에서 압축해서 생략 표시하기 위한 구간 정보
+interface AxisBreak {
+  breakLow: number; // 이 값까지는 원래 스케일 그대로
+  breakHigh: number; // 이 값부터 다시 원래 스케일 (breakLow~breakHigh 사이가 압축됨)
+  gap: number; // 압축 구간에 할당할 화면상 "값 공간" 크기
+  dataMin: number;
+  dataMax: number;
+}
+
+function computeAxisBreak(rows: ComparePoint[]): AxisBreak | null {
+  const maxBySeries = RETURN_SERIES_KEYS.map((k) =>
+    rows.reduce((m, r) => {
+      const v = r[k];
+      return v !== null && v > m ? v : m;
+    }, -Infinity),
+  ).filter((v) => Number.isFinite(v));
+  if (maxBySeries.length < 2) return null;
+
+  const [top1, top2] = [...maxBySeries].sort((a, b) => b - a);
+  // 1등이 2등보다 압도적으로 클 때만 축 생략 적용 (그 외엔 평범하게 렌더링)
+  if (top1 <= 0 || top1 - top2 < 20 || top1 < top2 * 1.6) return null;
+
+  const allValues = rows.flatMap((r) =>
+    RETURN_SERIES_KEYS.map((k) => r[k]).filter((v): v is number => v !== null),
+  );
+  const minAll = Math.min(0, ...allValues);
+  const margin = Math.max(2, (top2 - minAll) * 0.1);
+  const breakLow = top2 + margin;
+  const breakHigh = top1 - margin;
+  if (breakHigh <= breakLow + 1) return null;
+
+  const gap = Math.max(4, (breakHigh - breakLow) * 0.06);
+  return { breakLow, breakHigh, gap, dataMin: minAll, dataMax: top1 };
+}
+
+// 1,2,2.5,5,10... 형태의 "예쁜" 눈금 간격을 골라 min~max 사이 눈금을 생성
+function buildNiceTicks(min: number, max: number, targetCount: number): number[] {
+  if (max <= min) return [Math.round(min)];
+  const rough = (max - min) / Math.max(1, targetCount);
+  const steps = [1, 2, 2.5, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000];
+  const step = steps.find((s) => s >= rough) ?? steps[steps.length - 1];
+  const start = Math.ceil(min / step) * step;
+  const ticks: number[] = [];
+  for (let v = start; v <= max + 1e-9; v += step) ticks.push(Math.round(v * 100) / 100);
+  return ticks.length ? ticks : [Math.round(min), Math.round(max)];
+}
+
+function transformValue(v: number, brk: AxisBreak | null): number {
+  if (!brk) return v;
+  if (v <= brk.breakLow) return v;
+  if (v >= brk.breakHigh) return brk.breakLow + brk.gap + (v - brk.breakHigh);
+  const ratio = (v - brk.breakLow) / (brk.breakHigh - brk.breakLow);
+  return brk.breakLow + brk.gap * ratio;
+}
+
+function inverseAxisValue(t: number, brk: AxisBreak | null): number {
+  if (!brk) return t;
+  if (t <= brk.breakLow) return t;
+  if (t <= brk.breakLow + brk.gap) {
+    const ratio = (t - brk.breakLow) / brk.gap;
+    return brk.breakLow + ratio * (brk.breakHigh - brk.breakLow);
+  }
+  return brk.breakHigh + (t - brk.breakLow - brk.gap);
+}
+
+function applyAxisBreak(rows: ComparePoint[], brk: AxisBreak | null): ComparePoint[] {
+  if (!brk) return rows;
+  return rows.map((r) => ({
+    ...r,
+    실제수익률: r.실제수익률 === null ? null : transformValue(r.실제수익률, brk),
+    성장형수익률: r.성장형수익률 === null ? null : transformValue(r.성장형수익률, brk),
+    코스피200: r.코스피200 === null ? null : transformValue(r.코스피200, brk),
+    "S&P500": r["S&P500"] === null ? null : transformValue(r["S&P500"], brk),
+  }));
+}
+
 // 기존 대시보드의 "전체자산추이"와 동일한 규칙: 월별 최신 리밸런싱 시점 하나만 채택.
 // 성장형 백테스트 값은 리밸런싱 시점에 미리 계산해 h.backtestGrowth로 저장돼 있으므로 그대로 읽기만 한다.
 function buildComparePoints(history: HistoryEntry[]): ComparePoint[] {
@@ -128,120 +207,160 @@ export function IndexComparison() {
           ))}
         </TabsList>
 
-        {ACCOUNT_IDS.map((id) => (
-          <TabsContent key={id} value={id} className="space-y-6 mt-4">
-            {syncByAccount[id].syncing && (
-              <p className="text-sm text-muted-foreground flex items-center gap-1.5">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 성장형 백테스트 처음 계산 중...
-                (한 번만 계산되고 저장돼)
-              </p>
-            )}
-            {syncByAccount[id].error && (
-              <p className="text-sm text-rose-500">
-                과거 시세 조회 중 일부 실패했어. 다시 이 메뉴에 들어오면 재시도돼.
-              </p>
-            )}
-            {dataByAccount[id].length < 1 && (
-              <p className="text-sm text-muted-foreground">리밸런싱 기록이 아직 없어.</p>
-            )}
+        {ACCOUNT_IDS.map((id) => {
+          const rows = dataByAccount[id];
+          const brk = computeAxisBreak(rows);
+          const chartRows = applyAxisBreak(rows, brk);
+          const yTicks = brk
+            ? [
+                ...buildNiceTicks(brk.dataMin, brk.breakLow, 4),
+                ...buildNiceTicks(brk.breakHigh, brk.dataMax, 2),
+              ].map((v) => transformValue(v, brk))
+            : undefined;
+          const breakMarkY = brk ? brk.breakLow + brk.gap / 2 : null;
 
-            {dataByAccount[id].length >= 1 && (
-              <>
-                <Card className="p-5">
-                  <h3 className="font-semibold mb-4">자산총액 비교 (vs K-All Weather)</h3>
-                  <div className="h-72">
-                    <ResponsiveContainer>
-                      <BarChart data={dataByAccount[id]}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                        <XAxis dataKey="label" tick={{ fontSize: 10 }} />
-                        <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={50} />
-                        <Tooltip formatter={(v: number) => `${v.toLocaleString()}원`} />
-                        <Legend />
-                        <Bar
-                          dataKey="실제자산"
-                          name="실제(커스텀)"
-                          fill={COLOR_ACTUAL}
-                          radius={[4, 4, 0, 0]}
-                        />
-                        <Bar
-                          dataKey="성장형자산"
-                          name="케이올웨더 성장형"
-                          fill={COLOR_GROWTH}
-                          radius={[4, 4, 0, 0]}
-                        />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </Card>
+          return (
+            <TabsContent key={id} value={id} className="space-y-6 mt-4">
+              {syncByAccount[id].syncing && (
+                <p className="text-sm text-muted-foreground flex items-center gap-1.5">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 성장형 백테스트 처음 계산 중...
+                  (한 번만 계산되고 저장돼)
+                </p>
+              )}
+              {syncByAccount[id].error && (
+                <p className="text-sm text-rose-500">
+                  과거 시세 조회 중 일부 실패했어. 다시 이 메뉴에 들어오면 재시도돼.
+                </p>
+              )}
+              {dataByAccount[id].length < 1 && (
+                <p className="text-sm text-muted-foreground">리밸런싱 기록이 아직 없어.</p>
+              )}
 
-                <Card className="p-5">
-                  <h3 className="font-semibold mb-4">누적수익률 비교</h3>
-                  <div className="h-64">
-                    <ResponsiveContainer>
-                      <LineChart data={dataByAccount[id]}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                        <XAxis dataKey="label" tick={{ fontSize: 10 }} />
-                        <YAxis
-                          tick={{ fontSize: 10 }}
-                          tickFormatter={(v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`}
-                          width={58}
-                        />
-                        <Tooltip
-                          formatter={(v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`}
-                        />
-                        <ReferenceLine
-                          y={0}
-                          stroke="var(--border)"
-                          strokeWidth={1.5}
-                          strokeDasharray="4 2"
-                        />
-                        <Legend />
-                        <Line
-                          type="monotone"
-                          dataKey="실제수익률"
-                          name="실제(커스텀)"
-                          stroke={COLOR_ACTUAL}
-                          strokeWidth={2}
-                          dot={{ r: 2 }}
-                          connectNulls
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="성장형수익률"
-                          name="케이올웨더 성장형"
-                          stroke={COLOR_GROWTH}
-                          strokeWidth={2}
-                          dot={{ r: 2 }}
-                          connectNulls
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="코스피200"
-                          name="코스피200"
-                          stroke={COLOR_KOSPI}
-                          strokeWidth={1.5}
-                          strokeDasharray="5 3"
-                          dot={{ r: 2 }}
-                          connectNulls
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="S&P500"
-                          name="S&P500"
-                          stroke={COLOR_SP500}
-                          strokeWidth={1.5}
-                          strokeDasharray="5 3"
-                          dot={{ r: 2 }}
-                          connectNulls
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                </Card>
-              </>
-            )}
-          </TabsContent>
-        ))}
+              {dataByAccount[id].length >= 1 && (
+                <>
+                  <Card className="p-5">
+                    <h3 className="font-semibold mb-4">자산총액 비교 (vs K-All Weather)</h3>
+                    <div className="h-72">
+                      <ResponsiveContainer>
+                        <BarChart data={dataByAccount[id]}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                          <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+                          <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={50} />
+                          <Tooltip formatter={(v: number) => `${v.toLocaleString()}원`} />
+                          <Legend />
+                          <Bar
+                            dataKey="실제자산"
+                            name="실제(커스텀)"
+                            fill={COLOR_ACTUAL}
+                            radius={[4, 4, 0, 0]}
+                          />
+                          <Bar
+                            dataKey="성장형자산"
+                            name="케이올웨더 성장형"
+                            fill={COLOR_GROWTH}
+                            radius={[4, 4, 0, 0]}
+                          />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </Card>
+
+                  <Card className="p-5">
+                    <h3 className="font-semibold mb-4">누적수익률 비교</h3>
+                    {brk && (
+                      <p className="text-xs text-muted-foreground mb-2">
+                        ⌇ 표시 구간은 값 차이가 너무 커서 축을 압축/생략했어
+                      </p>
+                    )}
+                    <div className="h-64">
+                      <ResponsiveContainer>
+                        <LineChart data={chartRows}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                          <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+                          <YAxis
+                            tick={{ fontSize: 10 }}
+                            ticks={yTicks}
+                            domain={brk ? undefined : ["auto", "auto"]}
+                            tickFormatter={(v) => {
+                              const real = inverseAxisValue(v, brk);
+                              return `${real >= 0 ? "+" : ""}${real.toFixed(1)}%`;
+                            }}
+                            width={58}
+                          />
+                          <Tooltip
+                            formatter={(v: number) => {
+                              const real = inverseAxisValue(v, brk);
+                              return `${real >= 0 ? "+" : ""}${real.toFixed(2)}%`;
+                            }}
+                          />
+                          <ReferenceLine
+                            y={transformValue(0, brk)}
+                            stroke="var(--border)"
+                            strokeWidth={1.5}
+                            strokeDasharray="4 2"
+                          />
+                          {breakMarkY !== null && (
+                            <ReferenceLine
+                              y={breakMarkY}
+                              stroke="oklch(0.6 0.02 260)"
+                              strokeWidth={1.5}
+                              strokeDasharray="2 3"
+                              label={{
+                                value: "⌇ 축 생략",
+                                position: "insideTopLeft",
+                                fontSize: 9,
+                                fill: "oklch(0.6 0.02 260)",
+                              }}
+                            />
+                          )}
+                          <Legend />
+                          <Line
+                            type="monotone"
+                            dataKey="실제수익률"
+                            name="실제(커스텀)"
+                            stroke={COLOR_ACTUAL}
+                            strokeWidth={2}
+                            dot={{ r: 2 }}
+                            connectNulls
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="성장형수익률"
+                            name="케이올웨더 성장형"
+                            stroke={COLOR_GROWTH}
+                            strokeWidth={2}
+                            dot={{ r: 2 }}
+                            connectNulls
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="코스피200"
+                            name="코스피200"
+                            stroke={COLOR_KOSPI}
+                            strokeWidth={1.5}
+                            strokeDasharray="5 3"
+                            dot={{ r: 2 }}
+                            connectNulls
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="S&P500"
+                            name="S&P500"
+                            stroke={COLOR_SP500}
+                            strokeWidth={1.5}
+                            strokeDasharray="5 3"
+                            dot={{ r: 2 }}
+                            connectNulls
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </Card>
+                </>
+              )}
+            </TabsContent>
+          );
+        })}
       </Tabs>
     </div>
   );
