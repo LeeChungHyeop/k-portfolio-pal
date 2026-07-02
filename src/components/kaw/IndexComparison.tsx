@@ -27,6 +27,56 @@ const COLOR_GROWTH = "oklch(0.72 0.17 80)";
 const COLOR_KOSPI = "oklch(0.62 0.20 20)";
 const COLOR_SP500 = "oklch(0.55 0.16 300)";
 
+// recharts 기본 Tooltip은 배경이 흰색 고정인데 글자색은 테마를 물려받아서
+// 다크모드에서 흰 배경에 흰 글씨로 안 보이는 문제가 있어, 대시보드와 동일하게 커스텀 렌더링한다.
+function AssetTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null;
+  const date = payload[0]?.payload?.date;
+  return (
+    <div className="rounded-xl border bg-popover p-3 shadow-md text-sm space-y-1 min-w-40">
+      <p className="font-semibold text-xs text-muted-foreground mb-1">{date}</p>
+      {payload.map((p: any) => (
+        <div key={p.dataKey} className="flex justify-between gap-4">
+          <span className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: p.color }} />
+            <span className="text-xs">{p.name}</span>
+          </span>
+          <span className="tabular-nums text-xs font-medium">
+            {Number(p.value).toLocaleString()}원
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ReturnCompareTooltip({ active, payload, brk }: any) {
+  if (!active || !payload?.length) return null;
+  const date = payload[0]?.payload?.date;
+  return (
+    <div className="rounded-xl border bg-popover p-3 shadow-md text-sm space-y-1 min-w-40">
+      <p className="font-semibold text-xs text-muted-foreground mb-1">{date}</p>
+      {payload.map((p: any) => {
+        const real = inverseAxisValue(p.value, brk);
+        return (
+          <div key={p.dataKey} className="flex justify-between gap-4">
+            <span className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: p.color }} />
+              <span className="text-xs">{p.name}</span>
+            </span>
+            <span
+              className={`tabular-nums text-xs font-medium ${real >= 0 ? "text-emerald-600" : "text-rose-600"}`}
+            >
+              {real >= 0 ? "+" : ""}
+              {real.toFixed(2)}%
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 interface ComparePoint {
   label: string;
   date: string; // 해당 포인트의 실제 리밸런싱 일자 (YYYY-MM-DD) — 툴팁 표시용
@@ -248,10 +298,7 @@ export function IndexComparison() {
                           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                           <XAxis dataKey="label" tick={{ fontSize: 10 }} />
                           <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={50} />
-                          <Tooltip
-                            formatter={(v: number) => `${v.toLocaleString()}원`}
-                            labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ""}
-                          />
+                          <Tooltip content={<AssetTooltip />} />
                           <Legend />
                           <Bar
                             dataKey="실제자산"
@@ -292,13 +339,7 @@ export function IndexComparison() {
                             }}
                             width={58}
                           />
-                          <Tooltip
-                            formatter={(v: number) => {
-                              const real = inverseAxisValue(v, brk);
-                              return `${real >= 0 ? "+" : ""}${real.toFixed(2)}%`;
-                            }}
-                            labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ""}
-                          />
+                          <Tooltip content={<ReturnCompareTooltip brk={brk} />} />
                           <ReferenceLine
                             y={transformValue(0, brk)}
                             stroke="var(--border)"
