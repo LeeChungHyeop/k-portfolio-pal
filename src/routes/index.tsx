@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
 import { Menu, Wallet, RefreshCw } from "lucide-react";
-import { Sidebar, type Page } from "@/components/kaw/Sidebar";
+import { Sidebar, type Page, DEPLOY_DATE } from "@/components/kaw/Sidebar";
 import { Dashboard } from "@/components/kaw/Dashboard";
 import { IndexComparison } from "@/components/kaw/IndexComparison";
 import { AccountPage } from "@/components/kaw/AccountPage";
@@ -144,12 +144,13 @@ function Index() {
           <button onClick={() => setSidebarOpen(true)} className="p-2 rounded-lg hover:bg-muted transition-colors" aria-label="메뉴 열기">
             <Menu className="w-5 h-5" />
           </button>
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 grid place-items-center">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 grid place-items-center shrink-0">
               <Wallet className="w-3.5 h-3.5 text-white" />
             </div>
             <span className="font-bold text-sm">K-올웨더</span>
           </div>
+          <span className="text-[10px] text-muted-foreground/50 shrink-0">{DEPLOY_DATE}</span>
         </div>
 
         {page === "dashboard"  && <Dashboard onNavigate={navigate} />}
