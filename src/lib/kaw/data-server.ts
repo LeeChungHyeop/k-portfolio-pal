@@ -74,7 +74,7 @@ async function hmacKey(secret: string): Promise<CryptoKey> {
   );
 }
 
-export interface SessionPayload { code: string; profile: string; exp: number }
+export interface SessionPayload { code: string; profile: string; exp: number; v: number }
 
 async function signSession(payload: SessionPayload, secret: string): Promise<string> {
   const body = b64url(new TextEncoder().encode(JSON.stringify(payload)));
@@ -110,7 +110,9 @@ async function hashMaster(entered: string): Promise<string> {
 // 서버 전용 — 정답은 클라이언트 번들에 절대 포함하지 않는다 (질문 텍스트만 클라이언트에 공개)
 const SECRET_QUESTIONS_ANSWERS = ["대전", "러닝", "진현", "12시", "맥북"];
 
-interface ProfileConfig { id: string; label: string; pin_hash: string | null; is_admin: boolean }
+// pin_version: PIN이 바뀔 때마다 증가 — 세션 토큰에 발급 당시 버전을 같이 담아둬서,
+// PIN이 바뀐 뒤에는 그 전에 발급된 토큰이 자동으로 무효화되게 한다.
+interface ProfileConfig { id: string; label: string; pin_hash: string | null; is_admin: boolean; pin_version?: number }
 interface FamilyData { profiles: ProfileConfig[]; master_code_hash?: string | null; deleted_profiles?: ProfileConfig[] }
 
 function defaultFamilyData(): FamilyData {
@@ -169,6 +171,13 @@ async function verifyPinHash(env: DataEnv, code: string, profileId: string, pin:
   return ok;
 }
 
+// 토큰 서명·만료뿐 아니라, 발급 이후 PIN이 바뀌지 않았는지(pin_version 일치)까지 확인
+async function sessionStillValid(client: SupabaseClient, session: SessionPayload): Promise<boolean> {
+  const family = await loadFamilyRaw(client, session.code);
+  const profile = family.profiles.find((p) => p.id === session.profile);
+  return (profile?.pin_version ?? 0) === session.v;
+}
+
 async function verifySecretQuestion(env: DataEnv, sqIdx: number, answer: string): Promise<boolean> {
   const rlKey = `rl:sq:${sqIdx}`;
   if (!(await checkRateLimit(env, rlKey, 10, 10 * 60))) return false;
@@ -209,7 +218,7 @@ export async function handleVerifyPin(request: Request, env: DataEnv): Promise<R
   if (!(await verifyPinHash(env, code, profileId, pin, profile?.pin_hash ?? null))) return json({ ok: false });
 
   const exp = Math.floor(Date.now() / 1000) + 30 * 24 * 3600;
-  const token = await signSession({ code, profile: profileId, exp }, env.SESSION_SECRET);
+  const token = await signSession({ code, profile: profileId, exp, v: profile?.pin_version ?? 0 }, env.SESSION_SECRET);
   return json({ ok: true, token });
 }
 
@@ -263,12 +272,13 @@ export async function handleSetPin(request: Request, env: DataEnv): Promise<Resp
   }
   if (!authorized) return json({ error: "인증에 실패했습니다." }, 403);
 
+  const hash = await hashPin(code, profileId, newPin);
   const updated: FamilyData = {
     ...family,
-    profiles: family.profiles.map((p) => p.id === profileId ? { ...p, pin_hash: null } : p),
+    profiles: family.profiles.map((p) =>
+      p.id === profileId ? { ...p, pin_hash: hash, pin_version: (p.pin_version ?? 0) + 1 } : p,
+    ),
   };
-  const hash = await hashPin(code, profileId, newPin);
-  updated.profiles = updated.profiles.map((p) => p.id === profileId ? { ...p, pin_hash: hash } : p);
   await saveFamilyRaw(client, code, updated);
   return json(sanitizeFamily(updated));
 }
@@ -384,7 +394,9 @@ export async function handleDataGet(request: Request, env: DataEnv): Promise<Res
   if (!client || !env.SESSION_SECRET) return json({ error: "서버 설정 오류" }, 503);
   const token = bearerToken(request);
   const session = token ? await verifySession(token, env.SESSION_SECRET) : null;
-  if (!session) return json({ error: "인증이 만료됐어요. 다시 로그인해주세요." }, 401);
+  if (!session || !(await sessionStillValid(client, session))) {
+    return json({ error: "인증이 만료됐어요. 다시 로그인해주세요." }, 401);
+  }
 
   const { data, error } = await client
     .from("kaw_data").select("account_type, data, profile")
@@ -399,7 +411,9 @@ export async function handleDataPost(request: Request, env: DataEnv): Promise<Re
   if (!client || !env.SESSION_SECRET) return json({ error: "서버 설정 오류" }, 503);
   const token = bearerToken(request);
   const session = token ? await verifySession(token, env.SESSION_SECRET) : null;
-  if (!session) return json({ error: "인증이 만료됐어요. 다시 로그인해주세요." }, 401);
+  if (!session || !(await sessionStillValid(client, session))) {
+    return json({ error: "인증이 만료됐어요. 다시 로그인해주세요." }, 401);
+  }
 
   const body = (await request.json().catch(() => ({}))) as { rows?: unknown };
   if (!Array.isArray(body.rows)) return json({ error: "잘못된 요청입니다." }, 400);
