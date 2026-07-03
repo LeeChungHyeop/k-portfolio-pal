@@ -84,7 +84,8 @@ async function handleUpdate(
 export async function handleWebhookRequest(
   request: Request,
   botToken: string | undefined,
-  anthropicApiKey: string | undefined
+  anthropicApiKey: string | undefined,
+  webhookSecret: string | undefined,
 ): Promise<Response> {
   if (!botToken) {
     console.error("[telegram] TELEGRAM_BOT_TOKEN is not set");
@@ -93,6 +94,10 @@ export async function handleWebhookRequest(
   if (!anthropicApiKey) {
     console.error("[telegram] ANTHROPIC_API_KEY is not set");
     return new Response("Anthropic API key not configured", { status: 500 });
+  }
+  // 텔레그램이 보낸 요청인지 검증 (setWebhook 등록 시 지정한 secret_token과 대조)
+  if (webhookSecret && request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== webhookSecret) {
+    return new Response("Unauthorized", { status: 401 });
   }
 
   let update: TelegramUpdate;

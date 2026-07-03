@@ -4,15 +4,38 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { ACCOUNT_IDS } from "./constants";
 
+interface KVLike {
+  get(key: string): Promise<string | null>;
+  put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
 export interface DataEnv {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SESSION_SECRET?: string;
   ACCESS_CODE?: string;
+  RATE_LIMIT?: KVLike;
 }
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
+}
+
+// PIN/마스터코드/비밀질문처럼 "맞는 값 하나를 추측"하는 검증마다 공통으로 거치는 무차별 대입 방지.
+// 실패할 때마다 카운트가 올라가고, 성공하면 리셋. KV가 없으면(설정 오류) 막지 않고 그냥 통과시킴 —
+// 세션 토큰/PIN 해시라는 1차 방어선은 그대로 있으므로 가용성을 우선함.
+async function checkRateLimit(env: DataEnv, key: string, limit: number, windowSec: number): Promise<boolean> {
+  const kv = env.RATE_LIMIT;
+  if (!kv) return true;
+  const raw = await kv.get(key);
+  const count = raw ? parseInt(raw, 10) : 0;
+  if (count >= limit) return false;
+  await kv.put(key, String(count + 1), { expirationTtl: windowSec });
+  return true;
+}
+async function resetRateLimit(env: DataEnv, key: string): Promise<void> {
+  if (env.RATE_LIMIT) await env.RATE_LIMIT.delete(key).catch(() => {});
 }
 
 let cachedClient: { url: string; client: SupabaseClient } | null = null;
@@ -127,9 +150,31 @@ function sanitizeFamily(f: FamilyData) {
   };
 }
 
-async function verifyMaster(family: FamilyData, entered: string, code: string): Promise<boolean> {
-  if (family.master_code_hash) return (await hashMaster(entered)) === family.master_code_hash;
-  return entered.trim() === code;
+async function verifyMaster(env: DataEnv, family: FamilyData, entered: string, code: string): Promise<boolean> {
+  const rlKey = `rl:master:${code}`;
+  if (!(await checkRateLimit(env, rlKey, 10, 10 * 60))) return false;
+  const ok = family.master_code_hash
+    ? (await hashMaster(entered)) === family.master_code_hash
+    : entered.trim() === code;
+  if (ok) await resetRateLimit(env, rlKey);
+  return ok;
+}
+
+async function verifyPinHash(env: DataEnv, code: string, profileId: string, pin: string, expectedHash: string | null): Promise<boolean> {
+  if (!expectedHash) return false;
+  const rlKey = `rl:pin:${code}:${profileId}`;
+  if (!(await checkRateLimit(env, rlKey, 8, 10 * 60))) return false;
+  const ok = (await hashPin(code, profileId, pin)) === expectedHash;
+  if (ok) await resetRateLimit(env, rlKey);
+  return ok;
+}
+
+async function verifySecretQuestion(env: DataEnv, sqIdx: number, answer: string): Promise<boolean> {
+  const rlKey = `rl:sq:${sqIdx}`;
+  if (!(await checkRateLimit(env, rlKey, 10, 10 * 60))) return false;
+  const ok = sqIdx >= 0 && sqIdx < SECRET_QUESTIONS_ANSWERS.length && answer.trim() === SECRET_QUESTIONS_ANSWERS[sqIdx];
+  if (ok) await resetRateLimit(env, rlKey);
+  return ok;
 }
 
 // ── 요청 핸들러 ───────────────────────────────────────────────────────────
@@ -161,8 +206,7 @@ export async function handleVerifyPin(request: Request, env: DataEnv): Promise<R
   const family = await loadFamilyRaw(client, code);
   const all = [...family.profiles, ...(family.deleted_profiles ?? [])];
   const profile = all.find((p) => p.id === profileId);
-  if (!profile?.pin_hash) return json({ ok: false });
-  if ((await hashPin(code, profileId, pin)) !== profile.pin_hash) return json({ ok: false });
+  if (!(await verifyPinHash(env, code, profileId, pin, profile?.pin_hash ?? null))) return json({ ok: false });
 
   const exp = Math.floor(Date.now() / 1000) + 30 * 24 * 3600;
   const token = await signSession({ code, profile: profileId, exp }, env.SESSION_SECRET);
@@ -176,14 +220,14 @@ export async function handleVerifyMaster(request: Request, env: DataEnv): Promis
   const entered = typeof body.entered === "string" ? body.entered : "";
   if (!client || !code || code !== env.ACCESS_CODE) return json({ ok: false });
   const family = await loadFamilyRaw(client, code);
-  return json({ ok: await verifyMaster(family, entered, code) });
+  return json({ ok: await verifyMaster(env, family, entered, code) });
 }
 
-export async function handleVerifySecretQuestion(request: Request): Promise<Response> {
+export async function handleVerifySecretQuestion(request: Request, env: DataEnv): Promise<Response> {
   const body = (await request.json().catch(() => ({}))) as { sqIdx?: unknown; answer?: unknown };
   const idx = typeof body.sqIdx === "number" ? body.sqIdx : -1;
-  const answer = typeof body.answer === "string" ? body.answer.trim() : "";
-  const ok = idx >= 0 && idx < SECRET_QUESTIONS_ANSWERS.length && answer === SECRET_QUESTIONS_ANSWERS[idx];
+  const answer = typeof body.answer === "string" ? body.answer : "";
+  const ok = await verifySecretQuestion(env, idx, answer);
   return json({ ok });
 }
 
@@ -209,14 +253,13 @@ export async function handleSetPin(request: Request, env: DataEnv): Promise<Resp
 
   let authorized = !profile.pin_hash; // 최초 설정
   if (!authorized && typeof body.currentPin === "string") {
-    authorized = (await hashPin(code, profileId, body.currentPin)) === profile.pin_hash;
+    authorized = await verifyPinHash(env, code, profileId, body.currentPin, profile.pin_hash);
   }
   if (!authorized && typeof body.masterCode === "string") {
-    authorized = await verifyMaster(family, body.masterCode, code);
+    authorized = await verifyMaster(env, family, body.masterCode, code);
   }
   if (!authorized && typeof body.sqIdx === "number" && typeof body.sqAnswer === "string") {
-    authorized = body.sqIdx >= 0 && body.sqIdx < SECRET_QUESTIONS_ANSWERS.length
-      && body.sqAnswer.trim() === SECRET_QUESTIONS_ANSWERS[body.sqIdx];
+    authorized = await verifySecretQuestion(env, body.sqIdx, body.sqAnswer);
   }
   if (!authorized) return json({ error: "인증에 실패했습니다." }, 403);
 
@@ -242,10 +285,9 @@ export async function handleSetMaster(request: Request, env: DataEnv): Promise<R
 
   const family = await loadFamilyRaw(client, code);
   let authorized = false;
-  if (typeof body.currentMaster === "string") authorized = await verifyMaster(family, body.currentMaster, code);
+  if (typeof body.currentMaster === "string") authorized = await verifyMaster(env, family, body.currentMaster, code);
   if (!authorized && typeof body.sqIdx === "number" && typeof body.sqAnswer === "string") {
-    authorized = body.sqIdx >= 0 && body.sqIdx < SECRET_QUESTIONS_ANSWERS.length
-      && body.sqAnswer.trim() === SECRET_QUESTIONS_ANSWERS[body.sqIdx];
+    authorized = await verifySecretQuestion(env, body.sqIdx, body.sqAnswer);
   }
   if (!authorized) return json({ error: "인증에 실패했습니다." }, 403);
 
@@ -268,7 +310,7 @@ export async function handleAddProfile(request: Request, env: DataEnv): Promise<
     return json({ error: "잘못된 요청입니다." }, 400);
   }
   const family = await loadFamilyRaw(client, code);
-  if (!(await verifyMaster(family, masterCode, code))) return json({ error: "인증에 실패했습니다." }, 403);
+  if (!(await verifyMaster(env, family, masterCode, code))) return json({ error: "인증에 실패했습니다." }, 403);
 
   const id = label.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_가-힣]/g, "") || `profile_${Date.now()}`;
   const finalId = family.profiles.some((p) => p.id === id) ? `${id}_${Date.now()}` : id;
@@ -291,7 +333,7 @@ export async function handleRestoreProfile(request: Request, env: DataEnv): Prom
 
   const family = await loadFamilyRaw(client, code);
   const deleted = (family.deleted_profiles ?? []).find((p) => p.id === profileId);
-  if (!deleted?.pin_hash || (await hashPin(code, profileId, pin)) !== deleted.pin_hash) {
+  if (!deleted || !(await verifyPinHash(env, code, profileId, pin, deleted.pin_hash))) {
     return json({ error: "인증에 실패했습니다." }, 403);
   }
   const updated: FamilyData = {
@@ -313,7 +355,7 @@ export async function handleDeleteProfile(request: Request, env: DataEnv, hard: 
   if (!code || code !== env.ACCESS_CODE || !profileId) return json({ error: "잘못된 요청입니다." }, 400);
 
   const family = await loadFamilyRaw(client, code);
-  if (!(await verifyMaster(family, masterCode, code))) return json({ error: "인증에 실패했습니다." }, 403);
+  if (!(await verifyMaster(env, family, masterCode, code))) return json({ error: "인증에 실패했습니다." }, 403);
 
   const profile = family.profiles.find((p) => p.id === profileId);
   let updated: FamilyData;
@@ -365,7 +407,7 @@ export async function handleDataPost(request: Request, env: DataEnv): Promise<Re
   const rows = body.rows as Array<{ family_code?: unknown; profile?: unknown; account_type?: unknown; data?: unknown; updated_at?: unknown }>;
   const sanitized = rows.filter((r) => {
     if (r.family_code !== session.code) return false;
-    if (r.profile === "_shared") return true;
+    if (r.profile === "_shared") return r.account_type === "_assetLib";
     return r.profile === session.profile
       && (r.account_type === "_meta" || ACCOUNT_IDS.includes(r.account_type as (typeof ACCOUNT_IDS)[number]));
   }).map((r) => ({

@@ -20,6 +20,7 @@ export interface Env {
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SESSION_SECRET?: string;
   ACCESS_CODE?: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
   [key: string]: unknown;
 }
 
@@ -92,7 +93,23 @@ export default {
 
     // ── Telegram webhook ────────────────────────────────────────────────
     if (pathname === "/api/webhook/telegram" && request.method === "POST") {
-      return handleWebhookRequest(request, env.TELEGRAM_BOT_TOKEN, env.ANTHROPIC_API_KEY);
+      return handleWebhookRequest(request, env.TELEGRAM_BOT_TOKEN, env.ANTHROPIC_API_KEY, env.TELEGRAM_WEBHOOK_SECRET);
+    }
+
+    // ── (1회성) 텔레그램 웹훅에 secret_token 등록 — ACCESS_CODE로 보호 ──────
+    if (pathname === "/api/admin/telegram-webhook-setup" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as { code?: unknown };
+      if (body.code !== env.ACCESS_CODE) return Response.json({ error: "unauthorized" }, { status: 401 });
+      if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) {
+        return Response.json({ error: "TELEGRAM_BOT_TOKEN or TELEGRAM_WEBHOOK_SECRET not configured" }, { status: 503 });
+      }
+      const webhookUrl = new URL("/api/webhook/telegram", request.url).toString();
+      const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: webhookUrl, secret_token: env.TELEGRAM_WEBHOOK_SECRET }),
+      });
+      return Response.json(await res.json(), { status: res.status });
     }
 
     // ── KIS 실시간 주가 프록시 ─────────────────────────────────────────
@@ -133,7 +150,7 @@ export default {
     if (pathname === "/api/auth/family" && request.method === "POST") return handleAuthFamily(request, env);
     if (pathname === "/api/auth/verify-pin" && request.method === "POST") return handleVerifyPin(request, env);
     if (pathname === "/api/auth/verify-master" && request.method === "POST") return handleVerifyMaster(request, env);
-    if (pathname === "/api/auth/verify-secret-question" && request.method === "POST") return handleVerifySecretQuestion(request);
+    if (pathname === "/api/auth/verify-secret-question" && request.method === "POST") return handleVerifySecretQuestion(request, env);
     if (pathname === "/api/auth/set-pin" && request.method === "POST") return handleSetPin(request, env);
     if (pathname === "/api/auth/set-master" && request.method === "POST") return handleSetMaster(request, env);
     if (pathname === "/api/auth/add-profile" && request.method === "POST") return handleAddProfile(request, env);
