@@ -143,11 +143,9 @@
   }
 }
 
-/* 다크모드에서 날짜 선택(달력 피커) 시인성 개선 - 라이트 테마로 강제 표시 */
-.dark input[type="date"] {
-  color-scheme: light;
-  background-color: oklch(1 0 0);
-  color: oklch(0.129 0.042 264.695);
+/* 다크모드에서 날짜 선택(달력) 아이콘 시인성 개선 - 아이콘 색상만 반전 */
+.dark input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(1);
 }
 
 /* 사이드바 스크롤바 */
