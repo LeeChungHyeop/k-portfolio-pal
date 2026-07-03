@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
-import { ACCOUNT_IDS, ACCOUNT_LABELS_SHORT, type AccountId } from "@/lib/kaw/constants";
-import { usePortfolioStore, type HistoryEntry } from "@/lib/kaw/store";
+import { ACCOUNT_IDS, ACCOUNT_LABELS_SHORT, ASSET_ORDER, type AccountId } from "@/lib/kaw/constants";
+import { usePortfolioStore, getOrDefaultLibrary, BUILTIN_TICKERS, type HistoryEntry, type ProfileRowDef } from "@/lib/kaw/store";
+import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
@@ -17,7 +18,7 @@ import {
   ReferenceLine,
 } from "recharts";
 import { RefreshCw } from "lucide-react";
-import { useEnsureGrowthBacktest } from "@/lib/kaw/backtest";
+import { useEnsureGrowthBacktest, getCachedIndexBasePrices } from "@/lib/kaw/backtest";
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
@@ -207,9 +208,68 @@ function buildComparePoints(history: HistoryEntry[]): ComparePoint[] {
     });
 }
 
+const pctSince = (base: number | undefined, cur: number | undefined) =>
+  base && base > 0 && cur && cur > 0 ? Math.round(((cur - base) / base) * 10000) / 100 : null;
+
+// 실시간 주가로 "현재" 시점 비교 포인트를 만든다.
+// 실제(커스텀)는 보유수량 × 실시간가, 성장형은 마지막 리밸런싱 시점 보유 유닛 × 실시간가로 평가한다.
+function buildLivePoint(
+  history: HistoryEntry[],
+  profileRows: ProfileRowDef[],
+  liveQuantities: Record<string, number> | undefined,
+  library: ReturnType<typeof getOrDefaultLibrary>,
+  livePrices: Record<string, number>,
+): ComparePoint | null {
+  if (!history.length) return null;
+  const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
+  const last = sorted[sorted.length - 1];
+  if (!last.backtestGrowth) return null;
+
+  const 실제자산 = profileRows.reduce((sum, row) => {
+    const def = library.find((d) => d.id === row.assetId);
+    const etfName = row.etfName ?? def?.defaultEtf ?? row.assetId;
+    const tickerByEtf = library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker;
+    const ticker = tickerByEtf ?? def?.ticker ?? "";
+    const qty = liveQuantities?.[row.id] ?? 0;
+    const price = ticker ? (livePrices[ticker] ?? 0) : 0;
+    return sum + qty * price;
+  }, 0);
+
+  const units = last.backtestGrowth.units;
+  const 성장형자산 = ASSET_ORDER.reduce((sum, key) => {
+    const ticker = BUILTIN_TICKERS[key];
+    const price = ticker ? (livePrices[ticker] ?? 0) : 0;
+    return sum + (units[key] ?? 0) * price;
+  }, 0);
+
+  if (실제자산 <= 0 || 성장형자산 <= 0) return null;
+
+  let cumDeposit = 0;
+  sorted.forEach((h, i) => {
+    cumDeposit += i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
+  });
+
+  const base = getCachedIndexBasePrices(sorted[0].date);
+  const krTicker = BUILTIN_TICKERS.kr;
+  const usTicker = BUILTIN_TICKERS.us;
+
+  return {
+    label: "현재",
+    date: "현재",
+    실제자산,
+    성장형자산,
+    실제수익률: cumDeposit > 0 ? Math.round(((실제자산 - cumDeposit) / cumDeposit) * 10000) / 100 : null,
+    성장형수익률: cumDeposit > 0 ? Math.round(((성장형자산 - cumDeposit) / cumDeposit) * 10000) / 100 : null,
+    코스피200: pctSince(base.kr, krTicker ? livePrices[krTicker] : undefined),
+    "S&P500": pctSince(base.us, usTicker ? livePrices[usTicker] : undefined),
+  };
+}
+
 export function IndexComparison() {
   const { state, setHistoryBacktest } = usePortfolioStore();
   const [tab, setTab] = useState<AccountId>("retirement");
+  const { prices: livePrices, configured } = useKisPriceContext();
+  const library = useMemo(() => getOrDefaultLibrary(state), [state.assetLibrary]);
 
   // 계좌별로 backtestGrowth가 없는 히스토리가 있으면 (신규 계좌 또는 최초 1회) 조용히 계산해서 저장
   const retirementSync = useEnsureGrowthBacktest(state.accounts.retirement.history, (r) =>
@@ -234,10 +294,21 @@ export function IndexComparison() {
   const dataByAccount = useMemo(() => {
     const out = {} as Record<AccountId, ComparePoint[]>;
     ACCOUNT_IDS.forEach((id) => {
-      out[id] = buildComparePoints(state.accounts[id].history);
+      const account = state.accounts[id];
+      const points = buildComparePoints(account.history);
+      const livePoint = configured
+        ? buildLivePoint(
+            account.history,
+            account.profileRows?.[account.profile ?? "growth"] ?? [],
+            account.liveQuantities,
+            library,
+            livePrices,
+          )
+        : null;
+      out[id] = livePoint ? [...points, livePoint] : points;
     });
     return out;
-  }, [state]);
+  }, [state, library, livePrices, configured]);
 
   const activeSync = syncByAccount[tab];
 

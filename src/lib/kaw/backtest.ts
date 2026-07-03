@@ -88,6 +88,17 @@ function savePriceCache(cache: Record<string, Record<string, number>>) {
   }
 }
 
+// 계좌 시작일의 코스피200/S&P500 프록시 기준가를 캐시에서 조회 (이미 syncGrowthBacktest가 채워둔 캐시를 재사용, 추가 네트워크 요청 없음)
+export function getCachedIndexBasePrices(startDate: string): { kr?: number; us?: number } {
+  const byTicker = loadPriceCache()[startDate] ?? {};
+  const krTicker = BUILTIN_TICKERS.kr;
+  const usTicker = BUILTIN_TICKERS.us;
+  return {
+    kr: krTicker ? byTicker[krTicker] : undefined,
+    us: usTicker ? byTicker[usTicker] : undefined,
+  };
+}
+
 const GROWTH_TICKERS = ASSET_ORDER.map((k) => BUILTIN_TICKERS[k]).filter((t): t is string => !!t);
 
 async function fetchPricesForDate(date: string): Promise<Record<string, number>> {
