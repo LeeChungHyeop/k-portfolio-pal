@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback } from "react";
 import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, type AccountId, type AssetKey, type ProfileKey } from "./constants";
-import { supabase, hasSupabase } from "./supabase";
-import { defaultFamilyData, saveFamilyData, SESSION_AUTH_KEY } from "./auth";
+import { loadFamilyData, SESSION_AUTH_KEY, SESSION_TOKEN_KEY, getSessionToken, clearSessionProfile } from "./auth";
 
 // 액세스 코드: 환경변수에 없으면 "soye" 고정
 export const ACCESS_CODE: string = import.meta.env.VITE_ACCESS_CODE || "soye";
 
-export type { UserProfile } from "./supabase";
+// Supabase에는 이제 서버(Cloudflare Worker)만 접속한다. 브라우저는 /api/* 만 호출.
+export const hasSupabase = true;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface Holding { assetKey: AssetKey; etfName: string; value: number; }
@@ -342,10 +342,11 @@ let initialized = false;
 let memState: StoreState | null = null;
 const listeners = new Set<() => void>();
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let realtimeChannel: any = null;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+const POLL_INTERVAL_MS = 20_000;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-let isReceivingRealtime = false;
+// 폴링으로 받아온 데이터를 memState에 반영하는 동안 dbSave가 그 반영 자체를 다시 저장하지 않도록 막는 플래그
+let isApplyingRemote = false;
 
 function notify() { listeners.forEach((l) => l()); }
 
@@ -394,14 +395,13 @@ function loadLocal(): StoreState {
 interface DbRow { family_code: string; profile: string; account_type: string; data: unknown; updated_at?: string; }
 
 async function dbLoad(code: string, user: string): Promise<StoreState | null> {
-  if (!supabase) return null;
+  const token = getSessionToken();
+  if (!token) return null;
   try {
-    const { data, error } = await supabase
-      .from("kaw_data")
-      .select("account_type, data, profile")
-      .eq("family_code", code)
-      .in("profile", [user, "_shared"]);
-    if (error) throw error;
+    const res = await fetch("/api/data", { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 401) { clearSessionProfile(); return null; }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { rows: data } = (await res.json()) as { rows?: DbRow[] };
     if (!data?.length) return null;
 
     let profileKey: ProfileKey = "growth";
@@ -439,20 +439,30 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
 }
 
 async function dbSave(code: string, user: string, state: StoreState) {
-  if (!supabase || isReceivingRealtime || !user) return;
+  const token = getSessionToken();
+  if (!token || isApplyingRemote || !user) return;
   const now = new Date().toISOString();
   const rows: DbRow[] = [
     { family_code: code, profile: user, account_type: "_meta", data: { profile: state.profile, allocations: state.allocations, assetLibrary: state.assetLibrary }, updated_at: now },
     { family_code: code, profile: "_shared", account_type: "_assetLib", data: { assetLibrary: state.assetLibrary }, updated_at: now },
     ...ACCOUNT_IDS.map((id) => ({ family_code: code, profile: user, account_type: id, data: state.accounts[id], updated_at: now })),
   ];
-  const { error } = await supabase.from("kaw_data").upsert(rows, { onConflict: "family_code,profile,account_type" });
-  if (error) {
-    console.error("[kaw] DB save error:", error.message, error.details ?? "");
-    dbError = `동기화 실패: ${error.message}`;
-    notify();
-  } else {
+  try {
+    const res = await fetch("/api/data", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ rows }),
+    });
+    if (res.status === 401) { clearSessionProfile(); throw new Error("세션이 만료됐어요. 다시 로그인해주세요."); }
+    if (!res.ok) {
+      const e = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(e.error ?? `HTTP ${res.status}`);
+    }
     if (dbError?.startsWith("동기화 실패")) { dbError = null; notify(); }
+  } catch (e) {
+    console.error("[kaw] DB save error:", e);
+    dbError = `동기화 실패: ${(e as Error).message}`;
+    notify();
   }
 }
 
@@ -464,49 +474,27 @@ function scheduleSave() {
   }, 800);
 }
 
-// ── Realtime ───────────────────────────────────────────────────────────────
-function subscribeRealtime(code: string) {
-  if (!supabase) return;
-  unsubscribeRealtime();
-  realtimeChannel = supabase
-    .channel(`kaw-room-${code}`)
-    .on("postgres_changes" as "system", {
-      event: "UPDATE",
-      schema: "public",
-      table: "kaw_data",
-      filter: `family_code=eq.${code}`,
-    }, (payload: { new: DbRow }) => {
-      const row = payload.new;
-      if (!memState || row.profile !== currentUser) return;
-      isReceivingRealtime = true;
-      if (row.account_type === "_meta") {
-        const m = row.data as { profile: ProfileKey; allocations: typeof PROFILE_PRESETS };
-        memState = { ...memState, profile: m.profile, allocations: m.allocations };
-      } else if (ACCOUNT_IDS.includes(row.account_type as AccountId)) {
-        const next = { ...memState, accounts: { ...memState.accounts, [row.account_type]: row.data as AccountState } };
-        try { memState = migrateState(next); } catch { memState = next; }
-      }
+// ── 폴링 동기화 (Realtime 웹소켓 대신) ──────────────────────────────────────
+// 다른 기기/탭에서 저장한 변경사항을 주기적으로 확인해 반영한다.
+function startPolling(code: string) {
+  stopPolling();
+  pollTimer = setInterval(async () => {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    if (!familyCode || !currentUser || familyCode !== code) return;
+    try {
+      const state = await dbLoad(code, currentUser);
+      if (!state) return;
+      isApplyingRemote = true;
+      memState = migrateState(state, currentUser === "hyeobi");
       saveLocal(memState);
-      isReceivingRealtime = false;
+      isApplyingRemote = false;
       notify();
-    })
-    .subscribe();
+    } catch { /* 다음 폴링에서 재시도 */ }
+  }, POLL_INTERVAL_MS);
 }
 
-function unsubscribeRealtime() {
-  if (realtimeChannel && supabase) {
-    supabase.removeChannel(realtimeChannel);
-    realtimeChannel = null;
-  }
-}
-
-// ── Supabase 익명 인증 (RLS 통과용) ─────────────────────────────────────────
-async function ensureSupabaseAuth(): Promise<void> {
-  if (!supabase) return;
-  const { data: { session } } = await supabase.auth.getSession();
-  if (session) return;
-  const { error } = await supabase.auth.signInAnonymously();
-  if (error) console.error("[kaw] Supabase 익명 로그인 실패:", error.message);
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
 
 // ── Auth actions ───────────────────────────────────────────────────────────
@@ -524,47 +512,16 @@ export async function loginWithCode(code: string): Promise<"new" | "existing"> {
   notify();
 
   try {
-    // RLS 정책 통과를 위해 Supabase Auth 세션 확보 (익명 로그인)
-    await ensureSupabaseAuth();
-
-    let isNew = false;
-
-    if (supabase) {
-      const { data, error } = await supabase
-        .from("kaw_data")
-        .select("id")
-        .eq("family_code", code)
-        .limit(1);
-      if (error) throw error;
-      isNew = !data?.length;
-    } else {
-      isNew = !localStorage.getItem(storeKey(code, "hyeobi")) && !localStorage.getItem(LEGACY_STORE_KEY + ".auth." + code);
-    }
+    // 서버가 family_code 존재 여부를 확인하고, 신규면 기본 프로필 메타데이터를 만들어둔다.
+    // 계좌 데이터 자체(seedState 등)는 PIN 최초 설정 이후 세션 토큰이 생기면 자연스럽게 저장됨.
+    const fd = await loadFamilyData(code);
 
     familyCode = code;
     localStorage.setItem(AUTH_CODE_KEY, code);
 
-    if (isNew) {
-      // Migrate legacy data if exists
-      let state: StoreState | null = null;
-      try {
-        const legacyRaw = localStorage.getItem(LEGACY_STORE_KEY);
-        if (legacyRaw) state = migrateState(JSON.parse(legacyRaw) as StoreState);
-      } catch {}
-      if (!state) state = seedState();
-
-      if (supabase) {
-        await saveFamilyData(code, defaultFamilyData());
-        await dbSave(code, "hyeobi", state);
-      } else {
-        localStorage.setItem(LEGACY_STORE_KEY + ".auth." + code, "1");
-        localStorage.setItem(storeKey(code, "hyeobi"), JSON.stringify(state));
-      }
-    }
-
     dbLoading = false;
     notify();
-    return isNew ? "new" : "existing";
+    return fd.isNew ? "new" : "existing";
   } catch (e: unknown) {
     dbError = (e as { message?: string })?.message ?? "오류가 발생했습니다.";
     dbLoading = false;
@@ -597,7 +554,7 @@ export async function activateProfile(profileId: string): Promise<void> {
       memState = loadLocal();
     }
     saveLocal(memState);
-    subscribeRealtime(familyCode);
+    startPolling(familyCode);
   } catch {}
 
   dbLoading = false;
@@ -611,7 +568,7 @@ export async function syncNow(): Promise<void> {
   try {
     const state = await dbLoad(familyCode, currentUser);
     if (state) { memState = migrateState(state, currentUser === "hyeobi"); saveLocal(memState); }
-    subscribeRealtime(familyCode);
+    startPolling(familyCode);
   } catch (e) {
     console.error("[kaw] syncNow error:", e);
   } finally {
@@ -621,9 +578,9 @@ export async function syncNow(): Promise<void> {
 }
 
 export function deactivateProfile(): void {
-  unsubscribeRealtime();
+  stopPolling();
   localStorage.removeItem(AUTH_USER_KEY);
-  if (typeof window !== "undefined") sessionStorage.removeItem(SESSION_AUTH_KEY);
+  clearSessionProfile();
   currentUser = "";
   memState = null;
   notify();
@@ -631,11 +588,10 @@ export function deactivateProfile(): void {
 
 export function logoutCode() {
   if (typeof window === "undefined") return;
-  unsubscribeRealtime();
-  supabase?.auth.signOut().catch(() => {});
+  stopPolling();
   localStorage.removeItem(AUTH_CODE_KEY);
   localStorage.removeItem(AUTH_USER_KEY);
-  sessionStorage.removeItem(SESSION_AUTH_KEY);
+  clearSessionProfile();
   familyCode = null;
   currentUser = "";
   memState = null;
@@ -663,9 +619,9 @@ function setupVisibilityRefresh() {
   visibilityListenerAdded = true;
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible" || !familyCode || !currentUser) return;
-    // WebSocket이 끊겼을 수 있으므로 재구독
-    subscribeRealtime(familyCode);
-    // Supabase에서 최신 데이터 강제 로드
+    // 백그라운드에 있는 동안 폴링이 멈춰있었을 수 있으므로 재시작
+    startPolling(familyCode);
+    // 최신 데이터 강제 로드
     dbLoad(familyCode, currentUser).then((state) => {
       if (!state) return;
       memState = migrateState(state);
@@ -684,25 +640,21 @@ async function initFromStorage() {
   familyCode = code;
   setupVisibilityRefresh();
 
-  // 페이지 새로고침 시 Supabase 세션 복원 대기 (RLS 통과용)
-  if (hasSupabase) await ensureSupabaseAuth();
-
-  // sessionStorage에 프로필 인증 기록이 있으면 세션 복원 (같은 탭 새로고침)
+  // sessionStorage에 프로필 인증 기록 + 유효한 세션 토큰이 있으면 세션 복원 (같은 탭 새로고침)
   const sessionProfile = sessionStorage.getItem(SESSION_AUTH_KEY);
   const savedUser      = localStorage.getItem(AUTH_USER_KEY);
-  if (sessionProfile && savedUser === sessionProfile) {
+  const token           = getSessionToken();
+  if (sessionProfile && savedUser === sessionProfile && token) {
     // currentUser를 먼저 설정해야 loadLocal()이 올바른 키로 읽음
     currentUser = sessionProfile;
     memState    = loadLocal();
     notify();
 
-    if (hasSupabase) {
-      try {
-        const dbState = await dbLoad(code, sessionProfile);
-        if (dbState) { memState = migrateState(dbState, sessionProfile === "hyeobi"); saveLocal(memState); notify(); }
-      } catch {}
-    }
-    subscribeRealtime(code);
+    try {
+      const dbState = await dbLoad(code, sessionProfile);
+      if (dbState) { memState = migrateState(dbState, sessionProfile === "hyeobi"); saveLocal(memState); notify(); }
+    } catch { /* 로컬 캐시로 계속 진행 */ }
+    startPolling(code);
   }
 
   dbLoading = false;

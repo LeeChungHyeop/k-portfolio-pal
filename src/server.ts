@@ -4,6 +4,11 @@ import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleWebhookRequest } from "./lib/telegram";
 import { fetchKisPrices, fetchNaverHistoryPrices } from "./lib/kaw/kis-server";
+import {
+  handleAuthFamily, handleVerifyPin, handleVerifyMaster, handleVerifySecretQuestion,
+  handleSetPin, handleSetMaster, handleAddProfile, handleRestoreProfile, handleDeleteProfile,
+  handleDataGet, handleDataPost,
+} from "./lib/kaw/data-server";
 
 // Cloudflare Workers environment bindings
 export interface Env {
@@ -11,6 +16,10 @@ export interface Env {
   ANTHROPIC_API_KEY?: string;
   KIS_APP_KEY?: string;
   KIS_APP_SECRET?: string;
+  SUPABASE_URL?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
+  SESSION_SECRET?: string;
+  ACCESS_CODE?: string;
   [key: string]: unknown;
 }
 
@@ -119,6 +128,22 @@ export default {
         return Response.json({ error: String(err) }, { status: 500 });
       }
     }
+
+    // ── 가족/프로필 인증 (Supabase는 서버에서만 접근, 브라우저는 이 API만 사용) ──
+    if (pathname === "/api/auth/family" && request.method === "POST") return handleAuthFamily(request, env);
+    if (pathname === "/api/auth/verify-pin" && request.method === "POST") return handleVerifyPin(request, env);
+    if (pathname === "/api/auth/verify-master" && request.method === "POST") return handleVerifyMaster(request, env);
+    if (pathname === "/api/auth/verify-secret-question" && request.method === "POST") return handleVerifySecretQuestion(request);
+    if (pathname === "/api/auth/set-pin" && request.method === "POST") return handleSetPin(request, env);
+    if (pathname === "/api/auth/set-master" && request.method === "POST") return handleSetMaster(request, env);
+    if (pathname === "/api/auth/add-profile" && request.method === "POST") return handleAddProfile(request, env);
+    if (pathname === "/api/auth/restore-profile" && request.method === "POST") return handleRestoreProfile(request, env);
+    if (pathname === "/api/auth/soft-delete-profile" && request.method === "POST") return handleDeleteProfile(request, env, false);
+    if (pathname === "/api/auth/hard-delete-profile" && request.method === "POST") return handleDeleteProfile(request, env, true);
+
+    // ── 계좌 데이터 (세션 토큰 필요) ──────────────────────────────────────
+    if (pathname === "/api/data" && request.method === "GET") return handleDataGet(request, env);
+    if (pathname === "/api/data" && request.method === "POST") return handleDataPost(request, env);
 
     // ── TanStack Start app (SSR + static) ───────────────────────────────
     try {

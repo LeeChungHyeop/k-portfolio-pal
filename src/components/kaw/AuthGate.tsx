@@ -48,12 +48,14 @@ export function AuthGate() {
 
   async function handleSQVerify(e: React.FormEvent) {
     e.preventDefault();
-    if (!verifySQAnswer(sqIdx, sqAnswer)) {
+    setSqLoading(true);
+    const ok = await verifySQAnswer(sqIdx, sqAnswer);
+    if (!ok) {
+      setSqLoading(false);
       setSqError("정답이 맞지 않습니다. 다시 시도해주세요.");
       setSqAnswer("");
       return;
     }
-    setSqLoading(true);
     try {
       const result = await loginWithCode(ACCESS_CODE);
       setJoined(result);

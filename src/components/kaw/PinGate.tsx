@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { ArrowLeft, RefreshCw, AlertCircle, KeyRound, HelpCircle } from "lucide-react";
 import {
   type ProfileConfig, type FamilyData,
-  verifyPin, updatePin, verifyMasterCode,
+  verifyPin, updatePin, updatePinViaSecretQuestion, verifyMasterCode,
 } from "@/lib/kaw/auth";
 import {
   SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, type SQIndex,
@@ -97,6 +97,10 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
   const [sqIdx, setSqIdx] = useState<SQIndex>(0);
   const [sqAnswer, setSqAnswer] = useState("");
   const [sqError, setSqError] = useState<string | null>(null);
+  const [sqLoading, setSqLoading] = useState(false);
+
+  // reset_pin 단계에 어떤 경로로 도달했는지 (서버 재검증 방식이 달라짐)
+  const [resetVia, setResetVia] = useState<"master" | "secret_question">("master");
 
   useEffect(() => {
     if (step === "forgot_master") masterRef.current?.focus();
@@ -152,7 +156,9 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
     if (next.length === 4) {
       setLoading(true);
       try {
-        const updated = await updatePin(familyCode, profile.id, next, familyData);
+        const updated = resetVia === "secret_question"
+          ? await updatePinViaSecretQuestion(familyCode, profile.id, next, sqIdx, sqAnswer)
+          : await updatePin(familyCode, profile.id, next, familyData);
         onFamilyUpdate(updated); onSuccess(updated);
       } catch { setError("저장 중 오류가 발생했습니다."); setLoading(false); }
     }
@@ -173,6 +179,7 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
     const ok = await verifyMasterCode(masterInput, familyData, familyCode);
     setMasterLoading(false);
     if (!ok) { setMasterError("액세스 코드가 일치하지 않습니다."); return; }
+    setResetVia("master");
     setStep("reset_pin");
     setMasterInput(""); setPinConfirm(""); setError(null);
   }
@@ -183,13 +190,17 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
     setStep("secret_question");
   }
 
-  function handleSQVerify(e: React.FormEvent) {
+  async function handleSQVerify(e: React.FormEvent) {
     e.preventDefault();
-    if (!verifySQAnswer(sqIdx, sqAnswer)) {
+    setSqLoading(true);
+    const ok = await verifySQAnswer(sqIdx, sqAnswer);
+    setSqLoading(false);
+    if (!ok) {
       setSqError("정답이 맞지 않습니다. 다시 시도해주세요.");
       setSqAnswer("");
       return;
     }
+    setResetVia("secret_question");
     setStep("reset_pin");
     setPinConfirm(""); setError(null);
   }
@@ -288,9 +299,9 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />{sqError}
                 </div>
               )}
-              <button type="submit" disabled={!sqAnswer.trim()}
+              <button type="submit" disabled={!sqAnswer.trim() || sqLoading}
                 className="w-full h-11 rounded-xl bg-gradient-to-r from-violet-500 to-blue-500 text-white text-sm font-semibold disabled:opacity-50 transition-all">
-                확인 후 비밀번호 재설정
+                {sqLoading ? "확인 중..." : "확인 후 비밀번호 재설정"}
               </button>
               <button type="button" onClick={() => { setStep(hasPinSet ? "entry" : "setup"); resetState(); }}
                 className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors">

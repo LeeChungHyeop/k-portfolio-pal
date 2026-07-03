@@ -13,13 +13,8 @@ export default defineConfig({
     server: { entry: "server" },
   },
   vite: {
-    // Explicitly bake Supabase env vars into the client bundle.
-    // Cloudflare Pages injects them as process.env at build time.
+    // Supabase는 이제 서버(Cloudflare Worker)에서만 접속하므로 클라이언트에 baking하지 않는다.
     define: {
-      "import.meta.env.VITE_SUPABASE_URL":
-        JSON.stringify(process.env.VITE_SUPABASE_URL ?? ""),
-      "import.meta.env.VITE_SUPABASE_ANON_KEY":
-        JSON.stringify(process.env.VITE_SUPABASE_ANON_KEY ?? ""),
       "import.meta.env.VITE_ACCESS_CODE":
         JSON.stringify(process.env.VITE_ACCESS_CODE ?? "soye"),
     },

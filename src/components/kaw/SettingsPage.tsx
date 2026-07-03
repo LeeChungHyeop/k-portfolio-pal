@@ -28,7 +28,7 @@ import {
 import { toast } from "sonner";
 import {
   type FamilyData, type ProfileConfig,
-  verifyPin, updatePin, verifyMasterCode, updateMasterCode,
+  verifyPin, updatePin, verifyMasterCode, updateMasterCode, updateMasterCodeViaSecretQuestion,
   softDeleteProfile, hardDeleteProfile,
 } from "@/lib/kaw/auth";
 import {
@@ -1426,9 +1426,12 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
     setResetStep("question");
   }
 
-  function handleResetAnswerVerify(e: React.FormEvent) {
+  async function handleResetAnswerVerify(e: React.FormEvent) {
     e.preventDefault();
-    if (!verifySQAnswer(resetQIdx, resetAnswer)) {
+    setResetLoading(true);
+    const ok = await verifySQAnswer(resetQIdx, resetAnswer);
+    setResetLoading(false);
+    if (!ok) {
       setResetAnswerErr("정답이 맞지 않습니다. 다시 시도해주세요.");
       setResetAnswer("");
       return;
@@ -1443,7 +1446,7 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
     if (resetNewCode !== resetNewCodeConfirm) { setResetMsg({ type: "err", text: "새 마스터 코드가 일치하지 않습니다." }); return; }
     setResetLoading(true);
     try {
-      const updated = await updateMasterCode(resetNewCode, familyData, familyCode);
+      const updated = await updateMasterCodeViaSecretQuestion(resetNewCode, familyCode, resetQIdx, resetAnswer);
       onFamilyUpdate(updated);
       setResetMsg({ type: "ok", text: "마스터 코드가 재설정되었습니다." });
       setResetNewCode(""); setResetNewCodeConfirm("");
