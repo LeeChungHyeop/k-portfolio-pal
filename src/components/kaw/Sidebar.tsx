@@ -8,7 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 export type Page = "dashboard" | "compare" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
-export const DEPLOY_DATE = "2026.07.02 17:56";
+export const DEPLOY_DATE = "2026.07.03 09:20";
 
 const NAV = [
   { id: "dashboard"  as Page, label: "대시보드",    icon: LayoutDashboard, color: "text-violet-500" },
@@ -161,6 +161,14 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
           </div>
           <span className="text-sm font-semibold flex-1 truncate">{profileLabel}</span>
           {dbLoading && <RefreshCw className="w-3 h-3 animate-spin text-violet-500 shrink-0" />}
+          <button
+            onClick={() => { logoutCode(); onMobileClose?.(); }}
+            className="p-1.5 rounded-lg hover:bg-rose-500/10 text-muted-foreground hover:text-rose-500 transition-colors shrink-0"
+            title="로그아웃"
+            aria-label="로그아웃"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+          </button>
         </div>
         <button
           onClick={() => { deactivateProfile(); onMobileClose?.(); }}
