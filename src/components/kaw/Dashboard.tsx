@@ -670,19 +670,30 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
           {accountSummaries.map((a) => {
             const history = state.accounts[a.id].history;
             if (history.length < 2) return null;
-            const last3 = history.slice(-3);
-            // 실시간 수익률 계산
             const sorted = [...history].sort((x, y) => x.date.localeCompare(y.date));
             const last = sorted[sorted.length - 1];
+            // 모바일에서는 최근 3개 + 실시간만 예쁘게 보이고, 화면이 넓어질수록(PC) 한 줄에 들어가는 만큼 더 과거 기록까지 노출
+            const recent = sorted.slice(-16);
             const liveRet = a.hasLive && last?.totalValue
               ? (a.liveTotal - last.totalValue) / last.totalValue * 100
               : null;
+            const visibilityClass = (rankFromEnd: number) => {
+              if (rankFromEnd < 3) return "";
+              if (rankFromEnd < 5) return "hidden sm:inline";
+              if (rankFromEnd < 7) return "hidden md:inline";
+              if (rankFromEnd < 10) return "hidden lg:inline";
+              if (rankFromEnd < 13) return "hidden xl:inline";
+              return "hidden 2xl:inline";
+            };
             return (
               <div key={a.id}>
                 <p className="text-sm font-medium mb-1">{a.label}</p>
                 <div className="flex gap-2 flex-wrap">
-                  {last3.map((h) => h.returnPct !== null && (
-                    <span key={h.id} className="text-xs px-2 py-0.5 rounded-full bg-muted tabular-nums">
+                  {recent.map((h, i) => h.returnPct !== null && (
+                    <span
+                      key={h.id}
+                      className={`text-xs px-2 py-0.5 rounded-full bg-muted tabular-nums ${visibilityClass(recent.length - 1 - i)}`}
+                    >
                       {h.date}: <span className={h.returnPct >= 0 ? "text-emerald-600" : "text-rose-600"}>{formatPct(h.returnPct)}</span>
                     </span>
                   ))}

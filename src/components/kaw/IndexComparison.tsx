@@ -43,7 +43,8 @@ function AssetTooltip({ active, payload }: any) {
             <span className="text-xs">{p.name}</span>
           </span>
           <span className="tabular-nums text-xs font-medium">
-            {Number(p.value).toLocaleString()}원
+            {/* 성장형(케이올웨더) 예상치는 유닛 단가 계산 과정에서 소수점이 붙으므로 정수로 반올림해 표기 */}
+            {(p.dataKey === "성장형자산" ? Math.round(Number(p.value)) : Number(p.value)).toLocaleString()}원
           </span>
         </div>
       ))}
