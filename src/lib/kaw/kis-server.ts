@@ -9,13 +9,38 @@ export interface TickerResult {
 
 interface KisToken { access_token: string; expires_at: number; }
 
+interface KVLike {
+  get(key: string): Promise<string | null>;
+  put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void>;
+}
+
+const KIS_TOKEN_KV_KEY = "kis:token";
+
+// Worker 격리(isolate) 내 메모리 캐시. 같은 요청이 같은 warm 인스턴스에 다시 걸릴 때 KV 왕복을 줄여줌.
 let _token: KisToken | null = null;
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function getToken(appKey: string, appSecret: string): Promise<string> {
+// KIS는 앱키당 토큰 발급 요청 자체를 분당 1회 정도로 엄격히 제한한다.
+// Cloudflare Workers는 요청마다 다른(콜드) isolate에 배정될 수 있어, 메모리 캐시(_token)만 믿으면
+// isolate마다 각자 새 토큰을 발급받으려다 이 제한에 걸려 "새로고침해도 전부 실패"하는 경우가 생긴다.
+// KV에 토큰을 공유 저장해서 isolate가 바뀌어도 같은 토큰을 재사용하도록 한다.
+async function getToken(appKey: string, appSecret: string, kv?: KVLike): Promise<string> {
   const now = Date.now();
   if (_token && _token.expires_at > now + 60_000) return _token.access_token;
+
+  if (kv) {
+    const cached = await kv.get(KIS_TOKEN_KV_KEY).catch(() => null);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached) as KisToken;
+        if (parsed.expires_at > now + 60_000) {
+          _token = parsed;
+          return parsed.access_token;
+        }
+      } catch { /* 손상된 캐시는 무시하고 새로 발급 */ }
+    }
+  }
 
   const res = await fetch("https://openapi.koreainvestment.com:9443/oauth2/tokenP", {
     method: "POST",
@@ -29,10 +54,15 @@ async function getToken(appKey: string, appSecret: string): Promise<string> {
   }
 
   const json = await res.json() as { access_token: string; expires_in: number };
+  const expiresInSec = json.expires_in ?? 86400;
   _token = {
     access_token: json.access_token,
-    expires_at: now + (json.expires_in ?? 86400) * 1000,
+    expires_at: now + expiresInSec * 1000,
   };
+  if (kv) {
+    // 만료 60초 전에 미리 갱신되도록 TTL을 살짝 짧게 잡는다
+    await kv.put(KIS_TOKEN_KV_KEY, JSON.stringify(_token), { expirationTtl: Math.max(60, expiresInSec - 60) }).catch(() => {});
+  }
   return _token.access_token;
 }
 
@@ -211,8 +241,9 @@ export async function fetchKisPrices(
   tickers: string[],
   appKey: string,
   appSecret: string,
+  kv?: KVLike,
 ): Promise<{ results: Record<string, TickerResult>; timestamp: string }> {
-  const token = await getToken(appKey, appSecret);
+  const token = await getToken(appKey, appSecret, kv);
   const results: Record<string, TickerResult> = {};
   const timestamp = new Date().toISOString();
 

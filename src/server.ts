@@ -21,6 +21,11 @@ export interface Env {
   SESSION_SECRET?: string;
   ACCESS_CODE?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
+  RATE_LIMIT?: {
+    get(key: string): Promise<string | null>;
+    put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void>;
+    delete(key: string): Promise<void>;
+  };
   [key: string]: unknown;
 }
 
@@ -121,7 +126,7 @@ export default {
         const body = await request.json() as { tickers?: unknown };
         const tickers = Array.isArray(body?.tickers) ? (body.tickers as string[]).filter(t => typeof t === "string" && /^[A-Z0-9]{6}$/i.test(t)).slice(0, 20) : [];
         if (!tickers.length) return Response.json({ results: {}, timestamp: new Date().toISOString() });
-        const { results, timestamp } = await fetchKisPrices(tickers, env.KIS_APP_KEY, env.KIS_APP_SECRET);
+        const { results, timestamp } = await fetchKisPrices(tickers, env.KIS_APP_KEY, env.KIS_APP_SECRET, env.RATE_LIMIT);
         return Response.json({ results, timestamp }, { headers: { "Cache-Control": "no-store" } });
       } catch (err) {
         console.error("KIS price error:", err);
