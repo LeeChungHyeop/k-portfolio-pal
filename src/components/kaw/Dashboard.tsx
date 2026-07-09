@@ -461,12 +461,16 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
                               <span className="tabular-nums font-medium">{formatKRW(p.value)}원</span>
                             </div>
                           ))}
-                          {payload.length === 2 && (payload[1].value as number) > (payload[0].value as number) && (
-                            <div className="border-t pt-1 mt-1 text-emerald-500 font-semibold flex justify-between">
-                              <span>수익</span>
-                              <span className="tabular-nums">+{formatKRW((payload[1].value as number) - (payload[0].value as number))}원</span>
-                            </div>
-                          )}
+                          {payload.length === 2 && (() => {
+                            const diff = (payload[1].value as number) - (payload[0].value as number);
+                            const isGain = diff >= 0;
+                            return (
+                              <div className={`border-t pt-1 mt-1 font-semibold flex justify-between ${isGain ? "text-emerald-500" : "text-rose-500"}`}>
+                                <span>{isGain ? "수익" : "손실"}</span>
+                                <span className="tabular-nums">{isGain ? "+" : "-"}{formatKRW(Math.abs(diff))}원</span>
+                              </div>
+                            );
+                          })()}
                         </div>
                       );
                     }}
