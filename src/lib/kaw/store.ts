@@ -347,6 +347,9 @@ const POLL_INTERVAL_MS = 20_000;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 // 폴링으로 받아온 데이터를 memState에 반영하는 동안 dbSave가 그 반영 자체를 다시 저장하지 않도록 막는 플래그
 let isApplyingRemote = false;
+// 로컬 변경이 아직 서버에 저장되지 않은 동안, 폴링/가시성 복귀로 받아온 (그 변경 이전) 서버 데이터가
+// memState를 덮어써서 방금 입력한 내용을 날려버리는 것을 막는 플래그 (예: 보유수량 입력 직후 폴링과 겹치는 경우)
+let pendingLocalSave = false;
 
 function notify() { listeners.forEach((l) => l()); }
 
@@ -468,9 +471,17 @@ async function dbSave(code: string, user: string, state: StoreState) {
 
 function scheduleSave() {
   if (!familyCode || !currentUser) return;
+  pendingLocalSave = true;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    if (familyCode && memState && currentUser) dbSave(familyCode, currentUser, memState).catch(console.error);
+    saveTimer = null;
+    if (familyCode && memState && currentUser) {
+      dbSave(familyCode, currentUser, memState)
+        .catch(console.error)
+        .finally(() => { pendingLocalSave = false; });
+    } else {
+      pendingLocalSave = false;
+    }
   }, 800);
 }
 
@@ -481,9 +492,11 @@ function startPolling(code: string) {
   pollTimer = setInterval(async () => {
     if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
     if (!familyCode || !currentUser || familyCode !== code) return;
+    if (pendingLocalSave) return; // 아직 서버에 안 올라간 로컬 변경이 있으면 이번 폴링 결과로 덮어쓰지 않음
     try {
       const state = await dbLoad(code, currentUser);
       if (!state) return;
+      if (pendingLocalSave) return; // 조회하는 동안 새로 로컬 변경이 생겼으면 이 (더 오래된) 결과는 버림
       isApplyingRemote = true;
       memState = migrateState(state, currentUser === "hyeobi");
       saveLocal(memState);
@@ -621,9 +634,10 @@ function setupVisibilityRefresh() {
     if (document.visibilityState !== "visible" || !familyCode || !currentUser) return;
     // 백그라운드에 있는 동안 폴링이 멈춰있었을 수 있으므로 재시작
     startPolling(familyCode);
-    // 최신 데이터 강제 로드
+    // 최신 데이터 강제 로드 (단, 아직 서버에 안 올라간 로컬 변경은 덮어쓰지 않음)
+    if (pendingLocalSave) return;
     dbLoad(familyCode, currentUser).then((state) => {
-      if (!state) return;
+      if (!state || pendingLocalSave) return;
       memState = migrateState(state);
       saveLocal(memState);
       notify();
