@@ -8,7 +8,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 export type Page = "dashboard" | "compare" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
-export const DEPLOY_DATE = "2026.07.13 13:49";
+// 빌드 시점에 vite.config.ts가 baking한 실제 커밋 해시/일시 (import.meta.env.VITE_* — build 시점 값이라 항상 정확함)
+const BUILD_TIME = (import.meta.env.VITE_BUILD_TIME as string | undefined) ?? "";
+const COMMIT_HASH = (import.meta.env.VITE_COMMIT_HASH as string | undefined) ?? "";
+export const DEPLOY_DATE = [BUILD_TIME, COMMIT_HASH].filter(Boolean).join(" · ");
 
 const NAV = [
   { id: "dashboard"  as Page, label: "대시보드",    icon: LayoutDashboard, color: "text-violet-500" },
