@@ -9,12 +9,36 @@ export interface BacktestGrowth {
   totalValue: number;
   returnPct: number | null;
   units: Partial<Record<AssetKey, number>>; // 다음 시점 드리프트 계산을 위한 보유 유닛 스냅샷
-  kospi200Pct: number | null; // 계좌 시작일 대비 코스피200(KIWOOM 200TR) 등락률
-  sp500Pct: number | null; // 계좌 시작일 대비 S&P500(TIGER 미국S&P500, KRW 환산) 등락률
+  kospi200Pct: number | null; // 실제와 같은 시점·같은 금액을 코스피200(KIWOOM 200TR)에 매번 넣었다면의 누적수익률
+  sp500Pct: number | null; // 실제와 같은 시점·같은 금액을 S&P500(TIGER 미국S&P500, KRW 환산)에 매번 넣었다면의 누적수익률
+  kospiUnits: number; // 다음 시점 드리프트 및 실시간 "현재" 포인트 계산용 보유 유닛 스냅샷
+  sp500Units: number;
 }
 
 interface DatedBacktestPoint extends BacktestGrowth {
   date: string;
+}
+
+// 단일 자산에 실제와 동일한 입금 스케줄(baseAmount/deposit)을 그대로 매번 몰아넣었다면을 시뮬레이션.
+// 코스피200/S&P500 비교선에 쓰는데, "계좌 시작일에 한 번에 사서 보유"가 아니라 "낼 때마다 그 지수를 샀다면"으로
+// 계산해야 실제/성장형 라인과 같은 기준(납입 타이밍 반영)으로 비교가 가능하다.
+function computeSingleAssetBacktest(
+  sorted: HistoryEntry[],
+  pricesByDate: Record<string, Partial<Record<AssetKey, number>>>,
+  assetKey: AssetKey,
+): { pct: number | null; units: number }[] {
+  let units = 0;
+  let cumDeposit = 0;
+  return sorted.map((h, i) => {
+    const price = pricesByDate[h.date]?.[assetKey] ?? 0;
+    const driftedValue = units * price;
+    const depositAmt = i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
+    cumDeposit += depositAmt;
+    const totalValue = driftedValue + depositAmt;
+    units = price > 0 ? totalValue / price : units;
+    const pct = cumDeposit > 0 ? Math.round(((totalValue - cumDeposit) / cumDeposit) * 10000) / 100 : null;
+    return { pct, units };
+  });
 }
 
 // 계좌의 실제 입금 흐름(baseAmount/deposit)은 그대로 두고, 매 리밸런싱 시점마다
@@ -28,12 +52,8 @@ export function computeGrowthBacktest(
   const units: Partial<Record<AssetKey, number>> = {};
   let cumDeposit = 0;
 
-  // 지수 등락률 기준선: 계좌 시작일의 코스피200/S&P500 프록시 가격
-  const basePrices = sorted.length ? (pricesByDate[sorted[0].date] ?? {}) : {};
-  const baseKospi = basePrices.kr;
-  const baseSp500 = basePrices.us;
-  const pctSince = (base: number | undefined, cur: number | undefined) =>
-    base && base > 0 && cur && cur > 0 ? Math.round(((cur - base) / base) * 10000) / 100 : null;
+  const kospiPoints = computeSingleAssetBacktest(sorted, pricesByDate, "kr");
+  const sp500Points = computeSingleAssetBacktest(sorted, pricesByDate, "us");
 
   return sorted.map((h, i) => {
     const prices = pricesByDate[h.date] ?? {};
@@ -63,8 +83,10 @@ export function computeGrowthBacktest(
       totalValue,
       returnPct,
       units: { ...units },
-      kospi200Pct: pctSince(baseKospi, prices.kr),
-      sp500Pct: pctSince(baseSp500, prices.us),
+      kospi200Pct: kospiPoints[i].pct,
+      sp500Pct: sp500Points[i].pct,
+      kospiUnits: kospiPoints[i].units,
+      sp500Units: sp500Points[i].units,
     };
   });
 }
@@ -86,17 +108,6 @@ function savePriceCache(cache: Record<string, Record<string, number>>) {
   } catch {
     /* 저장 실패는 무시 */
   }
-}
-
-// 계좌 시작일의 코스피200/S&P500 프록시 기준가를 캐시에서 조회 (이미 syncGrowthBacktest가 채워둔 캐시를 재사용, 추가 네트워크 요청 없음)
-export function getCachedIndexBasePrices(startDate: string): { kr?: number; us?: number } {
-  const byTicker = loadPriceCache()[startDate] ?? {};
-  const krTicker = BUILTIN_TICKERS.kr;
-  const usTicker = BUILTIN_TICKERS.us;
-  return {
-    kr: krTicker ? byTicker[krTicker] : undefined,
-    us: usTicker ? byTicker[usTicker] : undefined,
-  };
 }
 
 const GROWTH_TICKERS = ASSET_ORDER.map((k) => BUILTIN_TICKERS[k]).filter((t): t is string => !!t);
@@ -156,8 +167,8 @@ export async function syncGrowthBacktest(
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const result: Record<string, BacktestGrowth> = {};
   sorted.forEach((h, i) => {
-    const { totalValue, returnPct, units, kospi200Pct, sp500Pct } = points[i];
-    result[h.id] = { totalValue, returnPct, units, kospi200Pct, sp500Pct };
+    const { totalValue, returnPct, units, kospi200Pct, sp500Pct, kospiUnits, sp500Units } = points[i];
+    result[h.id] = { totalValue, returnPct, units, kospi200Pct, sp500Pct, kospiUnits, sp500Units };
   });
   return result;
 }
@@ -172,10 +183,11 @@ export function useEnsureGrowthBacktest(
   const [error, setError] = useState(false);
 
   // backtestGrowth가 아예 없거나, 코스피200/S&P500 필드 추가 이전 버전(구 스키마)으로 저장된 경우 재계산 대상
+  // kospiUnits 없음 = 코스피/S&P500을 "계좌 시작일 지수등락률"로 계산하던 구버전 → 납입 타이밍 반영한 새 방식으로 재계산
   const missingKey = useMemo(
     () =>
       history
-        .filter((h) => !h.backtestGrowth || h.backtestGrowth.kospi200Pct === undefined)
+        .filter((h) => !h.backtestGrowth || h.backtestGrowth.kospi200Pct === undefined || h.backtestGrowth.kospiUnits === undefined)
         .map((h) => h.id)
         .join(","),
     [history],

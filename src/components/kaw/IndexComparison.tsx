@@ -18,7 +18,7 @@ import {
   ReferenceLine,
 } from "recharts";
 import { RefreshCw } from "lucide-react";
-import { useEnsureGrowthBacktest, getCachedIndexBasePrices } from "@/lib/kaw/backtest";
+import { useEnsureGrowthBacktest } from "@/lib/kaw/backtest";
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
@@ -209,11 +209,8 @@ function buildComparePoints(history: HistoryEntry[]): ComparePoint[] {
     });
 }
 
-const pctSince = (base: number | undefined, cur: number | undefined) =>
-  base && base > 0 && cur && cur > 0 ? Math.round(((cur - base) / base) * 10000) / 100 : null;
-
 // 실시간 주가로 "현재" 시점 비교 포인트를 만든다.
-// 실제(커스텀)는 보유수량 × 실시간가, 성장형은 마지막 리밸런싱 시점 보유 유닛 × 실시간가로 평가한다.
+// 실제(커스텀)는 보유수량 × 실시간가, 성장형·코스피200·S&P500은 각각 마지막 리밸런싱 시점 보유 유닛 × 실시간가로 평가한다.
 function buildLivePoint(
   history: HistoryEntry[],
   profileRows: ProfileRowDef[],
@@ -243,26 +240,29 @@ function buildLivePoint(
     return sum + (units[key] ?? 0) * price;
   }, 0);
 
+  const krTicker = BUILTIN_TICKERS.kr;
+  const usTicker = BUILTIN_TICKERS.us;
+  const 코스피자산 = (last.backtestGrowth.kospiUnits ?? 0) * (krTicker ? (livePrices[krTicker] ?? 0) : 0);
+  const 에스피자산 = (last.backtestGrowth.sp500Units ?? 0) * (usTicker ? (livePrices[usTicker] ?? 0) : 0);
+
   if (실제자산 <= 0 || 성장형자산 <= 0) return null;
 
   let cumDeposit = 0;
   sorted.forEach((h, i) => {
     cumDeposit += i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
   });
-
-  const base = getCachedIndexBasePrices(sorted[0].date);
-  const krTicker = BUILTIN_TICKERS.kr;
-  const usTicker = BUILTIN_TICKERS.us;
+  const pctVs = (value: number) =>
+    cumDeposit > 0 && value > 0 ? Math.round(((value - cumDeposit) / cumDeposit) * 10000) / 100 : null;
 
   return {
     label: "현재",
     date: "현재",
     실제자산,
     성장형자산,
-    실제수익률: cumDeposit > 0 ? Math.round(((실제자산 - cumDeposit) / cumDeposit) * 10000) / 100 : null,
-    성장형수익률: cumDeposit > 0 ? Math.round(((성장형자산 - cumDeposit) / cumDeposit) * 10000) / 100 : null,
-    코스피200: pctSince(base.kr, krTicker ? livePrices[krTicker] : undefined),
-    "S&P500": pctSince(base.us, usTicker ? livePrices[usTicker] : undefined),
+    실제수익률: pctVs(실제자산),
+    성장형수익률: pctVs(성장형자산),
+    코스피200: pctVs(코스피자산),
+    "S&P500": pctVs(에스피자산),
   };
 }
 
