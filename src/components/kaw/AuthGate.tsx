@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   Wallet, Lock, RefreshCw, Wifi, HardDrive, AlertCircle,
-  ArrowRight, CheckCircle2, Lightbulb, HelpCircle, ArrowLeft,
+  ArrowRight, CheckCircle2, HelpCircle, ArrowLeft,
 } from "lucide-react";
 import { loginWithCode, ACCESS_CODE } from "@/lib/kaw/store";
 import {
@@ -150,14 +150,6 @@ export function AuthGate() {
                   <p className="font-semibold text-sm">액세스 코드로 시작</p>
                   <p className="text-xs text-muted-foreground">코드를 입력하면 프로필 선택으로 이동합니다</p>
                 </div>
-              </div>
-
-              {/* Hint */}
-              <div className="flex items-center gap-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3.5 py-2.5">
-                <Lightbulb className="w-4 h-4 text-amber-500 shrink-0" />
-                <p className="text-xs text-amber-700 dark:text-amber-400 font-medium">
-                  힌트: 첫째딸 이름만 영어로
-                </p>
               </div>
 
               <form onSubmit={handleSubmit} className="space-y-3">
