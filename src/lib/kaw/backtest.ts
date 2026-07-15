@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { ASSET_ORDER, PROFILE_PRESETS, type AssetKey } from "./constants";
 import { BUILTIN_TICKERS, type HistoryEntry } from "./store";
 
+// 계산 로직이 바뀔 때마다 올려서, 이전 버전 로직으로 저장된 backtestGrowth를 자동으로 재계산 대상으로 표시한다.
+// v2: 가격 데이터가 없는 자산(상장 전 등)의 비중이 재배분 없이 그냥 증발하던 버그 수정
+export const BACKTEST_SCHEMA_VERSION = 2;
+
 // 계좌 히스토리 한 시점에 저장해 두는 "성장형으로 쭉 운용했다면"의 스냅샷.
 // 리밸런싱 시점마다 한 번만 계산해서 HistoryEntry에 영구 저장해 두고,
 // 이후에는 새로 생긴 날짜만 계산하면 되도록 한다 (매번 전체 재계산 방지).
@@ -13,6 +17,7 @@ export interface BacktestGrowth {
   sp500Pct: number | null; // 실제와 같은 시점·같은 금액을 S&P500(TIGER 미국S&P500, KRW 환산)에 매번 넣었다면의 누적수익률
   kospiUnits: number; // 다음 시점 드리프트 및 실시간 "현재" 포인트 계산용 보유 유닛 스냅샷
   sp500Units: number;
+  schemaVersion: number;
 }
 
 interface DatedBacktestPoint extends BacktestGrowth {
@@ -29,13 +34,15 @@ function computeSingleAssetBacktest(
 ): { pct: number | null; units: number }[] {
   let units = 0;
   let cumDeposit = 0;
+  let lastValue = 0; // 가격 데이터가 일시적으로 없을 때 직전 평가액을 유지하기 위한 폴백 (0으로 리셋되지 않도록)
   return sorted.map((h, i) => {
     const price = pricesByDate[h.date]?.[assetKey] ?? 0;
-    const driftedValue = units * price;
     const depositAmt = i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
     cumDeposit += depositAmt;
+    const driftedValue = price > 0 ? units * price : lastValue;
     const totalValue = driftedValue + depositAmt;
     units = price > 0 ? totalValue / price : units;
+    lastValue = totalValue;
     const pct = cumDeposit > 0 ? Math.round(((totalValue - cumDeposit) / cumDeposit) * 10000) / 100 : null;
     return { pct, units };
   });
@@ -50,6 +57,8 @@ export function computeGrowthBacktest(
   const weights = PROFILE_PRESETS.growth;
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const units: Partial<Record<AssetKey, number>> = {};
+  // 특정 날짜에 시세 조회가 안 될 때(신규 상장 전 등) 드리프트 평가에 쓸 직전 알려진 가격
+  const lastKnownPrice: Partial<Record<AssetKey, number>> = {};
   let cumDeposit = 0;
 
   const kospiPoints = computeSingleAssetBacktest(sorted, pricesByDate, "kr");
@@ -58,21 +67,30 @@ export function computeGrowthBacktest(
   return sorted.map((h, i) => {
     const prices = pricesByDate[h.date] ?? {};
 
-    // 이전 시점 보유 유닛을 오늘 가격으로 평가 (다음 리밸런싱 전까지의 드리프트 반영)
-    const driftedValue = ASSET_ORDER.reduce(
-      (sum, key) => sum + (units[key] ?? 0) * (prices[key] ?? 0),
-      0,
-    );
+    // 이전 시점 보유 유닛을 오늘 가격(없으면 직전 알려진 가격)으로 평가 — 상장 전이라 가격이 없다고
+    // 이미 보유 중인 자산의 가치를 0으로 취급하면 안 되므로 폴백을 둔다.
+    const driftedValue = ASSET_ORDER.reduce((sum, key) => {
+      const heldUnits = units[key] ?? 0;
+      if (heldUnits <= 0) return sum;
+      const p = (prices[key] ?? 0) > 0 ? prices[key]! : (lastKnownPrice[key] ?? 0);
+      return sum + heldUnits * p;
+    }, 0);
 
     const depositAmt = i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
     cumDeposit += depositAmt;
     const totalValue = driftedValue + depositAmt;
 
-    // 성장형 비중으로 전량 재배분
+    // 성장형 비중으로 재배분 — 이번 시점에 가격이 없는 자산(상장 전 등)은 매수하지 못하므로,
+    // 그 비중만큼 돈이 증발하지 않도록 가격이 있는 나머지 자산끼리 비중을 비례 재분배한다.
+    const availableKeys = ASSET_ORDER.filter((key) => (prices[key] ?? 0) > 0);
+    const availableWeightSum = availableKeys.reduce((sum, key) => sum + (weights[key] ?? 0), 0);
     ASSET_ORDER.forEach((key) => {
       const p = prices[key] ?? 0;
-      const targetValue = (totalValue * (weights[key] ?? 0)) / 100;
-      units[key] = p > 0 ? targetValue / p : (units[key] ?? 0);
+      if (p <= 0) return; // 가격 없음 — 이 시점엔 매수 안 함 (기존 보유량 그대로 유지)
+      lastKnownPrice[key] = p;
+      const adjustedWeight = availableWeightSum > 0 ? ((weights[key] ?? 0) / availableWeightSum) * 100 : 0;
+      const targetValue = (totalValue * adjustedWeight) / 100;
+      units[key] = targetValue / p;
     });
 
     const returnPct =
@@ -87,6 +105,7 @@ export function computeGrowthBacktest(
       sp500Pct: sp500Points[i].pct,
       kospiUnits: kospiPoints[i].units,
       sp500Units: sp500Points[i].units,
+      schemaVersion: BACKTEST_SCHEMA_VERSION,
     };
   });
 }
@@ -167,8 +186,8 @@ export async function syncGrowthBacktest(
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const result: Record<string, BacktestGrowth> = {};
   sorted.forEach((h, i) => {
-    const { totalValue, returnPct, units, kospi200Pct, sp500Pct, kospiUnits, sp500Units } = points[i];
-    result[h.id] = { totalValue, returnPct, units, kospi200Pct, sp500Pct, kospiUnits, sp500Units };
+    const { totalValue, returnPct, units, kospi200Pct, sp500Pct, kospiUnits, sp500Units, schemaVersion } = points[i];
+    result[h.id] = { totalValue, returnPct, units, kospi200Pct, sp500Pct, kospiUnits, sp500Units, schemaVersion };
   });
   return result;
 }
@@ -182,12 +201,11 @@ export function useEnsureGrowthBacktest(
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(false);
 
-  // backtestGrowth가 아예 없거나, 코스피200/S&P500 필드 추가 이전 버전(구 스키마)으로 저장된 경우 재계산 대상
-  // kospiUnits 없음 = 코스피/S&P500을 "계좌 시작일 지수등락률"로 계산하던 구버전 → 납입 타이밍 반영한 새 방식으로 재계산
+  // backtestGrowth가 아예 없거나, 현재 계산 로직 버전(BACKTEST_SCHEMA_VERSION)보다 낮은 버전으로 저장된 경우 재계산 대상
   const missingKey = useMemo(
     () =>
       history
-        .filter((h) => !h.backtestGrowth || h.backtestGrowth.kospi200Pct === undefined || h.backtestGrowth.kospiUnits === undefined)
+        .filter((h) => !h.backtestGrowth || h.backtestGrowth.schemaVersion !== BACKTEST_SCHEMA_VERSION)
         .map((h) => h.id)
         .join(","),
     [history],
