@@ -11,7 +11,6 @@ import {
 } from "recharts";
 import { TrendingUp, TrendingDown, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, ChevronRight, Wifi, WifiOff, RefreshCw } from "lucide-react";
 import type { Page } from "@/components/kaw/Sidebar";
-import type { ProfileRowDef } from "@/lib/kaw/store";
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
@@ -109,21 +108,24 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
   const { prices: livePrices, configured, isLoading: priceLoading, successCount, totalCount } = useKisPriceContext();
   const isLiveActive = liveMode && configured && Object.keys(livePrices).length > 0;
 
-  // 계좌별 실시간 총액 (보유수량 × 실시간주가)
+  // 계좌별 실시간 총액 — "마지막으로 저장된 리밸런싱 기록(실제 확정된 보유내역)" × 실시간주가.
+  // profileRows/liveQuantities(다음 리밸런싱을 위해 자유롭게 편집 중인 계획)를 직접 쓰지 않는 이유:
+  // 다음 리밸런싱 준비 중 투자성향에서 종목 행을 지우고 저장하면, 실제로는 아직 안 팔았는데도
+  // 대시보드 잔액이 즉시 줄어드는 문제가 있었음 — 실제 리밸런싱을 저장해 새 기록이 생기기 전까진
+  // 마지막 확정 기록 그대로 유지되도록 함.
   const accountLiveTotals = useMemo<Record<string, number>>(() => {
     if (!isLiveActive) return {};
     const result: Record<string, number> = {};
     for (const id of ACCOUNT_IDS) {
       const account = state.accounts[id];
-      const profile = account.profile ?? "growth";
-      const profileRows: ProfileRowDef[] = account.profileRows?.[profile] ?? [];
-      if (!profileRows.length) { result[id] = 0; continue; }
-      const total = profileRows.reduce((sum, row) => {
-        const def = library.find((d) => d.id === row.assetId);
-        const etfName = (row as any).etfName ?? def?.defaultEtf ?? row.assetId;
-        const tickerByEtf = library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker;
-        const ticker = tickerByEtf ?? def?.ticker ?? "";
-        const qty = account.liveQuantities?.[row.id] ?? 0;
+      const sorted = [...account.history].sort((a, b) => a.date.localeCompare(b.date));
+      const last = sorted[sorted.length - 1];
+      const qtySnap = last?.rowQuantitiesSnap;
+      const etfSnap = last?.rowEtfSnap;
+      if (!qtySnap || !etfSnap) { result[id] = 0; continue; }
+      const total = Object.entries(qtySnap).reduce((sum, [rowId, qty]) => {
+        const etfName = etfSnap[rowId];
+        const ticker = etfName ? (library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker ?? "") : "";
         const price = ticker ? (livePrices[ticker] ?? 0) : 0;
         return sum + qty * price;
       }, 0);

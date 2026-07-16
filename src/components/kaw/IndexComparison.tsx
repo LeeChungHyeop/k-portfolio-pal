@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { ACCOUNT_IDS, ACCOUNT_LABELS_SHORT, ASSET_ORDER, type AccountId } from "@/lib/kaw/constants";
-import { usePortfolioStore, getOrDefaultLibrary, BUILTIN_TICKERS, type HistoryEntry, type ProfileRowDef } from "@/lib/kaw/store";
+import { usePortfolioStore, getOrDefaultLibrary, BUILTIN_TICKERS, type HistoryEntry } from "@/lib/kaw/store";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -210,11 +210,11 @@ function buildComparePoints(history: HistoryEntry[]): ComparePoint[] {
 }
 
 // 실시간 주가로 "현재" 시점 비교 포인트를 만든다.
-// 실제(커스텀)는 보유수량 × 실시간가, 성장형·코스피200·S&P500은 각각 마지막 리밸런싱 시점 보유 유닛 × 실시간가로 평가한다.
+// 실제(커스텀)는 "마지막으로 저장된 리밸런싱 기록(실제 확정된 보유내역)" × 실시간가로 평가한다 — profileRows/liveQuantities(다음
+// 리밸런싱을 위해 자유롭게 편집 중인 계획)를 쓰면, 다음 리밸런싱 준비 중 종목을 지우기만 해도 아직 안 판 것까지 사라져 보이는 문제가 있었음.
+// 성장형·코스피200·S&P500은 각각 마지막 리밸런싱 시점 보유 유닛 × 실시간가로 평가한다.
 function buildLivePoint(
   history: HistoryEntry[],
-  profileRows: ProfileRowDef[],
-  liveQuantities: Record<string, number> | undefined,
   library: ReturnType<typeof getOrDefaultLibrary>,
   livePrices: Record<string, number>,
 ): ComparePoint | null {
@@ -223,15 +223,16 @@ function buildLivePoint(
   const last = sorted[sorted.length - 1];
   if (!last.backtestGrowth) return null;
 
-  const 실제자산 = profileRows.reduce((sum, row) => {
-    const def = library.find((d) => d.id === row.assetId);
-    const etfName = row.etfName ?? def?.defaultEtf ?? row.assetId;
-    const tickerByEtf = library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker;
-    const ticker = tickerByEtf ?? def?.ticker ?? "";
-    const qty = liveQuantities?.[row.id] ?? 0;
-    const price = ticker ? (livePrices[ticker] ?? 0) : 0;
-    return sum + qty * price;
-  }, 0);
+  const qtySnap = last.rowQuantitiesSnap;
+  const etfSnap = last.rowEtfSnap;
+  const 실제자산 = qtySnap && etfSnap
+    ? Object.entries(qtySnap).reduce((sum, [rowId, qty]) => {
+        const etfName = etfSnap[rowId];
+        const ticker = etfName ? (library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker ?? "") : "";
+        const price = ticker ? (livePrices[ticker] ?? 0) : 0;
+        return sum + qty * price;
+      }, 0)
+    : 0;
 
   const units = last.backtestGrowth.units;
   const 성장형자산 = ASSET_ORDER.reduce((sum, key) => {
@@ -298,13 +299,7 @@ export function IndexComparison() {
       const account = state.accounts[id];
       const points = buildComparePoints(account.history);
       const livePoint = configured
-        ? buildLivePoint(
-            account.history,
-            account.profileRows?.[account.profile ?? "growth"] ?? [],
-            account.liveQuantities,
-            library,
-            livePrices,
-          )
+        ? buildLivePoint(account.history, library, livePrices)
         : null;
       out[id] = livePoint ? [...points, livePoint] : points;
     });
