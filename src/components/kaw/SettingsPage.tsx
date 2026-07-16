@@ -711,6 +711,22 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
     }));
   }
 
+  // ── Move row up/down — 이 순서가 그대로 리밸런싱 메뉴의 표시 순서로 저장됨 ──
+  function handleMoveRow(id: string, direction: -1 | 1) {
+    const p = currentProfile;
+    setDraft((d) => {
+      const rows = [...d.profileData[p].rows];
+      const idx = rows.findIndex((r) => r.id === id);
+      const targetIdx = idx + direction;
+      if (idx < 0 || targetIdx < 0 || targetIdx >= rows.length) return d;
+      [rows[idx], rows[targetIdx]] = [rows[targetIdx], rows[idx]];
+      return {
+        ...d,
+        profileData: { ...d.profileData, [p]: { ...d.profileData[p], rows } },
+      };
+    });
+  }
+
   // ── Count for asset ID in current profile ───────────────────────────────
   function countForAsset(assetId: string): number {
     return currentPD.rows.filter((r) => r.assetId === assetId).length;
@@ -940,11 +956,11 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                     <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground w-36">자산</th>
                     <th className="hidden sm:table-cell text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">ETF 종목명</th>
                     <th className="text-right px-4 py-2.5 text-xs font-semibold text-muted-foreground w-24">비중 (%)</th>
-                    <th className="w-10 px-2" />
+                    <th className="w-20 px-2" />
                   </tr>
                 </thead>
                 <tbody className="divide-y">
-                  {currentPD.rows.map((row) => {
+                  {currentPD.rows.map((row, idx) => {
                     const def = library.find((d) => d.id === row.assetId);
                     const group = def?.group ?? "";
                     const label = def?.label ?? row.assetId;
@@ -1029,17 +1045,37 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                             step="0.5"
                             value={currentAlloc[row.id] ?? 0}
                             onChange={(e) => handleAllocChange(row.id, e.target.value)}
-                            className="h-8 text-right w-20 ml-auto"
+                            className="h-8 text-right w-20 ml-auto mr-2"
                           />
                         </td>
                         <td className="px-2 py-2">
-                          <button
-                            onClick={() => handleRemoveRow(row.id)}
-                            title="이 행 삭제"
-                            className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 opacity-0 group-hover:opacity-100 transition-all"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex items-center justify-end gap-0.5">
+                            <div className="flex flex-col opacity-0 group-hover:opacity-100 transition-all">
+                              <button
+                                onClick={() => handleMoveRow(row.id, -1)}
+                                disabled={idx === 0}
+                                title="위로"
+                                className="w-5 h-4 rounded flex items-center justify-center text-muted-foreground hover:text-violet-500 hover:bg-violet-500/10 disabled:opacity-30 disabled:hover:bg-transparent transition-all"
+                              >
+                                <ChevronUp className="w-3 h-3" />
+                              </button>
+                              <button
+                                onClick={() => handleMoveRow(row.id, 1)}
+                                disabled={idx === currentPD.rows.length - 1}
+                                title="아래로"
+                                className="w-5 h-4 rounded flex items-center justify-center text-muted-foreground hover:text-violet-500 hover:bg-violet-500/10 disabled:opacity-30 disabled:hover:bg-transparent transition-all"
+                              >
+                                <ChevronDown className="w-3 h-3" />
+                              </button>
+                            </div>
+                            <button
+                              onClick={() => handleRemoveRow(row.id)}
+                              title="이 행 삭제"
+                              className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );

@@ -915,27 +915,28 @@ function RebalanceCell({ diff }: { diff: number }) {
 function LiveRebalanceCell({ diff, livePrice }: { diff: number; livePrice: number }) {
   if (Math.abs(diff) < 1) return <span className="text-muted-foreground text-xs">—</span>;
 
-  if (diff > 0) {
-    const shares = livePrice > 0 ? Math.floor(diff / livePrice) : 0;
-    const actualAmount = shares * livePrice;
-    const remainder = diff - actualAmount;
-    return (
-      <div className="text-right space-y-0.5">
-        <p className="text-emerald-500 text-xs font-semibold tabular-nums">+{formatKRW(diff)}</p>
-        {livePrice > 0 && shares > 0 && (
-          <p className="text-emerald-400 text-[10px] tabular-nums font-medium">
-            ≈ {shares}주 · {formatKRW(actualAmount)}원
-          </p>
-        )}
-        {livePrice > 0 && remainder > 0 && (
-          <p className="text-muted-foreground text-[10px] tabular-nums">잔액 {formatKRW(remainder)}</p>
-        )}
-        {livePrice > 0 && shares === 0 && (
-          <p className="text-amber-500 text-[10px]">1주 미만</p>
-        )}
-      </div>
-    );
-  }
+  const isBuy = diff > 0;
+  const amount = Math.abs(diff);
+  const shares = livePrice > 0 ? Math.floor(amount / livePrice) : 0;
+  const actualAmount = shares * livePrice;
+  const remainder = amount - actualAmount;
+  const color = isBuy ? "text-emerald-500" : "text-rose-500";
+  const colorLight = isBuy ? "text-emerald-400" : "text-rose-400";
 
-  return <span className="text-rose-500 text-xs font-semibold tabular-nums">{formatKRW(diff)}</span>;
+  return (
+    <div className="text-right space-y-0.5">
+      <p className={`${color} text-xs font-semibold tabular-nums`}>{isBuy ? "+" : "-"}{formatKRW(amount)}</p>
+      {livePrice > 0 && shares > 0 && (
+        <p className={`${colorLight} text-[10px] tabular-nums font-medium`}>
+          ≈ {shares}주 · {formatKRW(actualAmount)}원
+        </p>
+      )}
+      {livePrice > 0 && remainder > 0 && (
+        <p className="text-muted-foreground text-[10px] tabular-nums">잔액 {formatKRW(remainder)}</p>
+      )}
+      {livePrice > 0 && shares === 0 && (
+        <p className="text-amber-500 text-[10px]">1주 미만</p>
+      )}
+    </div>
+  );
 }
