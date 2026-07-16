@@ -303,12 +303,18 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
   const [addEtf, setAddEtf] = useState("");
   const [addTicker, setAddTicker] = useState("");
 
+  // library는 getOrDefaultLibrary()가 호출될 때마다 새 배열 참조를 만들어내서(내용이 안 바뀌어도),
+  // 폴링/실시간 시세 갱신으로 부모가 리렌더될 때마다 값이 "바뀐 것"처럼 보인다.
+  // 그래서 모달이 열려있는 동안에도 이 effect가 계속 재실행되어 입력 중이던 폼과 탭이 자꾸 초기화되는 버그가 있었음 —
+  // "열리는 순간(open이 false→true로 바뀔 때)"에만 초기화하도록 고침.
+  const wasOpenRef = useRef(false);
   useEffect(() => {
-    if (open) {
+    if (open && !wasOpenRef.current) {
       setDraftLib([...library]);
       setActiveGroup("주식");
       setShowAddFor(null); setAddLabel(""); setAddEtf(""); setAddTicker("");
     }
+    wasOpenRef.current = open;
   }, [open, library]);
 
   function handleEtfChange(id: string, v: string) {
