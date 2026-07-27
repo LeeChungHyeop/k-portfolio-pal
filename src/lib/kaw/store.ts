@@ -755,9 +755,12 @@ export function usePortfolioStore() {
         ...acc, rowHoldings: { ...(acc.rowHoldings ?? {}), [rowId]: value },
       }}};
     }), []);
+  // 기존 값과 병합 저장(통째로 덮어쓰지 않음) — 리밸런싱 탭이 재마운트되는 순간(히스토리 탭 이동 후 복귀 등)
+  // quantities state가 account.liveQuantities보다 먼저/불완전하게 초기화돼 있으면, 통째로 덮어쓸 경우
+  // 기존에 저장돼 있던 보유수량 전체가 빈 값으로 유실될 수 있었음.
   const saveAccountQuantities = useCallback((id: AccountId, quantities: Record<string, number>) =>
     setState((s) => ({
-      ...s, accounts: { ...s.accounts, [id]: { ...s.accounts[id], liveQuantities: { ...quantities } } },
+      ...s, accounts: { ...s.accounts, [id]: { ...s.accounts[id], liveQuantities: { ...s.accounts[id].liveQuantities, ...quantities } } },
     })), []);
   const updateRowMemo        = useCallback((id: AccountId, memoKey: string, text: string) =>
     setState((s) => {

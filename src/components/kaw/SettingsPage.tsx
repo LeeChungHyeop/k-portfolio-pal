@@ -638,12 +638,12 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
     const sortedHistory = [...storeAccount.history].sort((a, b) => a.date.localeCompare(b.date));
     const lastEntry = sortedHistory[sortedHistory.length - 1];
     const restoredQuantities: Record<string, number> = {};
-    if (lastEntry?.rowQuantitiesSnap && lastEntry.rowAssetSnap) {
+    if (lastEntry?.rowQuantitiesSnap) {
       const activeRowIds = new Set(profileRows[draft.profile].map((r) => r.id));
       for (const [oldRowId, qty] of Object.entries(lastEntry.rowQuantitiesSnap)) {
         if (qty <= 0 || activeRowIds.has(oldRowId)) continue; // 여전히 살아있는 행이면 복원 불필요
         // rowAssetSnap이 없는(이 필드가 생기기 전에 저장된) 과거 기록은 행 id 규칙(assetId_타임스탬프)에서 유추
-        const assetId = lastEntry.rowAssetSnap[oldRowId] ?? oldRowId.replace(/_\d+$/, "");
+        const assetId = lastEntry.rowAssetSnap?.[oldRowId] ?? oldRowId.replace(/_\d+$/, "");
         if (!assetId) continue;
         const newRow = profileRows[draft.profile].find(
           (r) => r.assetId === assetId && storeAccount.liveQuantities?.[r.id] === undefined,
