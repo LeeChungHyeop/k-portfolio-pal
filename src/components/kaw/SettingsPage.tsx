@@ -1009,7 +1009,7 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                               </div>
                               {/* 모바일에서 ETF명 + 메모 버튼 */}
                               <div className="sm:hidden flex items-center gap-1 mt-0.5">
-                                <span className="text-[11px] text-muted-foreground/70 truncate max-w-[130px]">{row.etfName}</span>
+                                <span className="text-[11px] text-muted-foreground/70">{row.etfName}</span>
                                 <button
                                   onClick={() => handleMemoOpen(row.id)}
                                   title="메모"
@@ -1033,7 +1033,7 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                                 (d) => def && d.label === def.label && d.defaultEtf && d.ticker,
                               );
                               if (alternatives.length <= 1) {
-                                return <span className="text-sm truncate max-w-[210px]">{row.etfName}</span>;
+                                return <span className="text-sm">{row.etfName}</span>;
                               }
                               return (
                                 <Select value={row.etfName} onValueChange={(v) => handleRowEtfChange(row.id, v)}>

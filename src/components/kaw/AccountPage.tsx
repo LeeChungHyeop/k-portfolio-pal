@@ -507,11 +507,12 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                           </>
                         )}
                       </div>
-                      <div className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 leading-tight truncate max-w-[68px] sm:max-w-none">{r.label}</div>
+                      <div className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 leading-tight">{r.label}</div>
                       {r.orphaned && (
                         <div className="text-[9px] text-amber-500 mt-0.5">종목설정에서 삭제됨 · 실제 매도 전까지 자산에 포함</div>
                       )}
-                      {/* 모바일: 종목코드 표시 */}
+                      {/* 모바일: 종목 풀네임 + 종목코드 (데스크탑에선 옆 칸에 따로 나옴) */}
+                      <div className="md:hidden mt-0.5 text-[10px] text-foreground/80 leading-tight">{r.etfName}</div>
                       {liveMode && r.ticker && (
                         <span className="md:hidden mt-1 text-[10px] text-violet-500 tabular-nums font-mono">{r.ticker}</span>
                       )}
@@ -521,7 +522,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                     </TableCell>
                     {/* ETF 종목명 + 종목코드 */}
                     <TableCell className="hidden md:table-cell">
-                      <span className="text-sm text-muted-foreground leading-tight block truncate max-w-[180px]" title={r.etfName}>
+                      <span className="text-sm text-muted-foreground leading-tight block">
                         {r.etfName}
                       </span>
                       {liveMode && (
