@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
-import { ACCOUNT_IDS, ACCOUNT_LABELS_SHORT } from "@/lib/kaw/constants";
-import { usePortfolioStore, formatKRW, formatPct, getOrDefaultLibrary } from "@/lib/kaw/store";
+import { useEffect, useMemo, useState } from "react";
+import { ACCOUNT_IDS, ACCOUNT_LABELS_SHORT, type AccountId } from "@/lib/kaw/constants";
+import { usePortfolioStore, formatKRW, formatPct, getOrDefaultLibrary, type AccountState, type AssetDef } from "@/lib/kaw/store";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -28,6 +28,82 @@ const ACCOUNT_COLORS_SOFT: Record<string, string> = {
   pension:    "oklch(0.82 0.12 30)",
   irp:        "oklch(0.78 0.12 320)",
 };
+
+// ── 종목별 비중 도넛 색상 (컬러블라인드 세이프 검증된 8색 카테고리 팔레트, 라이트/다크 전용 스텝) ──
+const HOLDING_PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"];
+const HOLDING_PALETTE_DARK  = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
+const HOLDING_OTHER_COLOR = "#898781"; // "기타" — 팔레트 8개를 넘는 나머지 종목을 묶는 중립색
+
+function useIsDarkMode(): boolean {
+  const [isDark, setIsDark] = useState(
+    () => typeof document !== "undefined" && document.documentElement.classList.contains("dark"),
+  );
+  useEffect(() => {
+    const el = document.documentElement;
+    const observer = new MutationObserver(() => setIsDark(el.classList.contains("dark")));
+    observer.observe(el, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+  return isDark;
+}
+
+// 계좌의 "마지막으로 저장된 리밸런싱 기록" 기준 종목(ETF)별 평가금액 — 실시간가가 있으면 그걸로, 없으면 저장된 평가금액으로.
+function getAccountEtfValues(
+  account: AccountState,
+  library: AssetDef[],
+  livePrices: Record<string, number>,
+  isLiveActive: boolean,
+): Map<string, number> {
+  const result = new Map<string, number>();
+  const sorted = [...account.history].sort((a, b) => a.date.localeCompare(b.date));
+  const last = sorted[sorted.length - 1];
+  if (!last?.rowQuantitiesSnap) return result;
+  for (const [rowId, qty] of Object.entries(last.rowQuantitiesSnap)) {
+    if (qty <= 0) continue;
+    const etfName = last.rowEtfSnap?.[rowId] ?? rowId;
+    const ticker = library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker ?? "";
+    const livePrice = isLiveActive && ticker ? (livePrices[ticker] ?? 0) : 0;
+    const value = livePrice > 0 ? qty * livePrice : (last.rowHoldingsSnap?.[rowId] ?? 0);
+    if (value <= 0) continue;
+    result.set(etfName, (result.get(etfName) ?? 0) + value);
+  }
+  return result;
+}
+
+interface HoldingDonutRow { name: string; value: number; pct: number; fill: string; }
+
+// 전역 색상 배정(etfColorMap)에 없는 종목은 전부 "기타"로 묶어서, 어느 도넛에서 봐도 같은 종목은 항상 같은 색을 쓴다.
+function toHoldingDonutData(values: Map<string, number>, etfColorMap: Map<string, string>): HoldingDonutRow[] {
+  const total = [...values.values()].reduce((s, v) => s + v, 0);
+  if (total <= 0) return [];
+  const rows: { name: string; value: number; fill: string }[] = [];
+  let otherSum = 0;
+  for (const [name, value] of values) {
+    const color = etfColorMap.get(name);
+    if (color) rows.push({ name, value, fill: color });
+    else otherSum += value;
+  }
+  rows.sort((a, b) => b.value - a.value);
+  if (otherSum > 0) rows.push({ name: "기타", value: otherSum, fill: HOLDING_OTHER_COLOR });
+  return rows.map((r) => ({ ...r, pct: (r.value / total) * 100 }));
+}
+
+function HoldingDonutTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0];
+  return (
+    <div className="rounded-xl border bg-popover p-3 shadow-md text-sm space-y-1 min-w-40">
+      <div className="flex items-center gap-1.5">
+        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: p.payload.fill }} />
+        <span className="text-xs font-semibold">{p.payload.name}</span>
+      </div>
+      <div className="flex justify-between gap-4 text-xs tabular-nums">
+        <span className="text-muted-foreground">{formatKRW(p.payload.value)}원</span>
+        <span className="font-semibold">{p.payload.pct.toFixed(1)}%</span>
+      </div>
+    </div>
+  );
+}
 
 function DashboardTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
@@ -107,6 +183,46 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
 
   const { prices: livePrices, configured, isLoading: priceLoading, successCount, totalCount } = useKisPriceContext();
   const isLiveActive = liveMode && configured && Object.keys(livePrices).length > 0;
+  const isDark = useIsDarkMode();
+  const holdingPalette = isDark ? HOLDING_PALETTE_DARK : HOLDING_PALETTE_LIGHT;
+
+  // ── 종목(ETF)별 비중 — 계좌별 + 전체 합산, 도넛 차트용 ──────────────────
+  const etfValuesByAccount = useMemo(() => {
+    const out = {} as Record<AccountId, Map<string, number>>;
+    for (const id of ACCOUNT_IDS) out[id] = getAccountEtfValues(state.accounts[id], library, livePrices, isLiveActive);
+    return out;
+  }, [state.accounts, library, livePrices, isLiveActive]);
+
+  const combinedEtfValues = useMemo(() => {
+    const combined = new Map<string, number>();
+    for (const id of ACCOUNT_IDS) {
+      for (const [name, value] of etfValuesByAccount[id]) combined.set(name, (combined.get(name) ?? 0) + value);
+    }
+    return combined;
+  }, [etfValuesByAccount]);
+
+  // 색상은 전체 합산 기준 상위 8개 종목에 고정 배정 — 어느 도넛(전체/계좌별)을 봐도 같은 종목은 항상 같은 색
+  const etfColorMap = useMemo(() => {
+    const rankedNames = [...combinedEtfValues.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name);
+    const map = new Map<string, string>();
+    rankedNames.slice(0, holdingPalette.length).forEach((name, i) => map.set(name, holdingPalette[i]));
+    return map;
+  }, [combinedEtfValues, holdingPalette]);
+
+  const combinedHoldingDonut = useMemo(
+    () => toHoldingDonutData(combinedEtfValues, etfColorMap),
+    [combinedEtfValues, etfColorMap],
+  );
+  const perAccountHoldingDonuts = useMemo(
+    () => ACCOUNT_IDS.map((id) => ({
+      id,
+      label: ACCOUNT_LABELS_SHORT[id],
+      total: [...etfValuesByAccount[id].values()].reduce((s, v) => s + v, 0),
+      data: toHoldingDonutData(etfValuesByAccount[id], etfColorMap),
+    })),
+    [etfValuesByAccount, etfColorMap],
+  );
+  const combinedHoldingTotal = combinedHoldingDonut.reduce((s, r) => s + r.value, 0);
 
   // 계좌별 실시간 총액 — "마지막으로 저장된 리밸런싱 기록(실제 확정된 보유내역)" × 실시간주가.
   // profileRows/liveQuantities(다음 리밸런싱을 위해 자유롭게 편집 중인 계획)를 직접 쓰지 않는 이유:
@@ -563,6 +679,111 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
                 ))}
               </LineChart>
             </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
+
+      {/* 보유 종목 비중 — 전체 합산 + 계좌별 */}
+      {combinedHoldingDonut.length > 0 && (
+        <Card className="p-5">
+          <h3 className="font-semibold mb-1">보유 종목 비중</h3>
+          <p className="text-xs text-muted-foreground mb-4">계좌별 마지막 리밸런싱 기준 · 실시간가 반영</p>
+
+          {/* 1. 전체 계좌 합산 */}
+          <div>
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">전체 계좌 합산</p>
+            <div className="grid md:grid-cols-2 gap-4 items-center">
+              <div className="relative h-72">
+                <ResponsiveContainer>
+                  <PieChart>
+                    <Pie
+                      data={combinedHoldingDonut}
+                      dataKey="value"
+                      nameKey="name"
+                      innerRadius="58%"
+                      outerRadius="88%"
+                      paddingAngle={2}
+                      stroke="var(--card)"
+                      strokeWidth={2}
+                      label={({ pct }: { pct: number }) => (pct >= 8 ? `${pct.toFixed(0)}%` : "")}
+                      labelLine={false}
+                    >
+                      {combinedHoldingDonut.map((d) => <Cell key={d.name} fill={d.fill} />)}
+                    </Pie>
+                    <Tooltip content={<HoldingDonutTooltip />} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                  <p className="text-lg font-bold tabular-nums">{fmtAxis(combinedHoldingTotal)}</p>
+                  <p className="text-[10px] text-muted-foreground">합산 자산</p>
+                </div>
+              </div>
+              <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                {combinedHoldingDonut.map((d) => (
+                  <div key={d.name} className="flex items-center justify-between gap-2 text-xs">
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: d.fill }} />
+                      <span className="truncate" title={d.name}>{d.name}</span>
+                    </span>
+                    <span className="flex items-center gap-2 shrink-0 tabular-nums">
+                      <span className="text-muted-foreground">{formatKRW(d.value)}원</span>
+                      <span className="font-semibold w-11 text-right">{d.pct.toFixed(1)}%</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* 2. 계좌별 (한눈에 비교되도록 작은 도넛 4개를 한 줄에) */}
+          <div className="mt-6 pt-5 border-t">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">계좌별</p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {perAccountHoldingDonuts.map((a) => (
+                <div key={a.id}>
+                  <div className="relative h-40">
+                    {a.data.length > 0 ? (
+                      <>
+                        <ResponsiveContainer>
+                          <PieChart>
+                            <Pie
+                              data={a.data}
+                              dataKey="value"
+                              nameKey="name"
+                              innerRadius="55%"
+                              outerRadius="90%"
+                              paddingAngle={2}
+                              stroke="var(--card)"
+                              strokeWidth={1.5}
+                            >
+                              {a.data.map((d) => <Cell key={d.name} fill={d.fill} />)}
+                            </Pie>
+                            <Tooltip content={<HoldingDonutTooltip />} />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                          <p className="text-xs font-bold tabular-nums">{fmtAxis(a.total)}</p>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground">보유 없음</div>
+                    )}
+                  </div>
+                  <p className="text-xs font-semibold text-center mt-1">{a.label}</p>
+                  <div className="mt-1.5 space-y-1">
+                    {a.data.slice(0, 4).map((d) => (
+                      <div key={d.name} className="flex items-center justify-between gap-1 text-[10px]">
+                        <span className="flex items-center gap-1 min-w-0">
+                          <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: d.fill }} />
+                          <span className="truncate" title={d.name}>{d.name}</span>
+                        </span>
+                        <span className="shrink-0 tabular-nums text-muted-foreground">{d.pct.toFixed(0)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </Card>
       )}
