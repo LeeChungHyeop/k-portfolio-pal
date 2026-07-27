@@ -633,6 +633,25 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
       ])
     ) as Record<ProfileKey, Record<AssetKey, number>>;
 
+    // 보유수량 복원: 예전에 삭제했던 종목(assetId)을 나중에 다시 추가하면, 마지막으로 저장된 리밸런싱
+    // 시점의 실제 보유수량을 새 행에 이어붙인다 (행 id는 추가할 때마다 새로 생기므로 assetId로 매칭).
+    const sortedHistory = [...storeAccount.history].sort((a, b) => a.date.localeCompare(b.date));
+    const lastEntry = sortedHistory[sortedHistory.length - 1];
+    const restoredQuantities: Record<string, number> = {};
+    if (lastEntry?.rowQuantitiesSnap && lastEntry.rowAssetSnap) {
+      const activeRowIds = new Set(profileRows[draft.profile].map((r) => r.id));
+      for (const [oldRowId, qty] of Object.entries(lastEntry.rowQuantitiesSnap)) {
+        if (qty <= 0 || activeRowIds.has(oldRowId)) continue; // 여전히 살아있는 행이면 복원 불필요
+        // rowAssetSnap이 없는(이 필드가 생기기 전에 저장된) 과거 기록은 행 id 규칙(assetId_타임스탬프)에서 유추
+        const assetId = lastEntry.rowAssetSnap[oldRowId] ?? oldRowId.replace(/_\d+$/, "");
+        if (!assetId) continue;
+        const newRow = profileRows[draft.profile].find(
+          (r) => r.assetId === assetId && storeAccount.liveQuantities?.[r.id] === undefined,
+        );
+        if (newRow) restoredQuantities[newRow.id] = qty;
+      }
+    }
+
     updateAccount(selectedAccount, {
       active: draft.active,
       profile: draft.profile,
@@ -645,7 +664,14 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
         id: r.id, assetKey: r.assetId as AssetKey, etfName: r.etfName ?? "",
       })),
       rowAllocations: profileAllocations,
+      ...(Object.keys(restoredQuantities).length
+        ? { liveQuantities: { ...storeAccount.liveQuantities, ...restoredQuantities } }
+        : {}),
     });
+
+    if (Object.keys(restoredQuantities).length) {
+      toast.success("이전에 보유 중이던 수량을 자동으로 불러왔어요");
+    }
 
     // Remove from temp saves once saved
     setPerAccountDrafts((prev) => {

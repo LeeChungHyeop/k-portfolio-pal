@@ -23,6 +23,7 @@ export interface HistoryEntry {
   rowQuantitiesSnap?: Record<string, number>; // rowId → 보유수량
   rowEtfSnap?: Record<string, string>;        // rowId → ETF명
   rowLabelSnap?: Record<string, string>;      // rowId → 자산명
+  rowAssetSnap?: Record<string, string>;      // rowId → assetId (행 삭제 후 같은 자산 재추가 시 보유수량 복원용)
   // "성장형(케이올웨더)으로 쭉 운용했다면" 백테스트 스냅샷 — 리밸런싱 시점에 계산해 영구 저장
   // 코스피200/S&P500도 같은 방식(매 납입 시점에 그 지수를 샀다면)으로 계산 — kospiUnits/sp500Units는 실시간 "현재" 포인트 계산용 보유 유닛 스냅샷
   backtestGrowth?: {

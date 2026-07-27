@@ -168,8 +168,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
 
   // ── 기본 rows (rowHoldings 기반) ──────────────────────────────────────
   const rows = useMemo(() => {
-    if (!profileRows.length) return [];
-    return profileRows.map((row) => {
+    const activeRows = profileRows.map((row) => {
       const def = library.find((d) => d.id === row.assetId);
       const etfName = row.etfName ?? def?.defaultEtf ?? row.assetId;
       const group = def?.group ?? "";
@@ -183,8 +182,26 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       // ETF명으로 먼저 찾고, 없으면 assetId로 fallback
       const tickerByEtf = library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker;
       const ticker = tickerByEtf ?? def?.ticker ?? "";
-      return { rowId: row.id, assetId: row.assetId, etfName, group, label, alloc, value, prevValue, ticker };
+      return { rowId: row.id, assetId: row.assetId, etfName, group, label, alloc, value, prevValue, ticker, orphaned: false };
     });
+
+    // 미배정 보유: 투자성향에서 종목 행을 지웠지만 마지막 리밸런싱 시점엔 실제로 보유하고 있던 수량이
+    // 남아있는 경우 — 실제로 팔기 전까지는 계속 자산으로 잡아줘야 기준금액에서 조용히 증발하지 않는다.
+    // 비중 0으로 잡아서 "전량 매도" 신호(추가매수 칸에 마이너스)가 자연스럽게 뜨게 한다.
+    const activeRowIds = new Set(profileRows.map((r) => r.id));
+    const orphanedRows = Object.entries(lastHistory?.rowQuantitiesSnap ?? {})
+      .filter(([rowId, qty]) => qty > 0 && !activeRowIds.has(rowId))
+      .map(([rowId]) => {
+        const etfName = lastHistory?.rowEtfSnap?.[rowId] ?? rowId;
+        const label = lastHistory?.rowLabelSnap?.[rowId] ?? etfName;
+        // rowAssetSnap이 없는(이 필드가 생기기 전에 저장된) 과거 기록은 행 id 규칙(assetId_타임스탬프)에서 유추
+        const assetId = lastHistory?.rowAssetSnap?.[rowId] ?? rowId.replace(/_\d+$/, "");
+        const def = library.find((d) => d.defaultEtf === etfName) ?? library.find((d) => d.id === assetId);
+        const ticker = def?.ticker ?? "";
+        return { rowId, assetId, etfName, group: "미배정", label, alloc: 0, value: 0, prevValue: null, ticker, orphaned: true };
+      });
+
+    return [...activeRows, ...orphanedRows];
   }, [account, profileRows, profileAlloc, library, lastHistory]);
 
   const manualTotal = rows.reduce((s, r) => s + r.value, 0);
@@ -297,6 +314,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       rowQuantitiesSnap: { ...quantities },
       rowEtfSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.etfName])),
       rowLabelSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.label])),
+      rowAssetSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.assetId])),
     };
     addHistory(accountId, newEntry);
     toast.success("리밸런싱이 저장됐습니다");
@@ -475,15 +493,24 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                 </TableRow>
               ) : (
                 effectiveRows.map((r) => (
-                  <TableRow key={r.rowId} className="hover:bg-muted/30">
+                  <TableRow key={r.rowId} className={r.orphaned ? "hover:bg-muted/30 bg-amber-500/5" : "hover:bg-muted/30"}>
                     {/* 자산 */}
                     <TableCell className="py-2 px-1 sm:px-3">
                       <div className="flex items-center gap-1 text-[10px] sm:text-xs">
-                        <span className="w-1.5 h-1.5 rounded-full shrink-0"
-                          style={{ background: GROUP_COLORS[r.group] ?? "#888" }} />
-                        <span className="truncate max-w-[52px] sm:max-w-none">{r.group}</span>
+                        {r.orphaned ? (
+                          <span className="px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9px] font-semibold shrink-0">미배정 보유</span>
+                        ) : (
+                          <>
+                            <span className="w-1.5 h-1.5 rounded-full shrink-0"
+                              style={{ background: GROUP_COLORS[r.group] ?? "#888" }} />
+                            <span className="truncate max-w-[52px] sm:max-w-none">{r.group}</span>
+                          </>
+                        )}
                       </div>
                       <div className="text-[10px] sm:text-xs text-muted-foreground mt-0.5 leading-tight truncate max-w-[68px] sm:max-w-none">{r.label}</div>
+                      {r.orphaned && (
+                        <div className="text-[9px] text-amber-500 mt-0.5">종목설정에서 삭제됨 · 실제 매도 전까지 자산에 포함</div>
+                      )}
                       {/* 모바일: 종목코드 표시 */}
                       {liveMode && r.ticker && (
                         <span className="md:hidden mt-1 text-[10px] text-violet-500 tabular-nums font-mono">{r.ticker}</span>
