@@ -7,11 +7,25 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar as DateCalendar } from "@/components/ui/calendar";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History } from "lucide-react";
+import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon } from "lucide-react";
 import { toast } from "sonner";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { syncGrowthBacktest } from "@/lib/kaw/backtest";
+
+// YYYY-MM-DD 문자열 ↔ Date 변환 (로컬 자정 기준 — UTC 파싱으로 하루 밀리는 것 방지)
+function ymdToDate(ymd: string): Date {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return new Date(y, (m || 1) - 1, d || 1);
+}
+function dateToYmd(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
@@ -113,6 +127,14 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
+
+  // 리밸런싱 탭에 처음 들어올 때는 항상 오늘 날짜를 기본값으로 — 예전 세션에서 과거/미래로
+  // 남겨둔 날짜에 계속 머물러 있지 않도록 마운트 시 한 번만 초기화한다.
+  useEffect(() => {
+    if (account.rebalanceDate !== today) updateAccount(accountId, { rebalanceDate: today });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 주말이면 직전 금요일로 롤백 (토=6→-1일, 일=0→-2일)
   const lastTradingDay = useMemo(() => {
     const d = new Date();
@@ -145,6 +167,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
 
   // ── 실시간 모드 상태 ───────────────────────────────────────────────────
   const [liveMode, setLiveMode] = useState(true);
+  const [dateOpen, setDateOpen] = useState(false);
 
   // 보유수량 — store에서 초기화, 변경 시 자동 영속화
   const [quantities, setQuantities] = useState<Record<string, number>>(
@@ -428,8 +451,41 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         <div className="grid sm:grid-cols-3 gap-3">
           <div>
             <label className="text-xs text-muted-foreground">리밸런싱 일자</label>
-            <Input type="date" value={account.rebalanceDate}
-              onChange={(e) => updateAccount(accountId, { rebalanceDate: e.target.value })} className="mt-1" />
+            <Popover open={dateOpen} onOpenChange={setDateOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="mt-1 w-full h-9 justify-start text-sm font-normal tabular-nums"
+                >
+                  <CalendarIcon className="w-3.5 h-3.5 mr-2 text-muted-foreground shrink-0" />
+                  {account.rebalanceDate || "날짜 선택"}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="start">
+                <DateCalendar
+                  mode="single"
+                  selected={account.rebalanceDate ? ymdToDate(account.rebalanceDate) : undefined}
+                  onSelect={(d) => {
+                    if (!d) return;
+                    updateAccount(accountId, { rebalanceDate: dateToYmd(d) });
+                    setDateOpen(false);
+                  }}
+                />
+                <div className="border-t p-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full"
+                    onClick={() => {
+                      updateAccount(accountId, { rebalanceDate: today });
+                      setDateOpen(false);
+                    }}
+                  >
+                    오늘
+                  </Button>
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
           <div>
             <label className="text-xs text-muted-foreground">
