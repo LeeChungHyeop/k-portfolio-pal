@@ -540,6 +540,32 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
   );
 }
 
+// 비중(%) 입력 — value를 매 입력마다 number로 왕복시키면(예: type="number" + value={number})
+// 리렌더할 때 커서가 맨 끝으로 튀어서, 가운데 자리를 고치려 해도 엉뚱한 자리에 숫자가 들어감
+// (예: "24"를 고치려는데 "204"가 되는 등). 입력 중엔 타이핑한 문자열 그대로를 보여주고,
+// 포커스를 벗어날 때만 정리된 값으로 맞춘다 (AccountPage.tsx의 NumberInput과 동일한 패턴).
+function PercentInput({ value, onChange, className }: {
+  value: number; onChange: (v: number) => void; className?: string;
+}) {
+  const [rawText, setRawText] = useState<string | null>(null);
+  const display = rawText !== null ? rawText : String(value ?? 0);
+  return (
+    <Input
+      type="text"
+      inputMode="decimal"
+      value={display}
+      onChange={(e) => {
+        const v = e.target.value;
+        if (!/^\d*\.?\d*$/.test(v)) return; // 숫자·소수점 외 입력 무시
+        setRawText(v);
+        onChange(parseFloat(v) || 0);
+      }}
+      onBlur={() => setRawText(null)}
+      className={className}
+    />
+  );
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // 투자성향 탭
 // ══════════════════════════════════════════════════════════════════════════════
@@ -682,7 +708,7 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
   }
 
   // ── Allocation change ───────────────────────────────────────────────────
-  function handleAllocChange(rowId: string, v: string) {
+  function handleAllocChange(rowId: string, v: number) {
     const p = currentProfile;
     setDraft((d) => ({
       ...d,
@@ -690,7 +716,7 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
         ...d.profileData,
         [p]: {
           ...d.profileData[p],
-          allocations: { ...d.profileData[p].allocations, [rowId]: parseFloat(v) || 0 },
+          allocations: { ...d.profileData[p].allocations, [rowId]: v },
         },
       },
     }));
@@ -1066,11 +1092,9 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                           </div>
                         </td>
                         <td className="px-4 py-2 text-right">
-                          <Input
-                            type="number"
-                            step="0.5"
+                          <PercentInput
                             value={currentAlloc[row.id] ?? 0}
-                            onChange={(e) => handleAllocChange(row.id, e.target.value)}
+                            onChange={(v) => handleAllocChange(row.id, v)}
                             className="h-8 text-right w-20 ml-auto mr-2"
                           />
                         </td>
