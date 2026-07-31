@@ -54,6 +54,32 @@ function NumberInput({ value, onChange, className, placeholder }: {
   );
 }
 
+// 보유수량 입력 — type="number"에 값을 숫자로 직접 바인딩하면 키 입력마다 커서가 맨 끝으로 튀어
+// "0이 먼저 입력되는" 것처럼 보이는 문제가 있었고, 게다가 매 키 입력마다 기준금액(전체 합계)이 즉시
+// 재계산되면서 아직 손대지 않은 다른 종목들의 추가매수 숫자까지 같이 흔들렸음. 이제 타이핑 중엔 로컬
+// 문자열만 갱신하고, 입력을 마치고 포커스를 벗어날 때 한 번에 커밋해서 다른 행에 영향을 안 주게 한다.
+function QuantityInput({ value, onChange, className }: {
+  value: number; onChange: (v: number) => void; className?: string;
+}) {
+  const [rawText, setRawText] = useState<string | null>(null);
+  const display = rawText !== null ? rawText : (value > 0 ? String(value) : "");
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={display}
+      placeholder="0"
+      className={className}
+      onFocus={() => setRawText(value > 0 ? String(value) : "")}
+      onChange={(e) => setRawText(e.target.value.replace(/[^0-9]/g, ""))}
+      onBlur={() => {
+        onChange(Math.max(0, parseInt(rawText ?? "", 10) || 0));
+        setRawText(null);
+      }}
+    />
+  );
+}
+
 type Tab = "rebalance" | "history";
 
 const TABS: { id: Tab; label: string }[] = [
@@ -570,7 +596,10 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                       {/* 모바일: 종목 풀네임 + 종목코드 (데스크탑에선 옆 칸에 따로 나옴) */}
                       <div className="md:hidden mt-0.5 text-[10px] text-foreground/80 leading-tight">{r.etfName}</div>
                       {liveMode && r.ticker && (
-                        <span className="md:hidden mt-1 text-[10px] text-violet-500 tabular-nums font-mono">{r.ticker}</span>
+                        <div className="md:hidden mt-1 flex items-center gap-1.5">
+                          <span className="text-[10px] text-violet-500 tabular-nums font-mono">{r.ticker}</span>
+                          <span className="text-[10px] text-muted-foreground tabular-nums">비중 {r.alloc}%</span>
+                        </div>
                       )}
                       {liveMode && !r.ticker && (
                         <span className="md:hidden mt-1 text-[10px] text-amber-500">코드 미설정</span>
@@ -586,6 +615,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                           {r.ticker ? (
                             <>
                               <span className="text-[10px] text-violet-500 tabular-nums font-mono bg-violet-500/10 rounded px-1.5 py-0.5">{r.ticker}</span>
+                              <span className="text-[10px] text-muted-foreground tabular-nums">비중 {r.alloc}%</span>
                               {r.livePrice > 0 && (
                                 <span className="text-[10px] text-emerald-500 tabular-nums">₩{formatKRW(r.livePrice)}</span>
                               )}
@@ -607,15 +637,9 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                     {/* 보유수량 입력 (실시간 모드) */}
                     {isLiveActive && (
                       <TableCell className="text-right py-2 px-1 sm:px-3">
-                        <input
-                          type="number"
-                          min={0}
-                          value={quantities[r.rowId] ?? ""}
-                          onChange={(e) => {
-                            const qty = Math.max(0, parseInt(e.target.value, 10) || 0);
-                            setQuantities((prev) => ({ ...prev, [r.rowId]: qty }));
-                          }}
-                          placeholder="0"
+                        <QuantityInput
+                          value={quantities[r.rowId] ?? 0}
+                          onChange={(qty) => setQuantities((prev) => ({ ...prev, [r.rowId]: qty }))}
                           className="h-7 w-16 text-xs text-right tabular-nums rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-violet-500"
                         />
                       </TableCell>
