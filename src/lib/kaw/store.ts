@@ -30,6 +30,7 @@ export interface HistoryEntry {
     totalValue: number; returnPct: number | null; units: Partial<Record<AssetKey, number>>;
     kospi200Pct: number | null; sp500Pct: number | null;
     kospiUnits: number; sp500Units: number;
+    kospiSafeUnits: number; sp500SafeUnits: number;
     schemaVersion: number;
   };
 }

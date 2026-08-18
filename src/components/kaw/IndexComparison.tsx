@@ -18,10 +18,15 @@ import {
   ReferenceLine,
 } from "recharts";
 import { RefreshCw } from "lucide-react";
-import { useEnsureGrowthBacktest } from "@/lib/kaw/backtest";
+import { useEnsureGrowthBacktest, SAFE_MIX_SP500_TICKER } from "@/lib/kaw/backtest";
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
+
+// 퇴직연금/IRP는 법상 안전자산(위험자산 아닌 자산) 30% 이상 편입 의무가 있어서, 코스피200/S&P500
+// 비교선도 100% 몰빵이 아니라 "지수 70% + 안전자산 30%"로 계산한다 (ISA/연금저축펀드는 규제 대상이 아니라 그대로 100%).
+const SAFE_MIX_ACCOUNTS: AccountId[] = ["retirement", "irp"];
+const SAFE_MIX_WEIGHT = 0.3;
 
 const COLOR_ACTUAL = "oklch(0.62 0.18 250)";
 const COLOR_GROWTH = "oklch(0.72 0.17 80)";
@@ -217,6 +222,7 @@ function buildLivePoint(
   history: HistoryEntry[],
   library: ReturnType<typeof getOrDefaultLibrary>,
   livePrices: Record<string, number>,
+  safeAssetMix: boolean,
 ): ComparePoint | null {
   if (!history.length) return null;
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
@@ -243,8 +249,14 @@ function buildLivePoint(
 
   const krTicker = BUILTIN_TICKERS.kr;
   const usTicker = BUILTIN_TICKERS.us;
-  const 코스피자산 = (last.backtestGrowth.kospiUnits ?? 0) * (krTicker ? (livePrices[krTicker] ?? 0) : 0);
-  const 에스피자산 = (last.backtestGrowth.sp500Units ?? 0) * (usTicker ? (livePrices[usTicker] ?? 0) : 0);
+  const ktb30Ticker = BUILTIN_TICKERS.ktb30;
+  let 코스피자산 = (last.backtestGrowth.kospiUnits ?? 0) * (krTicker ? (livePrices[krTicker] ?? 0) : 0);
+  let 에스피자산 = (last.backtestGrowth.sp500Units ?? 0) * (usTicker ? (livePrices[usTicker] ?? 0) : 0);
+  // 퇴직연금/IRP — 안전자산 30% 다리(국고채30년 / ACE 미국S&P500미국채혼합50액티브)도 실시간가로 더한다
+  if (safeAssetMix) {
+    코스피자산 += (last.backtestGrowth.kospiSafeUnits ?? 0) * (ktb30Ticker ? (livePrices[ktb30Ticker] ?? 0) : 0);
+    에스피자산 += (last.backtestGrowth.sp500SafeUnits ?? 0) * (livePrices[SAFE_MIX_SP500_TICKER] ?? 0);
+  }
 
   if (실제자산 <= 0 || 성장형자산 <= 0) return null;
 
@@ -273,9 +285,10 @@ export function IndexComparison() {
   const { prices: livePrices, configured } = useKisPriceContext();
   const library = useMemo(() => getOrDefaultLibrary(state), [state.assetLibrary]);
 
-  // 계좌별로 backtestGrowth가 없는 히스토리가 있으면 (신규 계좌 또는 최초 1회) 조용히 계산해서 저장
+  // 계좌별로 backtestGrowth가 없는 히스토리가 있으면 (신규 계좌 또는 최초 1회) 조용히 계산해서 저장.
+  // 퇴직연금/IRP는 safeAssetMix=true로 코스피200/S&P500 비교선에 안전자산 30%를 섞어 계산한다.
   const retirementSync = useEnsureGrowthBacktest(state.accounts.retirement.history, (r) =>
-    setHistoryBacktest("retirement", r),
+    setHistoryBacktest("retirement", r), true,
   );
   const isaSync = useEnsureGrowthBacktest(state.accounts.isa.history, (r) =>
     setHistoryBacktest("isa", r),
@@ -284,7 +297,7 @@ export function IndexComparison() {
     setHistoryBacktest("pension", r),
   );
   const irpSync = useEnsureGrowthBacktest(state.accounts.irp.history, (r) =>
-    setHistoryBacktest("irp", r),
+    setHistoryBacktest("irp", r), true,
   );
   const syncByAccount: Record<AccountId, { syncing: boolean; error: boolean }> = {
     retirement: retirementSync,
@@ -299,7 +312,7 @@ export function IndexComparison() {
       const account = state.accounts[id];
       const points = buildComparePoints(account.history);
       const livePoint = configured
-        ? buildLivePoint(account.history, library, livePrices)
+        ? buildLivePoint(account.history, library, livePrices, SAFE_MIX_ACCOUNTS.includes(id))
         : null;
       out[id] = livePoint ? [...points, livePoint] : points;
     });
@@ -325,6 +338,13 @@ export function IndexComparison() {
             </TabsTrigger>
           ))}
         </TabsList>
+        {SAFE_MIX_ACCOUNTS.includes(tab) && (
+          <p className="text-xs text-muted-foreground mt-1.5">
+            * {ACCOUNT_LABELS_SHORT[tab]}은 법상 안전자산 {SAFE_MIX_WEIGHT * 100}% 이상 편입 의무가 있어,
+            코스피200/S&P500 비교선은 지수 {100 - SAFE_MIX_WEIGHT * 100}% + 안전자산 {SAFE_MIX_WEIGHT * 100}%
+            (각각 국고채30년 / ACE 미국S&P500미국채혼합50액티브) 기준으로 계산돼.
+          </p>
+        )}
 
         {ACCOUNT_IDS.map((id) => {
           const rows = dataByAccount[id];

@@ -4,7 +4,16 @@ import { BUILTIN_TICKERS, type HistoryEntry } from "./store";
 
 // 계산 로직이 바뀔 때마다 올려서, 이전 버전 로직으로 저장된 backtestGrowth를 자동으로 재계산 대상으로 표시한다.
 // v2: 가격 데이터가 없는 자산(상장 전 등)의 비중이 재배분 없이 그냥 증발하던 버그 수정
-export const BACKTEST_SCHEMA_VERSION = 2;
+// v3: 퇴직연금/IRP는 법상 안전자산 30% 이상 편입 의무가 있어, 코스피200/S&P500 비교선도 100% 몰빵이 아니라
+//     "지수 70% + 안전자산 30%"로 계산하도록 변경 (퇴직연금/IRP 전용, ISA/연금저축펀드는 기존 100% 그대로)
+export const BACKTEST_SCHEMA_VERSION = 3;
+
+// 퇴직연금/IRP의 S&P500 비교선에서 안전자산 30%로 편입한다고 가정하는 종목 — 우리 자산 라이브러리의
+// 9개 기본 자산에 없는 별도 종목이라 티커를 직접 지정한다 (ACE 미국S&P500미국채혼합50액티브).
+export const SAFE_MIX_SP500_TICKER = "438080";
+// 코스피200 비교선의 안전자산 30%는 이미 기본 자산에 있는 국고채30년(ktb30, RISE KIS국고채30년Enhanced)을 그대로 쓴다.
+const SAFE_MIX_KOSPI_ASSET: AssetKey = "ktb30";
+const SAFE_MIX_WEIGHT = 0.3;
 
 // 계좌 히스토리 한 시점에 저장해 두는 "성장형으로 쭉 운용했다면"의 스냅샷.
 // 리밸런싱 시점마다 한 번만 계산해서 HistoryEntry에 영구 저장해 두고,
@@ -15,8 +24,10 @@ export interface BacktestGrowth {
   units: Partial<Record<AssetKey, number>>; // 다음 시점 드리프트 계산을 위한 보유 유닛 스냅샷
   kospi200Pct: number | null; // 실제와 같은 시점·같은 금액을 코스피200(KIWOOM 200TR)에 매번 넣었다면의 누적수익률
   sp500Pct: number | null; // 실제와 같은 시점·같은 금액을 S&P500(TIGER 미국S&P500, KRW 환산)에 매번 넣었다면의 누적수익률
-  kospiUnits: number; // 다음 시점 드리프트 및 실시간 "현재" 포인트 계산용 보유 유닛 스냅샷
+  kospiUnits: number; // 다음 시점 드리프트 및 실시간 "현재" 포인트 계산용 보유 유닛 스냅샷 (지수 쪽 비중)
   sp500Units: number;
+  kospiSafeUnits: number; // 퇴직연금/IRP 전용 — 코스피200 비교선의 안전자산(30%, 국고채30년) 보유 유닛
+  sp500SafeUnits: number; // 퇴직연금/IRP 전용 — S&P500 비교선의 안전자산(30%, ACE 미국S&P500미국채혼합50액티브) 보유 유닛
   schemaVersion: number;
 }
 
@@ -24,35 +35,40 @@ interface DatedBacktestPoint extends BacktestGrowth {
   date: string;
 }
 
-// 단일 자산에 실제와 동일한 입금 스케줄(baseAmount/deposit)을 그대로 매번 몰아넣었다면을 시뮬레이션.
-// 코스피200/S&P500 비교선에 쓰는데, "계좌 시작일에 한 번에 사서 보유"가 아니라 "낼 때마다 그 지수를 샀다면"으로
-// 계산해야 실제/성장형 라인과 같은 기준(납입 타이밍 반영)으로 비교가 가능하다.
-function computeSingleAssetBacktest(
+// 여러 자산을 고정 비중으로 섞어(예: 지수 70% + 안전자산 30%) 실제와 동일한 입금 스케줄로 매번
+// 재배분해 샀다면을 시뮬레이션. weight 합이 1이면 단일 자산(100%), 아니면 다리(leg)별로 나눠 담는다.
+function computeWeightedBacktest(
   sorted: HistoryEntry[],
-  pricesByDate: Record<string, Partial<Record<AssetKey, number>>>,
-  assetKey: AssetKey,
-): { pct: number | null; units: number }[] {
-  let units = 0;
+  legs: { weight: number; priceOf: (date: string) => number | undefined }[],
+): { pct: number | null; units: number[] }[] {
+  const units = legs.map(() => 0);
   let cumDeposit = 0;
-  let lastValue = 0; // 가격 데이터가 일시적으로 없을 때 직전 평가액을 유지하기 위한 폴백 (0으로 리셋되지 않도록)
+  let lastValue = 0; // 가격 데이터가 일시적으로 없을 때 직전 평가액을 유지하기 위한 폴백
   return sorted.map((h, i) => {
-    const price = pricesByDate[h.date]?.[assetKey] ?? 0;
     const depositAmt = i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
     cumDeposit += depositAmt;
-    const driftedValue = price > 0 ? units * price : lastValue;
-    const totalValue = driftedValue + depositAmt;
-    units = price > 0 ? totalValue / price : units;
+    const anyPriced = legs.some((leg) => (leg.priceOf(h.date) ?? 0) > 0);
+    const drifted = anyPriced
+      ? legs.reduce((sum, leg, li) => sum + units[li] * (leg.priceOf(h.date) ?? 0), 0)
+      : lastValue;
+    const totalValue = drifted + depositAmt;
+    legs.forEach((leg, li) => {
+      const p = leg.priceOf(h.date) ?? 0;
+      if (p > 0) units[li] = (totalValue * leg.weight) / p;
+    });
     lastValue = totalValue;
     const pct = cumDeposit > 0 ? Math.round(((totalValue - cumDeposit) / cumDeposit) * 10000) / 100 : null;
-    return { pct, units };
+    return { pct, units: [...units] };
   });
 }
 
 // 계좌의 실제 입금 흐름(baseAmount/deposit)은 그대로 두고, 매 리밸런싱 시점마다
 // "성장형" 고정 비중으로 전량 재배분했다고 가정한 가상 계좌를 시뮬레이션한다.
+// safeAssetMixPrices가 주어지면(퇴직연금/IRP) 코스피200/S&P500 비교선을 "지수 70% + 안전자산 30%"로 계산한다.
 export function computeGrowthBacktest(
   history: HistoryEntry[],
   pricesByDate: Record<string, Partial<Record<AssetKey, number>>>,
+  safeAssetMixPrices?: Record<string, number | undefined>,
 ): DatedBacktestPoint[] {
   const weights = PROFILE_PRESETS.growth;
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
@@ -61,8 +77,21 @@ export function computeGrowthBacktest(
   const lastKnownPrice: Partial<Record<AssetKey, number>> = {};
   let cumDeposit = 0;
 
-  const kospiPoints = computeSingleAssetBacktest(sorted, pricesByDate, "kr");
-  const sp500Points = computeSingleAssetBacktest(sorted, pricesByDate, "us");
+  const useSafeMix = !!safeAssetMixPrices;
+  const kospiLegs = useSafeMix
+    ? [
+        { weight: 1 - SAFE_MIX_WEIGHT, priceOf: (d: string) => pricesByDate[d]?.kr },
+        { weight: SAFE_MIX_WEIGHT, priceOf: (d: string) => pricesByDate[d]?.[SAFE_MIX_KOSPI_ASSET] },
+      ]
+    : [{ weight: 1, priceOf: (d: string) => pricesByDate[d]?.kr }];
+  const sp500Legs = useSafeMix
+    ? [
+        { weight: 1 - SAFE_MIX_WEIGHT, priceOf: (d: string) => pricesByDate[d]?.us },
+        { weight: SAFE_MIX_WEIGHT, priceOf: (d: string) => safeAssetMixPrices?.[d] },
+      ]
+    : [{ weight: 1, priceOf: (d: string) => pricesByDate[d]?.us }];
+  const kospiPoints = computeWeightedBacktest(sorted, kospiLegs);
+  const sp500Points = computeWeightedBacktest(sorted, sp500Legs);
 
   return sorted.map((h, i) => {
     const prices = pricesByDate[h.date] ?? {};
@@ -103,8 +132,10 @@ export function computeGrowthBacktest(
       units: { ...units },
       kospi200Pct: kospiPoints[i].pct,
       sp500Pct: sp500Points[i].pct,
-      kospiUnits: kospiPoints[i].units,
-      sp500Units: sp500Points[i].units,
+      kospiUnits: kospiPoints[i].units[0],
+      sp500Units: sp500Points[i].units[0],
+      kospiSafeUnits: kospiPoints[i].units[1] ?? 0,
+      sp500SafeUnits: sp500Points[i].units[1] ?? 0,
       schemaVersion: BACKTEST_SCHEMA_VERSION,
     };
   });
@@ -131,11 +162,11 @@ function savePriceCache(cache: Record<string, Record<string, number>>) {
 
 const GROWTH_TICKERS = ASSET_ORDER.map((k) => BUILTIN_TICKERS[k]).filter((t): t is string => !!t);
 
-async function fetchPricesForDate(date: string): Promise<Record<string, number>> {
+async function fetchPricesForDate(date: string, tickers: string[]): Promise<Record<string, number>> {
   const res = await fetch("/api/naver/history-price", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tickers: GROWTH_TICKERS, date: date.replace(/-/g, "") }),
+    body: JSON.stringify({ tickers, date: date.replace(/-/g, "") }),
   });
   const data = (await res.json()) as { results?: Record<string, { price: number }> };
   const byTicker: Record<string, number> = {};
@@ -143,51 +174,82 @@ async function fetchPricesForDate(date: string): Promise<Record<string, number>>
   return byTicker;
 }
 
-// 주어진 날짜들에 대해 자산별 과거 종가를 가져온다 (캐시 우선, 결측치는 직전 값으로 보정)
+// 주어진 날짜들에 대해 자산별 과거 종가를 가져온다 (캐시 우선, 결측치는 직전 값으로 보정).
+// extraTickers(퇴직연금/IRP 안전자산 혼합용)는 기본 9종목 캐시에 없으면 그 날짜만 추가로 다시 조회한다.
 async function fetchHistoricalPrices(
   dates: string[],
-): Promise<Record<string, Partial<Record<AssetKey, number>>>> {
+  extraTickers: string[] = [],
+): Promise<{ byAsset: Record<string, Partial<Record<AssetKey, number>>>; byTicker: Record<string, Record<string, number>> }> {
   const sortedDates = [...new Set(dates)].sort();
   const cache = loadPriceCache();
-  const missingDates = sortedDates.filter((d) => !cache[d]);
+  const allTickers = [...new Set([...GROWTH_TICKERS, ...extraTickers])];
+  const missingDates = sortedDates.filter(
+    (d) => !cache[d] || extraTickers.some((t) => cache[d][t] === undefined),
+  );
 
   for (const date of missingDates) {
-    cache[date] = await fetchPricesForDate(date);
+    const fetched = await fetchPricesForDate(date, allTickers);
+    cache[date] = { ...cache[date], ...fetched };
   }
   if (missingDates.length) savePriceCache(cache);
 
   const lastKnown: Partial<Record<AssetKey, number>> = {};
-  const result: Record<string, Partial<Record<AssetKey, number>>> = {};
+  const lastKnownExtra: Record<string, number> = {};
+  const byAsset: Record<string, Partial<Record<AssetKey, number>>> = {};
+  const byTicker: Record<string, Record<string, number>> = {};
   for (const date of sortedDates) {
-    const byTicker = cache[date] ?? {};
-    const byAsset: Partial<Record<AssetKey, number>> = {};
+    const cachedRow = cache[date] ?? {};
+    const assetRow: Partial<Record<AssetKey, number>> = {};
     for (const key of ASSET_ORDER) {
       const ticker = BUILTIN_TICKERS[key];
-      const p = ticker ? byTicker[ticker] : undefined;
+      const p = ticker ? cachedRow[ticker] : undefined;
       const value = p && p > 0 ? p : lastKnown[key];
       if (value) {
-        byAsset[key] = value;
+        assetRow[key] = value;
         lastKnown[key] = value;
       }
     }
-    result[date] = byAsset;
+    byAsset[date] = assetRow;
+
+    const tickerRow: Record<string, number> = {};
+    for (const t of extraTickers) {
+      const p = cachedRow[t];
+      const value = p && p > 0 ? p : lastKnownExtra[t];
+      if (value) {
+        tickerRow[t] = value;
+        lastKnownExtra[t] = value;
+      }
+    }
+    byTicker[date] = tickerRow;
   }
-  return result;
+  return { byAsset, byTicker };
 }
 
 // 계좌 히스토리 전체에 대해 성장형 백테스트를 계산해 entryId → 결과 맵으로 반환.
 // 날짜별 종가는 로컬 캐시를 거치므로, 이미 계산된 적 있는 날짜는 네트워크 호출 없이 즉시 처리된다.
+// safeAssetMix=true면 퇴직연금/IRP 규정(안전자산 30% 이상)에 맞춰 코스피200/S&P500 비교선을 지수 70%+안전자산 30%로 계산한다.
 export async function syncGrowthBacktest(
   history: HistoryEntry[],
+  safeAssetMix = false,
 ): Promise<Record<string, BacktestGrowth>> {
   if (!history.length) return {};
-  const pricesByDate = await fetchHistoricalPrices(history.map((h) => h.date));
-  const points = computeGrowthBacktest(history, pricesByDate);
+  const extraTickers = safeAssetMix ? [SAFE_MIX_SP500_TICKER] : [];
+  const { byAsset, byTicker } = await fetchHistoricalPrices(history.map((h) => h.date), extraTickers);
+  const safeAssetMixPrices = safeAssetMix
+    ? Object.fromEntries(Object.entries(byTicker).map(([date, row]) => [date, row[SAFE_MIX_SP500_TICKER]]))
+    : undefined;
+  const points = computeGrowthBacktest(history, byAsset, safeAssetMixPrices);
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const result: Record<string, BacktestGrowth> = {};
   sorted.forEach((h, i) => {
-    const { totalValue, returnPct, units, kospi200Pct, sp500Pct, kospiUnits, sp500Units, schemaVersion } = points[i];
-    result[h.id] = { totalValue, returnPct, units, kospi200Pct, sp500Pct, kospiUnits, sp500Units, schemaVersion };
+    const {
+      totalValue, returnPct, units, kospi200Pct, sp500Pct,
+      kospiUnits, sp500Units, kospiSafeUnits, sp500SafeUnits, schemaVersion,
+    } = points[i];
+    result[h.id] = {
+      totalValue, returnPct, units, kospi200Pct, sp500Pct,
+      kospiUnits, sp500Units, kospiSafeUnits, sp500SafeUnits, schemaVersion,
+    };
   });
   return result;
 }
@@ -197,6 +259,7 @@ export async function syncGrowthBacktest(
 export function useEnsureGrowthBacktest(
   history: HistoryEntry[],
   onResult: (updates: Record<string, BacktestGrowth>) => void,
+  safeAssetMix = false,
 ) {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(false);
@@ -216,7 +279,7 @@ export function useEnsureGrowthBacktest(
     let cancelled = false;
     setSyncing(true);
     setError(false);
-    syncGrowthBacktest(history)
+    syncGrowthBacktest(history, safeAssetMix)
       .then((result) => {
         if (!cancelled) onResult(result);
       })
@@ -230,7 +293,7 @@ export function useEnsureGrowthBacktest(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [missingKey]);
+  }, [missingKey, safeAssetMix]);
 
   return { syncing, error };
 }
