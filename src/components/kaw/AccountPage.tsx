@@ -324,8 +324,25 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     ? Object.values(liveValueByRow).reduce((s, v) => s + v, 0)
     : manualTotal;
 
-  // effectiveBase: 수량 모드 = (현재/과거가치 + 불입액), 수동 = baseAmount
-  const effectiveBase = isLiveActive ? liveTotal + account.deposit : account.baseAmount;
+  // 리밸런싱에 "진입한 시점"의 보유금액을 고정해둔다. 이걸 안 하면 종목 하나를 팔거나 사서 수량을
+  // 바꿀 때마다 보유금액 합계(liveTotal)가 바뀌고, 그때마다 기준금액도 같이 흔들려서 아직 손도
+  // 안 댄 다른 종목들의 목표금액(추가매수/매도)까지 전부 재계산되는 문제가 있었다.
+  const [frozenInvested, setFrozenInvested] = useState<number | null>(null);
+  useEffect(() => {
+    if (isLiveActive) {
+      if (frozenInvested === null) setFrozenInvested(liveTotal);
+    } else if (frozenInvested !== null) {
+      setFrozenInvested(null); // 실시간 모드를 끄면 해제 — 다음에 켤 때 그 시점 값으로 새로 고정
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLiveActive, frozenInvested, liveTotal]);
+
+  // 보유금액: 리밸런싱 진입 시점에 고정된 값(아직 고정 전이면 임시로 현재값)
+  const investedAtEntry = frozenInvested ?? liveTotal;
+  // effectiveBase(기준금액): 수량 모드 = (진입 시점 보유금액 + 불입액, 고정), 수동 = baseAmount
+  const effectiveBase = isLiveActive ? investedAtEntry + account.deposit : account.baseAmount;
+  // 예수금: 기준금액(고정) 중 아직 종목에 배분되지 않고 남아있는(또는 방금 매도로 생긴) 금액
+  const cashBalance = isLiveActive ? effectiveBase - liveTotal : 0;
 
   // 최종 effective rows (target/diff 재계산 포함)
   const effectiveRows = rows.map((r) => {
@@ -367,6 +384,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     };
     addHistory(accountId, newEntry);
     toast.success("리밸런싱이 저장됐습니다");
+    setFrozenInvested(null); // 저장 직후 이어서 조정할 수 있게, 방금 저장한 상태를 새 기준으로 다시 고정
     // 케이올웨더 성장형 백테스트 값도 조용히 같이 계산해서 저장 (지수비교 메뉴에서 재사용)
     syncGrowthBacktest([...account.history, { ...newEntry, returnPct: null }])
       .then((result) => setHistoryBacktest(accountId, result))
@@ -515,7 +533,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           </div>
           <div>
             <label className="text-xs text-muted-foreground">
-              {isLiveActive ? "기준금액 (자동계산)" : "기준금액 (원)"}
+              {isLiveActive ? "기준금액 (진입 시 고정)" : "기준금액 (원)"}
             </label>
             {isLiveActive ? (
               <div className="mt-1 h-9 px-3 flex items-center rounded-md border bg-muted/50 text-sm font-semibold tabular-nums text-violet-600 dark:text-violet-400">
@@ -535,17 +553,29 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           </div>
         </div>
 
-        {/* 기준금액 자동계산 근거 */}
+        {/* 기준금액 자동계산 근거 + 지금 보유금액/예수금 현황 */}
         {isLiveActive && (
-          <div className="rounded-lg bg-violet-500/8 border border-violet-500/20 px-4 py-2.5 flex flex-wrap gap-3 items-center text-xs">
-            <span className="text-muted-foreground">💡 기준금액 자동계산:</span>
-            <span className="tabular-nums font-medium text-emerald-600">
-              {dateMode === "past" ? "과거 평가금액" : "현재가치"} {formatKRW(liveTotal)}
-            </span>
-            <span className="text-muted-foreground">+</span>
-            <span className="tabular-nums font-medium">불입액 {formatKRW(account.deposit)}</span>
-            <span className="text-muted-foreground">=</span>
-            <span className="tabular-nums font-bold text-violet-600">{formatKRW(effectiveBase)}</span>
+          <div className="rounded-lg bg-violet-500/8 border border-violet-500/20 px-4 py-2.5 space-y-2 text-xs">
+            <div className="flex flex-wrap gap-3 items-center">
+              <span className="text-muted-foreground">💡 기준금액(진입 시 고정):</span>
+              <span className="tabular-nums font-medium text-emerald-600">
+                {dateMode === "past" ? "과거 평가금액" : "보유금액"} {formatKRW(investedAtEntry)}
+              </span>
+              <span className="text-muted-foreground">+</span>
+              <span className="tabular-nums font-medium">불입액 {formatKRW(account.deposit)}</span>
+              <span className="text-muted-foreground">=</span>
+              <span className="tabular-nums font-bold text-violet-600">{formatKRW(effectiveBase)}</span>
+            </div>
+            <div className="flex flex-wrap gap-3 items-center pt-2 border-t border-violet-500/20">
+              <span className="text-muted-foreground">📊 지금 보유금액 + 예수금:</span>
+              <span className="tabular-nums font-medium">보유금액 {formatKRW(liveTotal)}</span>
+              <span className="text-muted-foreground">+</span>
+              <span className={`tabular-nums font-medium ${cashBalance < 0 ? "text-rose-500" : "text-blue-600"}`}>
+                예수금 {formatKRW(cashBalance)}
+              </span>
+              <span className="text-muted-foreground">=</span>
+              <span className="tabular-nums font-semibold">{formatKRW(liveTotal + cashBalance)}</span>
+            </div>
           </div>
         )}
 
