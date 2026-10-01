@@ -62,5 +62,81 @@ export const BUILTIN_TICKERS: Partial<Record<AssetKey, string>> = {
   ust10: "0085P0",
   ust30: "484790",
   ktb30: "385560",
-  cash:  "429000",
+  cash:  "449170",   // TIGER KOFR금리액티브(합성). 예전에 429000으로 잘못 적혀 있었다(상장코드는 449170).
+};
+
+// ── 연금계좌 위험자산 한도 규칙 ─────────────────────────────────────────────
+// 퇴직연금(DC)·IRP는 위험자산 투자한도 70%(= 비위험자산 최소 30%) 규제를 받는다.
+// ISA·연금저축펀드에는 이 규칙이 없다.
+export const MIN_SAFE_ASSET_PCT = 30;
+export const MAX_RISK_ASSET_PCT = 100 - MIN_SAFE_ASSET_PCT;
+export const SAFE_ASSET_MIN_ACCOUNTS: readonly AccountId[] = ["retirement", "irp"];
+
+// 퇴직연금 위험자산 분류. 판정 근거는 아래 두 가지뿐이다:
+//   1) AssetDef.retirementRiskClass — 종목별 명시값(설정 → 종목 설정에서 지정)
+//   2) VERIFIED_RETIREMENT_RISK_CLASS — 검증된 종목코드별 분류표
+// 둘 다 없으면 unknown 이다. unknown 은 계산에서만 보수적으로 위험자산으로 보고,
+// 화면에는 "퇴직연금 분류 미확인"으로 드러낸다.
+//
+// 자산 group 은 UI 분류와 "새 종목 추가 시 기본 추천값" 용도로만 쓴다.
+// 안전자산·현금성자산 그룹이라는 이유만으로 nonRisk 로 자동 확정하지 않는다.
+export type RetirementRiskClass = "risk" | "nonRisk";
+
+// ── 검증된 종목코드별 분류표 ────────────────────────────────────────────────
+// 현재 4개 계좌에서 실제 보유·목표비중에 쓰이는 종목만 등록한다. 여기 없는 종목은
+// unknown(= 퇴직연금 분류 미확인)이며, 쓰기 시작할 때 설정 → 종목 설정에서 지정하면 된다.
+//
+// 규정이나 상품 분류가 바뀔 수 있으므로 **언제 어떤 근거로 확정했는지**를 값에 같이 남긴다
+// (`source` / `verifiedAt`). 추정으로 채우지 않는다 — 근거를 한 줄로 쓸 수 없으면 넣지 않는다.
+// 분류가 바뀌면 그 종목의 source/verifiedAt을 갱신한다.
+// 키는 KRX 종목코드(대문자).
+export interface VerifiedRiskClassEntry {
+  riskClass: RetirementRiskClass;
+  /** 확정 당시의 ETF명 — 종목코드가 가리키는 상품이 맞는지 나중에 대조하기 위해 남긴다 */
+  etfName: string;
+  /** 이 분류를 확정한 근거 (한 줄) */
+  source: string;
+  /** 확정일 YYYY-MM-DD */
+  verifiedAt: string;
+}
+
+export const VERIFIED_RETIREMENT_RISK_CLASS: Record<string, VerifiedRiskClassEntry> = {
+  // ── 비위험자산 (퇴직연금 100% 투자 가능으로 확인) ──
+  "0162Z0": {
+    riskClass: "nonRisk", etfName: "RISE 삼성전자SK하이닉스채권혼합",
+    source: "채권혼합형. 운용 중인 퇴직연금 계좌에서 안전자산 30% 충족분으로 보유 중임을 사용자가 확인",
+    verifiedAt: "2026-10-01",
+  },
+  "438080": {
+    riskClass: "nonRisk", etfName: "ACE 미국S&P500미국채혼합50액티브",
+    source: "채권혼합형. 운용 중인 퇴직연금·IRP 계좌에서 안전자산 30% 충족분으로 보유 중임을 사용자가 확인",
+    verifiedAt: "2026-10-01",
+  },
+  // ── 위험자산 (주식형·상품) ──
+  "360750": {
+    riskClass: "risk", etfName: "TIGER 미국S&P500",
+    source: "주식형(미국 S&P500 지수).", verifiedAt: "2026-10-01",
+  },
+  "0167A0": {
+    riskClass: "risk", etfName: "SOL AI반도체TOP2플러스",
+    source: "주식형(국내 반도체 종목).", verifiedAt: "2026-10-01",
+  },
+  "0181B0": {
+    riskClass: "risk", etfName: "HANARO 미국AI메모리반도체 TOP4+",
+    source: "주식형(미국 반도체 종목).", verifiedAt: "2026-10-01",
+  },
+  "0072R0": {
+    riskClass: "risk", etfName: "TIGER KRX 금현물",
+    source: "상품(금 현물). 안전자산으로 보지 않는다.", verifiedAt: "2026-10-01",
+  },
+};
+
+// ── 그룹별 기본 추천값 (판정 아님) ──────────────────────────────────────────
+// "미확인" 상태에서 사용자가 분류 버튼을 처음 눌렀을 때 어느 값부터 제안할지에만 쓴다.
+// 이 값으로 자동 확정되는 경로는 없다.
+export const RETIREMENT_RISK_CLASS_RECOMMENDATION_BY_GROUP: Record<string, RetirementRiskClass> = {
+  "주식":       "risk",
+  "대체투자":   "risk",
+  "안전자산":   "nonRisk",
+  "현금성자산": "nonRisk",
 };

@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect, useCallback } from "react";
-import { ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS, ACCOUNT_LABELS, type AccountId, type AssetKey } from "@/lib/kaw/constants";
+import { ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS, ACCOUNT_LABELS, ACCOUNT_LABELS_SHORT, MIN_SAFE_ASSET_PCT, type AccountId, type AssetKey } from "@/lib/kaw/constants";
 import { usePortfolioStore, formatKRW, formatPct, getOrDefaultLibrary, type HistoryEntry } from "@/lib/kaw/store";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -10,10 +10,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar as DateCalendar } from "@/components/ui/calendar";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon } from "lucide-react";
+import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { syncGrowthBacktest } from "@/lib/kaw/backtest";
+import { checkSafeAssetMinimum, checkSafeAssetValueLimit, MAX_RISK_ASSET_PCT } from "@/lib/kaw/safeAsset";
 
 // YYYY-MM-DD 문자열 ↔ Date 변환 (로컬 자정 기준 — UTC 파싱으로 하루 밀리는 것 방지)
 function ymdToDate(ymd: string): Date {
@@ -337,12 +338,33 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLiveActive, frozenInvested, liveTotal]);
 
-  // 보유금액: 리밸런싱 진입 시점에 고정된 값(아직 고정 전이면 임시로 현재값)
+  // ETF 평가액: 리밸런싱 진입 시점에 고정된 값(아직 고정 전이면 임시로 현재값)
   const investedAtEntry = frozenInvested ?? liveTotal;
-  // effectiveBase(기준금액): 수량 모드 = (진입 시점 보유금액 + 불입액, 고정), 수동 = baseAmount
-  const effectiveBase = isLiveActive ? investedAtEntry + account.deposit : account.baseAmount;
-  // 예수금: 기준금액(고정) 중 아직 종목에 배분되지 않고 남아있는(또는 방금 매도로 생긴) 금액
-  const cashBalance = isLiveActive ? effectiveBase - liveTotal : 0;
+  // 실제 예수금 — 증권사 앱에서 보고 직접 입력하는 현금잔액. 영속 저장되며 ETF 가격과 무관하다.
+  // (ETF 평가액에서 역산하지 않는다. 역산하면 주가가 움직일 때마다 "현금"이 같이 움직였다.)
+  // undefined = 아직 한 번도 입력하지 않음, 0 = 사용자가 입력한 실제 0원. 둘을 구분해서 안내한다.
+  // 미입력 상태를 기존 데이터로부터 추정하지 않는다 — 계산에서만 0으로 취급한다.
+  const cashEntered = account.cashBalance !== undefined;
+  const cashBalance = account.cashBalance ?? 0;
+  // 기준금액 = 총자산. 수량 모드: 진입 시점 ETF 평가액 + 실제 예수금 → 수량을 고쳐도 흔들리지 않는다.
+  //                  수동 모드: 기존과 동일하게 직접 입력한 baseAmount.
+  // 예수금을 고치면 기준금액이 따라 움직이는 건 의도한 동작이다(입력값 정정이므로).
+  const effectiveBase = isLiveActive ? investedAtEntry + cashBalance : account.baseAmount;
+  // 지금 총자산 = 실시간 ETF 평가액 + 실제 예수금
+  const totalAssetValue = liveTotal + cashBalance;
+
+  // 퇴직연금·IRP 비위험자산 최소 30% 검증 (목표비중 기준).
+  // rows 를 쓰는 이유: 행에 지정된 ETF명이 들어 있어야 종목코드 분류표로 정확히 찾는다
+  // (행 id 가 `kr` 인데 실제 종목은 다른 상품일 수 있다).
+  const safeAssetCheck = useMemo(
+    () => checkSafeAssetMinimum(
+      accountId,
+      rows.map((r) => ({ id: r.rowId, assetId: r.assetId, etfName: r.etfName })),
+      profileAlloc,
+      library,
+    ),
+    [accountId, rows, profileAlloc, library],
+  );
 
   // 최종 effective rows (target/diff 재계산 포함)
   const effectiveRows = rows.map((r) => {
@@ -354,8 +376,30 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   });
   const effectiveTotal = effectiveRows.reduce((s, r) => s + r.value, 0);
 
+  // 퇴직연금·IRP 위험자산 한도(70%) — 목표비중이 아니라 "지금 입력된 수량 x 가격 + 실제 예수금"
+  // 기준으로 다시 본다. 정수 주 단위 매매 때문에 목표가 30%여도 실제 결과가 미달할 수 있고,
+  // 매수 이후 시장가격 변동만으로도 70%를 넘을 수 있다. 예수금은 위험자산이 아니지만
+  // 총자산에는 포함된다.
+  //
+  // 초과해도 저장을 막지 않는다. 가격 변동으로 한도를 넘긴 경우 즉시 매도 의무가 있는 게
+  // 아니라 기존 보유는 유지할 수 있고(추가 매수만 제한), 리밸런싱 화면은 "실제 상태를 기록"
+  // 하는 화면이기 때문이다. 경고만 띄운다.
+  const riskLimitCheck = useMemo(
+    () => checkSafeAssetValueLimit(
+      accountId,
+      effectiveRows.map((r) => ({ assetId: r.assetId, etfName: r.etfName, value: r.value })),
+      // 미입력(undefined)을 그대로 넘긴다 — 0으로 계산하되 결과를 "추정"으로 표시하기 위해
+      account.cashBalance,
+      library,
+    ),
+    [accountId, effectiveRows, account.cashBalance, library],
+  );
+
   // ── 스냅샷 ─────────────────────────────────────────────────────────────
   function snapshotNow() {
+    // 비중 규칙 위반 여부와 무관하게 항상 저장한다 — 이 화면은 "실제 상태를 기록"하는 곳이고,
+    // 가격 변동으로 한도를 넘긴 보유는 즉시 매도 의무 없이 유지할 수 있다.
+    // 목표비중 30% 규칙은 설정 → 투자성향 저장 단계에서 막는다.
     if (isLiveActive) {
       // 라이브 평가금액을 store에 반영 후 저장
       effectiveRows.forEach((r) => {
@@ -375,6 +419,8 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       baseAmount: effectiveBase,
       totalValue: effectiveTotal,
       deposit: account.deposit,
+      // 미입력(undefined)이면 키를 남기지 않는다 — 과거 기록과 똑같이 "모름"으로 구분된다.
+      ...(cashEntered ? { cashBalance } : {}),
       holdings: holdingsSnap,
       rowHoldingsSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.value])),
       rowQuantitiesSnap: { ...quantities },
@@ -491,8 +537,103 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           <p className="text-xs text-amber-500 font-medium">선택한 날짜가 미래입니다. 리밸런싱을 저장할 수 없습니다.</p>
         )}
 
+        {/* 퇴직연금·IRP 안전자산 최소 30% 위반 경고 — 이 목표비중대로 추가매수를 실행하면
+            위험자산이 한도(70%)를 넘으므로 저장까지 막는다. 설정에서 비중을 고치면 바로 풀린다. */}
+        {safeAssetCheck.violated && (
+          <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 space-y-1">
+            <p className="text-xs font-bold text-rose-600 dark:text-rose-400 flex items-center gap-1.5">
+              <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+              {ACCOUNT_LABELS_SHORT[accountId]} 계좌는 비위험자산 목표비중을 최소 {MIN_SAFE_ASSET_PCT}% 이상 설정해야 합니다.
+            </p>
+            <p className="text-xs text-rose-600/90 dark:text-rose-400/90 tabular-nums">
+              현재 비위험자산 {safeAssetCheck.safePct.toFixed(1)}% · 위험자산 {safeAssetCheck.riskPct.toFixed(1)}%
+              (한도 {MAX_RISK_ASSET_PCT}%)
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              이 목표비중으로 계산된 추가매수를 그대로 실행하면 위험자산 한도를 넘깁니다.
+              설정 → 투자성향에서 비위험자산 비중을 올려주세요(현재 상태의 리밸런싱 저장은 그대로 됩니다).
+            </p>
+          </div>
+        )}
+
+        {/* 위험자산 비중 현황 — 경고만 한다. 저장은 항상 허용한다:
+            가격 변동으로 한도를 넘긴 경우 즉시 매도 의무가 없고 기존 보유는 유지할 수 있으며,
+            이 화면은 실제 상태를 기록하는 곳이기 때문이다.
+            예수금 미입력(estimated)이면 확정 판정처럼 보이지 않게 "추정"으로만 표시한다 —
+            예수금이 들어오면 총자산이 커져 비중이 내려갈 수 있다. 반대로 "70% 이하 정상" 같은
+            확정 판정도 하지 않는다. */}
+        {riskLimitCheck.required
+          && (riskLimitCheck.exceeded || riskLimitCheck.estimated || riskLimitCheck.unclassifiedValue > 0) && (
+          <div className={[
+            "rounded-lg border px-4 py-3 space-y-1.5",
+            riskLimitCheck.exceeded && !riskLimitCheck.estimated
+              ? "border-rose-500/40 bg-rose-500/10"
+              : "border-amber-500/40 bg-amber-500/10",
+          ].join(" ")}>
+            <p className={`text-xs font-bold flex items-center gap-1.5 ${
+              riskLimitCheck.exceeded && !riskLimitCheck.estimated
+                ? "text-rose-600 dark:text-rose-400"
+                : "text-amber-600 dark:text-amber-400"
+            }`}>
+              <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+              {riskLimitCheck.estimated
+                ? `위험자산 추정 비중 ${riskLimitCheck.riskPct.toFixed(1)}%`
+                  + (riskLimitCheck.exceeded ? ` — 한도 ${MAX_RISK_ASSET_PCT}% 초과 가능` : ` (한도 ${MAX_RISK_ASSET_PCT}%)`)
+                : riskLimitCheck.exceeded
+                  ? `실제 위험자산 비중 ${riskLimitCheck.riskPct.toFixed(1)}% — 한도 ${MAX_RISK_ASSET_PCT}% 초과`
+                  : `위험자산 비중 ${riskLimitCheck.riskPct.toFixed(1)}% (한도 ${MAX_RISK_ASSET_PCT}%)`}
+            </p>
+            {riskLimitCheck.estimated && (
+              <p className="text-xs font-semibold text-amber-600 dark:text-amber-400">
+                예수금 미입력 — 0원으로 가정한 임시 계산입니다. 실제 예수금을 입력하면 확정 판정됩니다.
+              </p>
+            )}
+            <p className={`text-xs tabular-nums ${
+              riskLimitCheck.exceeded && !riskLimitCheck.estimated
+                ? "text-rose-600/90 dark:text-rose-400/90"
+                : "text-muted-foreground"
+            }`}>
+              위험자산 {formatKRW(riskLimitCheck.riskValue)}원
+              {" · 비위험자산 "}{formatKRW(riskLimitCheck.safeValue)}원
+              {" · 예수금 "}{riskLimitCheck.cashEntered ? `${formatKRW(riskLimitCheck.cashBalance)}원` : "미입력(0 가정)"}
+              {" · 총자산 "}{formatKRW(riskLimitCheck.totalAssetValue)}원{riskLimitCheck.estimated ? " (추정)" : ""}
+            </p>
+            {riskLimitCheck.exceeded && (
+              <>
+                <p className={`text-[11px] font-medium ${
+                  riskLimitCheck.estimated
+                    ? "text-amber-600/90 dark:text-amber-400/90"
+                    : "text-rose-600/90 dark:text-rose-400/90"
+                }`}>
+                  추가 위험자산 매수가 제한될 수 있습니다.
+                </p>
+                <div className="text-[11px] text-muted-foreground space-y-0.5">
+                  <p>{MAX_RISK_ASSET_PCT}%로 돌아가려면 둘 중 하나면 됩니다{riskLimitCheck.estimated ? " (예수금 0원 가정 기준)" : ""}:</p>
+                  <p>
+                    · 위험자산을 <span className="font-semibold tabular-nums">{formatKRW(riskLimitCheck.reduceRiskBy)}원</span> 매도
+                    (예수금·비위험자산으로 옮기면 총자산은 그대로)
+                  </p>
+                  <p>
+                    · 또는 비위험자산·예수금을 <span className="font-semibold tabular-nums">{formatKRW(riskLimitCheck.addNonRiskBy)}원</span> 추가
+                    (위험자산은 그대로 두고 총자산을 늘리는 방식)
+                  </p>
+                  <p className="text-muted-foreground/80">
+                    가격 변동으로 넘긴 경우 즉시 매도 의무는 없습니다 — 기존 보유는 유지할 수 있고, 이 상태로도 리밸런싱 저장은 됩니다.
+                  </p>
+                </div>
+              </>
+            )}
+            {riskLimitCheck.unclassifiedValue > 0 && (
+              <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                이 중 {formatKRW(riskLimitCheck.unclassifiedValue)}원은 <span className="font-semibold">퇴직연금 분류 미확인</span>이라
+                보수적으로 위험자산으로 계산했습니다. 설정 → 종목 설정에서 지정해 주세요.
+              </p>
+            )}
+          </div>
+        )}
+
         {/* 입력 폼 */}
-        <div className="grid sm:grid-cols-3 gap-3">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <div>
             <label className="text-xs text-muted-foreground">리밸런싱 일자</label>
             <Popover open={dateOpen} onOpenChange={setDateOpen}>
@@ -546,6 +687,16 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
             )}
           </div>
           <div>
+            <label className="text-xs text-muted-foreground">실제 예수금 (원)</label>
+            <NumberInput value={cashBalance}
+              onChange={(v) => updateAccount(accountId, { cashBalance: v })}
+              placeholder={cashEntered ? "0" : "입력 필요"}
+              className={`mt-1 font-semibold ${cashEntered ? "" : "border-amber-500/60"}`} />
+            <p className={`text-[10px] mt-1 ${cashEntered ? "text-muted-foreground" : "text-amber-500 font-medium"}`}>
+              {cashEntered ? "증권사 앱의 예수금을 그대로 입력" : "실제 예수금을 입력해주세요"}
+            </p>
+          </div>
+          <div>
             <label className="text-xs text-muted-foreground">이번 달 불입액 (원)</label>
             <NumberInput value={account.deposit}
               onChange={(v) => updateAccount(accountId, { deposit: v })}
@@ -559,23 +710,31 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
             <div className="flex flex-wrap gap-3 items-center">
               <span className="text-muted-foreground">💡 기준금액(진입 시 고정):</span>
               <span className="tabular-nums font-medium text-emerald-600">
-                {dateMode === "past" ? "과거 평가금액" : "보유금액"} {formatKRW(investedAtEntry)}
+                {dateMode === "past" ? "과거 ETF 평가액" : "ETF 평가액"} {formatKRW(investedAtEntry)}
               </span>
               <span className="text-muted-foreground">+</span>
-              <span className="tabular-nums font-medium">불입액 {formatKRW(account.deposit)}</span>
+              <span className={`tabular-nums font-medium ${cashEntered ? "text-blue-600" : "text-amber-500"}`}>
+                예수금 {cashEntered ? formatKRW(cashBalance) : "미입력(0으로 계산)"}
+              </span>
               <span className="text-muted-foreground">=</span>
               <span className="tabular-nums font-bold text-violet-600">{formatKRW(effectiveBase)}</span>
             </div>
             <div className="flex flex-wrap gap-3 items-center pt-2 border-t border-violet-500/20">
-              <span className="text-muted-foreground">📊 지금 보유금액 + 예수금:</span>
-              <span className="tabular-nums font-medium">보유금액 {formatKRW(liveTotal)}</span>
+              <span className="text-muted-foreground">📊 지금 총자산:</span>
+              <span className="tabular-nums font-medium">ETF 평가금액 {formatKRW(liveTotal)}</span>
               <span className="text-muted-foreground">+</span>
               <span className={`tabular-nums font-medium ${cashBalance < 0 ? "text-rose-500" : "text-blue-600"}`}>
                 예수금 {formatKRW(cashBalance)}
               </span>
               <span className="text-muted-foreground">=</span>
-              <span className="tabular-nums font-semibold">{formatKRW(liveTotal + cashBalance)}</span>
+              <span className="tabular-nums font-semibold">{formatKRW(totalAssetValue)}</span>
             </div>
+            {!cashEntered && (
+              <p className="text-[11px] text-amber-500">
+                실제 예수금을 입력해주세요. 아직 한 번도 입력하지 않아 0원으로 계산하고 있습니다
+                (기존 데이터에서 추정하지 않습니다).
+              </p>
+            )}
           </div>
         )}
 
@@ -728,7 +887,10 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         </div>
 
         <div className="flex items-center justify-end gap-3">
-          <Button onClick={snapshotNow} disabled={effectiveTotal <= 0 || dateMode === "future"}>
+          <Button
+            onClick={snapshotNow}
+            disabled={effectiveTotal <= 0 || dateMode === "future"}
+          >
             <Camera className="w-4 h-4 mr-1.5" /> 리밸런싱 저장
           </Button>
         </div>
@@ -905,6 +1067,17 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
                               <p className="text-xs font-semibold text-muted-foreground mb-2 uppercase tracking-wide">
                                 {h.date} 종목별 보유현황
                               </p>
+                              {/* 실제 예수금 스냅샷 — 이 필드가 생기기 전의 기록에는 없으므로 있을 때만 보여준다.
+                                  과거 기준금액에서 역산하지 않는다(그 값은 예전 계산식의 가상값이라서다). */}
+                              {h.cashBalance !== undefined && (
+                                <p className="text-xs text-muted-foreground mb-2 tabular-nums">
+                                  ETF 평가금액 {formatKRW(h.totalValue)}원
+                                  {" + 실제 예수금 "}
+                                  <span className="font-semibold text-blue-600 dark:text-blue-400">{formatKRW(h.cashBalance)}원</span>
+                                  {" = 총자산 "}
+                                  <span className="font-semibold">{formatKRW(h.totalValue + h.cashBalance)}원</span>
+                                </p>
+                              )}
                               {h.rowHoldingsSnap && Object.keys(h.rowHoldingsSnap).length > 0 ? (
                                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
                                   {Object.entries(h.rowHoldingsSnap)

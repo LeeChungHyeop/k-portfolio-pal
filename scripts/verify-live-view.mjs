@@ -97,15 +97,19 @@ for (const account of ACCOUNTS) {
     });
   }
   const pmv = items.reduce((s, i) => s + i.marketValue, 0);
-  const base = pmv + (acc.deposit ?? 0);
+  // 총자산 = ETF 평가액 + 실제 예수금(cashBalance). 월 납입액(deposit)은 더하지 않는다.
+  const cash = acc.cashBalance ?? 0;
+  const base = pmv + cash;
   expectedAccounts.set(account, {
-    rebalanceDate: last.date, risk, deposit: acc.deposit ?? 0,
-    portfolioMarketValue: pmv, rebalanceBaseAmount: base, items,
+    rebalanceDate: last.date, risk, deposit: acc.deposit ?? 0, cashBalance: cash,
+    portfolioMarketValue: pmv, totalAssetValue: base, rebalanceBaseAmount: base, items,
   });
   for (const i of items) {
     expected.set(`${account}|${i.rowId}`, {
       ...i,
       portfolioMarketValue: pmv,
+      cashBalance: cash,
+      totalAssetValue: base,
       rebalanceBaseAmount: base,
       targetValue: Math.round(base * i.targetWeightPct / 100),
       rebalanceDiff: Math.round(base * i.targetWeightPct / 100) - i.marketValue,
@@ -128,9 +132,10 @@ try {
 console.log(`\nfamily_code=${FAMILY} / profile=${PROFILE}`);
 for (const [account, a] of expectedAccounts) {
   console.log(`\n═══ ${account}  (투자성향 ${a.risk}, 최근 확정 리밸런싱 ${a.rebalanceDate}) ═══`);
-  console.log(`  현재 전체 평가금액 ${won(a.portfolioMarketValue)}원`
-    + `  +  이번 회차 불입액 ${won(a.deposit)}원`
-    + `  =  리밸런싱 기준금액 ${won(a.rebalanceBaseAmount)}원`);
+  console.log(`  ETF 평가금액 ${won(a.portfolioMarketValue)}원`
+    + `  +  실제 예수금 ${won(a.cashBalance)}원`
+    + `  =  총자산(리밸런싱 기준금액) ${won(a.totalAssetValue)}원`
+    + `   [이번 회차 불입액 ${won(a.deposit)}원 — 기준금액에 포함되지 않는 메타데이터]`);
   console.log("  ETF명 | ticker | 수량 | 현재가(출처) | 평가금액 | 평가비중 | 목표비중 | 목표금액 | 차액");
   for (const i of a.items) {
     const e = expected.get(`${account}|${i.rowId}`);
@@ -145,7 +150,8 @@ for (const [account, a] of expectedAccounts) {
 if (viewRows) {
   const FIELDS = [
     ["quantity", "보유수량"], ["price", "현재가"], ["market_value", "현재평가금액"],
-    ["portfolio_market_value", "계좌전체평가금액"], ["deposit", "불입액"],
+    ["portfolio_market_value", "ETF평가금액합계"], ["cash_balance", "실제예수금"],
+    ["total_asset_value", "총자산"], ["deposit", "불입액"],
     ["rebalance_base_amount", "리밸런싱기준금액"], ["target_weight_pct", "목표비중"],
     ["target_value", "목표금액"], ["rebalance_diff", "목표대비차액"],
   ];
@@ -164,11 +170,14 @@ if (viewRows) {
     if (r.in_target_profile !== e.inTargetProfile) problems.push(`${key} in_target_profile: view ${r.in_target_profile} vs 기대 ${e.inTargetProfile}`);
     const expectedVals = {
       quantity: e.quantity, price: e.price, market_value: e.marketValue,
-      portfolio_market_value: e.portfolioMarketValue, deposit: expectedAccounts.get(r.account_type).deposit,
+      portfolio_market_value: e.portfolioMarketValue,
+      cash_balance: e.cashBalance, total_asset_value: e.totalAssetValue,
+      deposit: expectedAccounts.get(r.account_type).deposit,
       rebalance_base_amount: e.rebalanceBaseAmount, target_weight_pct: e.targetWeightPct,
       target_value: e.targetValue, rebalance_diff: e.rebalanceDiff,
     };
     for (const [col, label] of FIELDS) {
+      if (!(col in r)) { problems.push(`view 에 ${col} 컬럼이 없습니다 — 002 마이그레이션 미적용`); continue; }
       const got = r[col] === null ? null : Number(r[col]);
       const want = expectedVals[col] === null ? null : Number(expectedVals[col]);
       if (got === null && want === null) continue;

@@ -2,13 +2,14 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState }
 import * as XLSX from "xlsx";
 import {
   PROFILE_LABELS, ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS,
-  ACCOUNT_IDS, ACCOUNT_LABELS_SHORT, PROFILE_PRESETS,
-  type ProfileKey, type AccountId, type AssetKey,
+  ACCOUNT_IDS, ACCOUNT_LABELS_SHORT, PROFILE_PRESETS, MIN_SAFE_ASSET_PCT,
+  type ProfileKey, type AccountId, type AssetKey, type RetirementRiskClass,
 } from "@/lib/kaw/constants";
 import {
   usePortfolioStore, formatKRW, getAccountAlloc, getOrDefaultLibrary,
   type HistoryEntry, type AccountState, type AssetDef, type ProfileRowDef,
 } from "@/lib/kaw/store";
+import { checkSafeAssetMinimum, resolveRetirementRiskClass } from "@/lib/kaw/safeAsset";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -320,6 +321,9 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
   function handleEtfChange(id: string, v: string) {
     setDraftLib((prev) => prev.map((d) => d.id === id ? { ...d, defaultEtf: v } : d));
   }
+  function handleRiskClassChange(id: string, v: RetirementRiskClass) {
+    setDraftLib((prev) => prev.map((d) => d.id === id ? { ...d, retirementRiskClass: v } : d));
+  }
   function handleTickerChange(id: string, v: string) {
     const code = v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
     setDraftLib((prev) => prev.map((d) => d.id === id ? { ...d, ticker: code } : d));
@@ -397,6 +401,13 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
           ))}
         </div>
 
+        <p className="text-[11px] text-muted-foreground shrink-0 -mb-1">
+          오른쪽 <span className="font-semibold">위험 / 비위험 / 미확인</span> 버튼은 퇴직연금·IRP
+          위험자산 한도(70%) 계산 기준입니다. 실선은 이 종목에 직접 지정한 값, 점선은 검증된
+          종목코드 분류표 값, <span className="text-amber-600 dark:text-amber-400 font-semibold">미확인</span>은
+          근거가 없어 위험자산으로 계산 중인 종목입니다(눌러서 지정).
+        </p>
+
         {/* 자산 목록 (자산명 기준 그룹핑) */}
         <ScrollArea className="flex-1 min-h-0 -mx-1 px-1">
           <div className="space-y-3 pb-2">
@@ -461,6 +472,53 @@ function AssetLibraryModal({ open, library, onSave, onClose }: AssetLibraryModal
                         <span className="absolute -bottom-3.5 left-0 text-[9px] text-amber-500 whitespace-nowrap">{def.ticker.length}/6자리</span>
                       )}
                     </div>
+                    {/* 퇴직연금·IRP 위험자산 한도(70%) 분류. 판정 근거는 종목별 명시값 또는
+                        검증된 종목코드 분류표뿐이고, 둘 다 없으면 "미확인"(계산은 위험자산)이다.
+                        미확인 상태에서 처음 누르면 그룹 기본 추천값부터 제안하고, 그 뒤로는 토글된다. */}
+                    {(() => {
+                      const { riskClass, source, verified, recommendation } = resolveRetirementRiskClass(def);
+                      const unknown = source === "unknown";
+                      const next: RetirementRiskClass = unknown
+                        ? (recommendation ?? "nonRisk")
+                        : (riskClass === "nonRisk" ? "risk" : "nonRisk");
+                      const label = unknown ? "미확인" : riskClass === "nonRisk" ? "비위험" : "위험";
+                      // tooltip: 어떤 근거로 어느 분류가 됐는지, 검증값이면 확인일까지 보여준다.
+                      const title = source === "explicit"
+                        ? `이 종목에 지정된 분류: ${riskClass === "nonRisk" ? "비위험자산" : "위험자산"} (눌러서 변경)`
+                        : source === "verified"
+                          ? [
+                              `검증된 분류: ${riskClass === "nonRisk" ? "비위험자산" : "위험자산"}`,
+                              `확인일 ${verified?.verifiedAt ?? "-"}`,
+                              verified?.source ?? "",
+                              verified && verified.etfName !== def.defaultEtf
+                                ? `※ 확정 당시 종목명은 "${verified.etfName}" — 종목코드가 가리키는 상품이 바뀌었는지 확인하세요`
+                                : "",
+                              "(눌러서 이 종목에 직접 지정)",
+                            ].filter(Boolean).join(" · ")
+                          : [
+                              "퇴직연금 분류 미확인 — 위험자산으로 계산됩니다.",
+                              recommendation
+                                ? `눌러서 ${recommendation === "nonRisk" ? "비위험" : "위험"}으로 지정`
+                                : "눌러서 지정",
+                            ].join(" ");
+                      return (
+                        <button
+                          onClick={() => handleRiskClassChange(def.id, next)}
+                          title={title}
+                          className={[
+                            "h-8 w-16 shrink-0 rounded-md border text-[11px] font-semibold transition-all",
+                            unknown
+                              ? "border-amber-500/60 border-dashed text-amber-600 dark:text-amber-400 hover:bg-amber-500/10"
+                              : riskClass === "nonRisk"
+                                ? "border-emerald-500/50 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10"
+                                : "border-rose-500/50 text-rose-600 dark:text-rose-400 hover:bg-rose-500/10",
+                            source === "verified" ? "border-dashed" : "",
+                          ].join(" ")}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })()}
                     {def.isBuiltIn ? (
                       <div className="w-7 shrink-0" />
                     ) : (
@@ -613,6 +671,19 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
   const total = currentPD.rows.reduce((s, r) => s + (currentAlloc[r.id] ?? 0), 0);
   const atLimit = currentPD.rows.length >= MAX_ROWS;
 
+  // ── 저장 조건 검증 ───────────────────────────────────────────────────────
+  // 화면에 보이는 성향(currentProfile)이 곧 이 계좌에 적용되는 성향(draft.profile)이므로
+  // 지금 보고 있는 성향만 검사하면 된다. 다른 성향(예: 비워둔 커스텀)까지 막지 않는다.
+  const safeAssetCheck = checkSafeAssetMinimum(selectedAccount, currentPD.rows, currentAlloc, library);
+  // 합계 100% 강제. 행이 하나도 없는 성향(아직 구성 전)은 예외로 둔다.
+  const totalIsValid = currentPD.rows.length === 0 || Math.abs(total - 100) <= 0.1;
+  const saveBlockReason: string | null = safeAssetCheck.violated
+    ? `${ACCOUNT_LABELS_SHORT[selectedAccount]} 계좌는 비위험자산(안전자산·현금성자산) 목표비중을`
+      + ` 최소 ${MIN_SAFE_ASSET_PCT}% 이상 설정해야 합니다. 현재 비위험자산: ${safeAssetCheck.safePct.toFixed(1)}%`
+    : !totalIsValid
+      ? `목표비중 합계가 100%가 아닙니다. 현재 합계: ${total.toFixed(1)}%`
+      : null;
+
   // ── Account switching ───────────────────────────────────────────────────
   function selectAccount(id: AccountId) {
     setPerAccountDrafts((prev) => ({ ...prev, [selectedAccount]: draft }));
@@ -625,6 +696,7 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
 
   // ── Save ────────────────────────────────────────────────────────────────
   function handleSave() {
+    if (saveBlockReason) { toast.error(saveBlockReason); return; }
     const profileRows: Record<ProfileKey, ProfileRowDef[]> = {} as Record<ProfileKey, ProfileRowDef[]>;
     const profileAllocations: Record<ProfileKey, Record<string, number>> = {} as Record<ProfileKey, Record<string, number>>;
 
@@ -967,10 +1039,28 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                     {currentPD.rows.length}/10
                   </span>
                   {" · "}합계{" "}
-                  <span className={Math.abs(total - 100) > 0.1 ? "text-rose-500 font-bold" : "text-emerald-500 font-bold"}>
+                  <span className={totalIsValid ? "text-emerald-500 font-bold" : "text-rose-500 font-bold"}>
                     {total.toFixed(1)}%
                   </span>
+                  {safeAssetCheck.required && (
+                    <>
+                      {" · "}비위험자산{" "}
+                      <span className={safeAssetCheck.violated ? "text-rose-500 font-bold" : "text-emerald-500 font-bold"}>
+                        {safeAssetCheck.safePct.toFixed(1)}%
+                      </span>
+                      <span className="text-muted-foreground/70"> (최소 {MIN_SAFE_ASSET_PCT}%)</span>
+                    </>
+                  )}
                 </p>
+                {saveBlockReason && (
+                  <p className="text-xs text-rose-500 font-semibold mt-1">{saveBlockReason}</p>
+                )}
+                {safeAssetCheck.required && safeAssetCheck.unclassifiedCount > 0 && (
+                  <p className="text-xs text-amber-500 mt-1">
+                    퇴직연금 분류 미확인 종목 {safeAssetCheck.unclassifiedCount}개를 위험자산으로
+                    계산했습니다. 종목 설정에서 지정해 주세요.
+                  </p>
+                )}
               </div>
               <div className="flex gap-2 items-center flex-wrap justify-end">
                 {currentProfile !== "custom" && (
@@ -995,7 +1085,13 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                   <Plus className="w-3.5 h-3.5 mr-1" />
                   {atLimit ? "최대 10개" : "자산 추가"}
                 </Button>
-                <Button size="sm" disabled={!hasChanges} onClick={handleSave} className="min-w-[64px]">
+                <Button
+                  size="sm"
+                  disabled={!hasChanges || !!saveBlockReason}
+                  title={saveBlockReason ?? undefined}
+                  onClick={handleSave}
+                  className="min-w-[64px]"
+                >
                   <Save className="w-3.5 h-3.5 mr-1" /> 저장
                 </Button>
               </div>

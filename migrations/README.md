@@ -5,6 +5,29 @@
 | 파일 | 내용 |
 |---|---|
 | `001_live_prices_and_portfolio_view.sql` | 시세 캐시 테이블 `kaw_live_prices`, 신선도 상수 함수 `kaw_price_stale_seconds()`(900초, `search_path = pg_catalog` 고정), 분석 view `kaw_portfolio_live_view` |
+| `002_cash_balance.sql` | **실제 예수금** 도입에 맞춰 `kaw_portfolio_live_view` 재정의 (`cash_balance` / `total_asset_value` 컬럼 추가, 기준금액을 `ETF 평가액 + 실제 예수금` 으로 변경) |
+
+001 은 이미 production 에 적용돼 있어 그대로 두고, view 의 최신 정의는 **002** 다.
+`002` 는 view 를 `drop` → `create` 한다(컬럼 순서를 의미 단위로 묶기 위해). 기존 컬럼은
+하나도 없어지지 않으므로 이름으로 SELECT 하던 외부 분석은 그대로 동작한다.
+
+## 금액 컬럼 4종 (002 이후)
+
+| 컬럼 | 뜻 |
+|---|---|
+| `portfolio_market_value` | ETF 평가액 합계 (수량 x 캐시 시세) |
+| `cash_balance` | **실제 예수금** — 앱에서 사용자가 직접 입력해 저장한 증권계좌 현금잔액 |
+| `total_asset_value` | 총자산 = ETF 평가액 + 실제 예수금. **목표금액·차액의 기준** |
+| `deposit` | 이번 회차 월 납입액. 메타데이터일 뿐 기준금액에 더하지 않는다 |
+
+`rebalance_base_amount` 는 001 호환용 별칭으로 남아 있고 값은 `total_asset_value` 와 같다.
+
+예수금을 한 번도 입력하지 않은 계좌는 `cash_balance = 0` 이다. 과거 기록의
+`baseAmount - totalValue` 를 예수금으로 역산하지 않는다 — 그 값은 예전 계산식
+(`ETF 평가액 + 불입액`)에서 나온 가상값이라 실제 현금과 무관하다.
+
+검증: `node scripts/verify-live-view.mjs` — 원본 JSONB 로 다시 계산한 값과 view 를
+1원 단위로 대조한다. 002 적용 전에는 `cash_balance` 컬럼이 없다고 알려준다.
 
 ## 데이터 흐름
 
@@ -62,8 +85,9 @@ Cloudflare Cron ──scheduled()──┘          └─► 네이버 증권 (
 select account_type,
        max(rebalance_date)            as 최근확정일,
        max(portfolio_market_value)    as 현재평가액,
+       max(cash_balance)              as 실제예수금,
+       max(total_asset_value)         as 총자산,
        max(deposit)                   as 이번회차불입액,
-       max(rebalance_base_amount)      as 리밸런싱기준금액,
        bool_or(price_is_stale)        as 시세오래됨
 from public.kaw_portfolio_live_view
 where family_code = 'soye' and profile = 'hyeobi'
@@ -89,8 +113,9 @@ select rebalance_date      as 최근확정일,
        rebalance_diff      as 목표대비차액,
        in_target_profile   as 성향내종목,
        deposit             as 이번회차불입액,
-       portfolio_market_value as 계좌전체평가금액,
-       rebalance_base_amount  as 리밸런싱기준금액
+       portfolio_market_value as "ETF평가금액합계",
+       cash_balance           as 실제예수금,
+       total_asset_value      as 총자산
 from public.kaw_portfolio_live_view
 where family_code = 'soye' and profile = 'hyeobi'
   and account_type = 'retirement'

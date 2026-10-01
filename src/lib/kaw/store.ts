@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, BUILTIN_TICKERS, DEFAULT_MONTHLY_DEPOSIT, type AccountId, type AssetKey, type ProfileKey } from "./constants";
+import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, BUILTIN_TICKERS, DEFAULT_MONTHLY_DEPOSIT, type AccountId, type AssetKey, type ProfileKey, type RetirementRiskClass } from "./constants";
 import { loadFamilyData, SESSION_AUTH_KEY, SESSION_TOKEN_KEY, getSessionToken, clearSessionProfile } from "./auth";
 
 // 액세스 코드: 환경변수에 없으면 "soye" 고정
@@ -16,6 +16,10 @@ export interface HistoryEntry {
   baseAmount: number;
   totalValue: number;
   deposit: number;
+  // 리밸런싱 확정 당시의 실제 예수금(증권계좌 현금잔액). 이 필드가 생기기 전 기록에는 없다.
+  // 과거 기록의 baseAmount - totalValue 를 예수금으로 역산하면 안 된다 — 그 값은 예전
+  // 계산식(보유금액 + 불입액)에서 나온 가상값이다.
+  cashBalance?: number;
   returnPct: number | null;
   holdings?: Partial<Record<AssetKey, number>>;
   // 리밸런싱 당시 종목별 스냅샷 (rowId 기반)
@@ -47,6 +51,10 @@ export interface AssetDef {
   defaultEtf: string;
   isBuiltIn: boolean;
   ticker?: string; // KRX 6자리 종목코드 (KIS API용)
+  // 퇴직연금·IRP 위험자산 한도(70%) 계산용 분류. 종목별 명시값이며 최우선 근거다.
+  // 없으면 검증된 종목코드 분류표(VERIFIED_RETIREMENT_RISK_CLASS)를 보고, 거기에도 없으면
+  // "미확인"으로 두고 계산에서만 보수적으로 위험자산으로 센다 — group 으로 추정하지 않는다.
+  retirementRiskClass?: RetirementRiskClass;
 }
 // Per-profile, per-account row
 export interface ProfileRowDef {
@@ -70,6 +78,11 @@ export interface AccountState {
   // Data
   baseAmount: number;
   deposit: number;
+  // 실제 예수금(증권계좌의 현금잔액). 사용자가 직접 입력하는 1급 영속 상태다.
+  // ETF 평가액에서 역산하지 않는다 — 주가가 움직여도 이 값은 변하지 않아야 한다.
+  // 외부 증권사 API 연동은 없으므로 자동으로 채워지는 경로도 없다.
+  // 한 번도 입력하지 않은 계좌는 undefined 이며, 그 경우 0으로 취급한다(추정하지 않는다).
+  cashBalance?: number;
   rebalanceDate: string;
   holdings: Holding[];
   rowHoldings?: Record<string, number>;  // row instance ID → current market value
@@ -263,6 +276,9 @@ function migrateState(parsed: StoreState, injectSeed = false): StoreState {
     if (!acc.deposit) acc.deposit = DEFAULT_MONTHLY_DEPOSIT[id];
     // IRP 월 불입액이 15만원으로 잘못 저장돼 있던 값 정정 (실제 납입액 25만원)
     if (id === "irp" && acc.deposit === 150000) acc.deposit = DEFAULT_MONTHLY_DEPOSIT.irp;
+
+    // cashBalance(실제 예수금)는 기본값을 만들지 않는다. 기존 데이터에서 추정할 방법이 없으므로
+    // 사용자가 처음 입력할 때까지 undefined 로 두고, 화면에서는 0으로만 표시한다.
 
     // IRP 첫 항목 baseAmount 오류 수정 (3120898 → 3000000)
     if (injectSeed && id === "irp" && acc.history.length > 0 && acc.history[0].id === "seed-2025-12-29" && acc.history[0].baseAmount === 3120898) {
