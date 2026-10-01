@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, Wifi, WifiOff, Info, GitCompare } from "lucide-react";
+import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, Wifi, WifiOff, Info, GitCompare, History } from "lucide-react";
 import { usePortfolioStore, syncNow, getOrDefaultLibrary, formatKRW } from "@/lib/kaw/store";
 import { type FamilyData } from "@/lib/kaw/auth";
 import { useKisPriceContext, type TickerMeta } from "@/lib/kaw/KisPriceContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
-export type Page = "dashboard" | "compare" | "retirement" | "isa" | "pension" | "irp" | "settings";
+export type Page = "dashboard" | "dashboard-old" | "compare" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
 // 빌드 시점에 vite.config.ts가 baking한 실제 커밋 해시/일시 (import.meta.env.VITE_* — build 시점 값이라 항상 정확함)
 const BUILD_TIME = (import.meta.env.VITE_BUILD_TIME as string | undefined) ?? "";
@@ -15,6 +15,7 @@ export const DEPLOY_DATE = [BUILD_TIME, COMMIT_HASH].filter(Boolean).join(" · "
 
 const NAV = [
   { id: "dashboard"  as Page, label: "대시보드",    icon: LayoutDashboard, color: "text-violet-500" },
+  { id: "dashboard-old" as Page, label: "대시보드(구)", icon: History,     color: "text-slate-400" },
   { id: "compare"    as Page, label: "지수비교",    icon: GitCompare,      color: "text-cyan-500" },
   { id: "retirement" as Page, label: "퇴직연금",    icon: Building2,       color: "text-blue-500" },
   { id: "isa"        as Page, label: "ISA계좌",     icon: PiggyBank,       color: "text-emerald-500" },
@@ -184,7 +185,7 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
       {/* 메뉴 */}
       <nav className="flex-1 px-2 pt-3 pb-1 overflow-y-auto sidebar-scroll">
         {/* 대시보드 + 지수비교 */}
-        {NAV.slice(0, 2).map(({ id, label, icon: Icon, color }) => {
+        {NAV.slice(0, 3).map(({ id, label, icon: Icon, color }) => {
           const isActive = active === id;
           return (
             <button key={id} onClick={() => { onNavigate(id); onMobileClose?.(); }}
@@ -207,7 +208,7 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
 
         {/* 계좌 메뉴 */}
         <div className="space-y-0.5">
-          {NAV.slice(2).map(({ id, label, icon: Icon, color }) => {
+          {NAV.slice(3).map(({ id, label, icon: Icon, color }) => {
             const isActive = active === id;
             return (
               <button key={id} onClick={() => { onNavigate(id); onMobileClose?.(); }}

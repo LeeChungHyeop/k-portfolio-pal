@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Menu, Wallet, RefreshCw } from "lucide-react";
 import { Sidebar, type Page, DEPLOY_DATE } from "@/components/kaw/Sidebar";
 import { Dashboard } from "@/components/kaw/Dashboard";
+import { LegacyDashboard } from "@/components/kaw/LegacyDashboard";
 import { IndexComparison } from "@/components/kaw/IndexComparison";
 import { AccountPage } from "@/components/kaw/AccountPage";
 import { SettingsPage } from "@/components/kaw/SettingsPage";
@@ -173,7 +174,8 @@ export function App({ forcedDemoProfileId }: { forcedDemoProfileId?: string } = 
           <span className="text-[10px] text-muted-foreground/50 shrink-0">{DEPLOY_DATE}</span>
         </div>
 
-        {page === "dashboard"  && <Dashboard onNavigate={navigate} />}
+        {page === "dashboard"     && <Dashboard onNavigate={navigate} />}
+        {page === "dashboard-old" && <LegacyDashboard onNavigate={navigate} />}
         {page === "compare"    && <IndexComparison />}
         {page === "retirement" && <AccountPage accountId="retirement" />}
         {page === "isa"        && <AccountPage accountId="isa" />}
