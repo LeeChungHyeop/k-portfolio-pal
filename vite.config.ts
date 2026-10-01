@@ -16,8 +16,25 @@ function safeExec(cmd: string): string {
     return "unknown";
   }
 }
+// KST 고정. 예전에는 `env TZ='Asia/Seoul' date`를 썼는데 Windows/배포 셸에 따라 TZ가
+// 무시되어 UTC가 그대로 박혔다. Intl로 직접 조립해 실행 환경의 TZ에 의존하지 않는다.
+function getKstBuildTime(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}.${get("month")}.${get("day")} ${get("hour")}:${get("minute")}`;
+}
+
 const COMMIT_HASH = safeExec("git rev-parse --short HEAD");
-const BUILD_TIME = safeExec("env TZ='Asia/Seoul' date +'%Y.%m.%d %H:%M'");
+const BUILD_TIME = getKstBuildTime();
 
 // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
 // @cloudflare/vite-plugin builds from this — wrangler.jsonc main alone is insufficient.
