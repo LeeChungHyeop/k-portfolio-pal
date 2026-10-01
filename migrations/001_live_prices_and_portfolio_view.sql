@@ -41,6 +41,8 @@ grant select, insert, update on table public.kaw_live_prices to service_role;
 
 -- ═══ 2. 시세 신선도 기준 (코드 상수) ══════════════════════════════════════
 -- 시세를 오래된 값으로 볼 기준(초). 이 함수 하나만 바꾸면 view 전체에 반영된다.
+-- 900초(15분) = 예정된 갱신 주기(10분)보다 넉넉하게. 5분으로 두면 10분 주기 갱신에서
+-- 정상 캐시가 절반의 시간 동안 stale 로 표시된다.
 -- 장 마감 후·주말에는 정상적으로 stale 이 되며, 그것은 오류가 아니다.
 
 create or replace function public.kaw_price_stale_seconds()
@@ -48,10 +50,10 @@ create or replace function public.kaw_price_stale_seconds()
   language sql
   immutable
   parallel safe
-as $fn$ select 300 $fn$;
+as $fn$ select 900 $fn$;
 
 comment on function public.kaw_price_stale_seconds() is
-  '시세를 stale 로 볼 기준(초). 기본 300초(5분). 장 마감 후 stale 은 정상이다.';
+  '시세를 stale 로 볼 기준(초). 기본 900초(15분) — 예정된 갱신 주기 10분보다 넉넉하게. 장 마감 후 stale 은 정상이다.';
 
 
 -- ═══ 3. 보유종목 단위 read-only 분석 view ════════════════════════════════

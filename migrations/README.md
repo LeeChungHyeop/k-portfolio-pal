@@ -4,15 +4,16 @@
 
 | 파일 | 내용 |
 |---|---|
-| `001_live_prices_and_portfolio_view.sql` | 시세 캐시 테이블 `kaw_live_prices`, 신선도 상수 함수 `kaw_price_stale_seconds()`, 분석 view `kaw_portfolio_live_view` |
+| `001_live_prices_and_portfolio_view.sql` | 시세 캐시 테이블 `kaw_live_prices`, 신선도 상수 함수 `kaw_price_stale_seconds()`(900초), 분석 view `kaw_portfolio_live_view` |
 
 ## 데이터 흐름
 
 ```
-브라우저 ──POST /api/kis/price──► Worker ──► KIS Open API (1차)
-                                        └─► 네이버 증권 (fallback)
+브라우저 ──POST /api/kis/price──┐
+                                ├─► Worker ──► KIS Open API (1차)
+Cloudflare Cron ──scheduled()──┘          └─► 네이버 증권 (fallback)
                                    │
-          (응답은 그대로 반환)       └─ ctx.waitUntil ─► kaw_live_prices  upsert(ticker)
+          (응답은 그대로 반환)       └─ waitUntil ─► kaw_live_prices  upsert(ticker)
                                                          ▲
 리밸런싱 확정 ──POST /api/data──► kaw_data(JSONB)         │
                                      │                   │
@@ -23,14 +24,30 @@
                                               ChatGPT
 ```
 
+### 예정된 갱신 (Cloudflare Cron)
+
+`wrangler.jsonc` 의 `triggers.crons` (UTC):
+
+| cron | 한국시간 |
+|---|---|
+| `*/10 0-5 * * 1-5` | 평일 09:00 ~ 14:50, 10분 간격 |
+| `0,10,20,30,40 6 * * 1-5` | 평일 15:00 ~ 15:40, 10분 간격 |
+
+15:40(UTC 06:40) 조회값이 **장 마감 이후 최종 종가 캐시** 역할도 한다. 한국 공휴일은
+판단하지 않는다 — 월~금이면 휴장일에도 돌지만, 전 거래일 종가가 그대로 다시 적재될 뿐이다.
+
+`scheduled()` 는 `assetLibrary` 에 등록된 **unique ticker 만** 조회한다(중복 호출 없음,
+상한 50개). KIS 토큰 KV 캐시 · Naver fallback · `upsertLivePrices()` 는 브라우저 경로와
+같은 함수를 그대로 쓴다.
+
 - `/api/kis/price` 는 무인증 공개 endpoint다. 그래서 **적재 대상 ticker 를 화이트리스트로
   좁혔다** — `kaw_data` 의 `assetLibrary`(`_assetLib`/`_meta`)에 등록된 ticker + 내장 자산
   기본 ticker(`BUILTIN_TICKERS`)만 `kaw_live_prices` 에 들어간다(5분 메모리 캐시).
   화이트리스트 밖의 종목도 **가격조회 응답은 종전과 동일하게** 돌려준다 — 적재만 하지 않는다.
   화이트리스트를 확인할 수 없으면(DB 조회 실패) 그 번에는 적재를 건너뛴다.
-- 시세 캐시는 **앱이 /api/kis/price 를 호출할 때만** 갱신된다. 아무도 앱을 열지 않은
-  동안에는 마지막 성공값이 그대로 남아 있고, `price_is_stale = true` 로 표시된다.
-  장 마감 후 stale 은 정상이며 오류가 아니다.
+- 시세 캐시는 브라우저의 `/api/kis/price` 호출과 Cloudflare Cron 두 경로로 갱신된다.
+  갱신이 멈춘 동안에는 마지막 성공값이 그대로 남아 있고, 900초(`kaw_price_stale_seconds()`)를
+  넘기면 `price_is_stale = true` 로 표시된다. 장 마감 후 stale 은 정상이며 오류가 아니다.
 - 캐시에 아예 가격이 없는 종목은 `price_source = 'snapshot'` 으로, 마지막 리밸런싱
   당시 평가금액(`rowHoldingsSnap`)으로 폴백한다. 앱 화면과 같은 폴백이다.
 

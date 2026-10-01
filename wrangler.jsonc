@@ -4,6 +4,14 @@
   "compatibility_date": "2025-09-24",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
+  // 예정된 시세 갱신 (UTC). 한국시간 평일 09:00~14:50 / 15:00~15:40 을 10분 간격으로 돈다.
+  // 15:40(UTC 06:40) 조회값이 장 마감 이후 최종 종가 캐시 역할도 한다.
+  "triggers": {
+    "crons": [
+      "*/10 0-5 * * 1-5",
+      "0,10,20,30,40 6 * * 1-5"
+    ]
+  },
   "kv_namespaces": [
     { "binding": "RATE_LIMIT", "id": "3cd53d1c06d8473990d4f71a7fcfd45f" }
   ],

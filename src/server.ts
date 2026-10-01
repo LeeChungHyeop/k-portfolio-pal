@@ -7,7 +7,7 @@ import { fetchKisPrices, fetchNaverHistoryPrices } from "./lib/kaw/kis-server";
 import {
   handleAuthFamily, handleVerifyPin, handleVerifyMaster, handleVerifySecretQuestion,
   handleSetPin, handleSetMaster, handleAddProfile, handleRestoreProfile, handleDeleteProfile,
-  handleDataGet, handleDataPost, upsertLivePrices,
+  handleDataGet, handleDataPost, upsertLivePrices, listLivePriceTickers,
 } from "./lib/kaw/data-server";
 
 // Cloudflare Workers environment bindings
@@ -92,7 +92,37 @@ async function normalizeCatastrophicSsrResponse(response: Response): Promise<Res
   return brandedErrorResponse();
 }
 
+// ── 예정된 시세 갱신 (Cloudflare Cron) ──────────────────────────────────────
+// 아무도 앱을 열지 않아도 kaw_live_prices 가 최신에 가까운 값을 갖도록 주기적으로 채운다.
+// 조회 대상은 assetLibrary 에 등록된 unique ticker 만(중복 호출 없음). KIS 토큰 KV 캐시,
+// Naver fallback, 적재 로직은 모두 기존 함수를 그대로 재사용한다 — 중복 구현하지 않는다.
+async function refreshLivePrices(env: Env): Promise<void> {
+  if (!env.KIS_APP_KEY || !env.KIS_APP_SECRET) {
+    console.log("예정된 시세 갱신 생략: KIS 인증 정보 미설정");
+    return;
+  }
+  const tickers = await listLivePriceTickers(env);
+  if (!tickers.length) {
+    console.log("예정된 시세 갱신 생략: 대상 ticker 없음");
+    return;
+  }
+  const { results, timestamp } = await fetchKisPrices(
+    tickers,
+    env.KIS_APP_KEY,
+    env.KIS_APP_SECRET,
+    env.RATE_LIMIT,
+  );
+  await upsertLivePrices(env, results, timestamp);
+  const ok = Object.values(results).filter((r) => r.price > 0).length;
+  console.log(`예정된 시세 갱신: ${ok}/${tickers.length}건 성공 (${timestamp})`);
+}
+
 export default {
+  // wrangler.jsonc 의 crons 가 이 핸들러를 부른다. 앱의 요청 처리(fetch)와는 완전히 분리돼 있다.
+  async scheduled(_event: unknown, env: Env, ctx: { waitUntil: (p: Promise<unknown>) => void }) {
+    ctx.waitUntil(refreshLivePrices(env).catch((e) => console.error("예정된 시세 갱신 실패:", e)));
+  },
+
   async fetch(request: Request, env: Env, ctx: unknown) {
     const { pathname } = new URL(request.url);
 
