@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, BUILTIN_TICKERS, type AccountId, type AssetKey, type ProfileKey } from "./constants";
+import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, BUILTIN_TICKERS, DEFAULT_MONTHLY_DEPOSIT, type AccountId, type AssetKey, type ProfileKey } from "./constants";
 import { loadFamilyData, SESSION_AUTH_KEY, SESSION_TOKEN_KEY, getSessionToken, clearSessionProfile } from "./auth";
 
 // 액세스 코드: 환경변수에 없으면 "soye" 고정
@@ -193,13 +193,13 @@ function baseAccountSettings() {
   };
 }
 function seedAccount(id: AccountId): AccountState {
-  return { ...baseAccountSettings(), baseAmount: 0, deposit: 0, rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: makeHistory(SEED_HISTORY[id] ?? []) };
+  return { ...baseAccountSettings(), baseAmount: 0, deposit: DEFAULT_MONTHLY_DEPOSIT[id], rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: makeHistory(SEED_HISTORY[id] ?? []) };
 }
 function seedState(): StoreState {
   return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, seedAccount(id)])) as Record<AccountId, AccountState> };
 }
 function emptyState(): StoreState {
-  return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, { ...baseAccountSettings(), baseAmount: 0, deposit: 0, rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: [] as HistoryEntry[] }])) as Record<AccountId, AccountState> };
+  return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, { ...baseAccountSettings(), baseAmount: 0, deposit: DEFAULT_MONTHLY_DEPOSIT[id], rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: [] as HistoryEntry[] }])) as Record<AccountId, AccountState> };
 }
 function recalcReturns(history: HistoryEntry[]): HistoryEntry[] {
   return history.map((h, i) => {
@@ -258,6 +258,11 @@ function migrateState(parsed: StoreState, injectSeed = false): StoreState {
       }));
     }
     if (!acc.rebalanceDate) acc.rebalanceDate = new Date().toISOString().slice(0, 10);
+
+    // 월 불입액이 고정된 계좌(IRP 25만원 등)는 값이 없으면 기본값으로 채운다.
+    if (!acc.deposit) acc.deposit = DEFAULT_MONTHLY_DEPOSIT[id];
+    // IRP 월 불입액이 15만원으로 잘못 저장돼 있던 값 정정 (실제 납입액 25만원)
+    if (id === "irp" && acc.deposit === 150000) acc.deposit = DEFAULT_MONTHLY_DEPOSIT.irp;
 
     // IRP 첫 항목 baseAmount 오류 수정 (3120898 → 3000000)
     if (injectSeed && id === "irp" && acc.history.length > 0 && acc.history[0].id === "seed-2025-12-29" && acc.history[0].baseAmount === 3120898) {

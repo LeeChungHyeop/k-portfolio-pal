@@ -38,6 +38,12 @@ export const ACCOUNT_LABELS_SHORT: Record<AccountId,string> = {
   retirement: "퇴직연금", isa: "ISA", pension: "연금저축", irp: "IRP",
 };
 
+// 계좌별 월 불입액(이번 달 불입액) 기본값. 매달 금액이 고정된 계좌는 여기에 적어두면
+// 새 계좌·빈 값일 때 자동으로 채워진다. 0은 "매달 금액이 들쭉날쭉하니 직접 입력" 의미.
+export const DEFAULT_MONTHLY_DEPOSIT: Record<AccountId, number> = {
+  retirement: 0, isa: 0, pension: 0, irp: 250000,
+};
+
 export const GROUP_COLORS: Record<string,string> = {
   "주식":       "oklch(0.62 0.18 250)",
   "대체투자":   "oklch(0.75 0.16 75)",
