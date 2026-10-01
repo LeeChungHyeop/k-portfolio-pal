@@ -1,0 +1,127 @@
+# Supabase 마이그레이션 / read-only 분석 경로
+
+번호순으로 **Supabase 대시보드 → SQL Editor** 에 붙여넣고 Run 한다. 모두 idempotent 다.
+
+| 파일 | 내용 |
+|---|---|
+| `001_live_prices_and_portfolio_view.sql` | 시세 캐시 테이블 `kaw_live_prices`, 신선도 상수 함수 `kaw_price_stale_seconds()`, 분석 view `kaw_portfolio_live_view` |
+
+## 데이터 흐름
+
+```
+브라우저 ──POST /api/kis/price──► Worker ──► KIS Open API (1차)
+                                        └─► 네이버 증권 (fallback)
+                                   │
+          (응답은 그대로 반환)       └─ ctx.waitUntil ─► kaw_live_prices  upsert(ticker)
+                                                         ▲
+리밸런싱 확정 ──POST /api/data──► kaw_data(JSONB)         │
+                                     │                   │
+                                     └──► kaw_portfolio_live_view ◄┘
+                                                │
+                                        service_role 연결만 SELECT
+                                                │
+                                              ChatGPT
+```
+
+- `/api/kis/price` 는 무인증 공개 endpoint다. 그래서 **적재 대상 ticker 를 화이트리스트로
+  좁혔다** — `kaw_data` 의 `assetLibrary`(`_assetLib`/`_meta`)에 등록된 ticker + 내장 자산
+  기본 ticker(`BUILTIN_TICKERS`)만 `kaw_live_prices` 에 들어간다(5분 메모리 캐시).
+  화이트리스트 밖의 종목도 **가격조회 응답은 종전과 동일하게** 돌려준다 — 적재만 하지 않는다.
+  화이트리스트를 확인할 수 없으면(DB 조회 실패) 그 번에는 적재를 건너뛴다.
+- 시세 캐시는 **앱이 /api/kis/price 를 호출할 때만** 갱신된다. 아무도 앱을 열지 않은
+  동안에는 마지막 성공값이 그대로 남아 있고, `price_is_stale = true` 로 표시된다.
+  장 마감 후 stale 은 정상이며 오류가 아니다.
+- 캐시에 아예 가격이 없는 종목은 `price_source = 'snapshot'` 으로, 마지막 리밸런싱
+  당시 평가금액(`rowHoldingsSnap`)으로 폴백한다. 앱 화면과 같은 폴백이다.
+
+## view 조회 시 반드시 필터할 것
+
+`kaw_data` 에는 과거 테스트용 `family_code`(`khnp`, `asdf`, `adf32`, `thedrunken`,
+`soyf`, `soye2024` …)와 프로필(`test`, `dayoung`)이 함께 남아 있다.
+실제 데이터는 `family_code = 'soye'`, `profile = 'hyeobi'` 다.
+
+```sql
+-- ① 계좌별 요약: 최근 확정 리밸런싱일 / 평가액 / 기준금액
+select account_type,
+       max(rebalance_date)            as 최근확정일,
+       max(portfolio_market_value)    as 현재평가액,
+       max(deposit)                   as 이번회차불입액,
+       max(rebalance_base_amount)      as 리밸런싱기준금액,
+       bool_or(price_is_stale)        as 시세오래됨
+from public.kaw_portfolio_live_view
+where family_code = 'soye' and profile = 'hyeobi'
+group by account_type
+order by 현재평가액 desc;
+```
+
+```sql
+-- ② 퇴직연금 보유종목 상세 (요청한 전체 항목)
+select rebalance_date      as 최근확정일,
+       etf_name            as "ETF명",
+       ticker,
+       quantity            as 보유수량,
+       price               as 현재가,
+       price_source        as 가격출처,
+       price_fetched_at    as 시세시각,
+       price_age_seconds   as 시세경과초,
+       price_is_stale      as 시세오래됨,
+       market_value        as 현재평가금액,
+       current_weight_pct  as 현재평가비중,
+       target_weight_pct   as 목표비중,
+       target_value        as 목표금액,
+       rebalance_diff      as 목표대비차액,
+       in_target_profile   as 성향내종목,
+       deposit             as 이번회차불입액,
+       portfolio_market_value as 계좌전체평가금액,
+       rebalance_base_amount  as 리밸런싱기준금액
+from public.kaw_portfolio_live_view
+where family_code = 'soye' and profile = 'hyeobi'
+  and account_type = 'retirement'
+order by market_value desc;
+```
+
+```sql
+-- ③ 전 계좌 합산 + 종목별 통합 비중
+with v as (
+  select * from public.kaw_portfolio_live_view
+  where family_code = 'soye' and profile = 'hyeobi'
+)
+select etf_name,
+       sum(quantity)     as 총수량,
+       sum(market_value) as 평가금액,
+       round(sum(market_value) / (select sum(market_value) from v) * 100, 2) as 전체비중
+from v
+group by etf_name
+order by 평가금액 desc;
+```
+
+```sql
+-- ④ 리밸런싱 액션만 (±1만원 이상 차이나는 종목)
+select account_type, etf_name, ticker,
+       case when rebalance_diff > 0 then '매수' else '매도' end as 방향,
+       abs(rebalance_diff)                 as 금액,
+       floor(abs(rebalance_diff) / price)  as 예상수량
+from public.kaw_portfolio_live_view
+where family_code = 'soye' and profile = 'hyeobi'
+  and price is not null
+  and abs(rebalance_diff) >= 10000
+order by abs(rebalance_diff) desc;
+```
+
+```sql
+-- ⑤ 성향에서 지워졌지만 아직 보유 중인 종목 (전량 매도 대상)
+select account_type, etf_name, quantity, market_value, target_weight_pct
+from public.kaw_portfolio_live_view
+where family_code = 'soye' and profile = 'hyeobi'
+  and not in_target_profile;
+```
+
+## 권한
+
+- `kaw_live_prices`: RLS on, **정책 0개** → `anon`/`authenticated` 는 전부 차단.
+  `anon`/`authenticated` 에서 GRANT 도 회수. `service_role` 만 select/insert/update.
+- `kaw_portfolio_live_view`: `security_invoker = true` 로 만들었으므로 조회자의 권한으로
+  `kaw_data` 를 읽는다. 즉 view 를 통한 권한 우회가 불가능하다. `anon`/`authenticated`
+  GRANT 회수, `service_role` 만 select.
+- ChatGPT 는 `service_role`(또는 Supabase MCP 의 관리 연결)로 **SELECT 만** 하면 된다.
+  공개 API URL 에 키를 붙이는 경로는 만들지 않았다.

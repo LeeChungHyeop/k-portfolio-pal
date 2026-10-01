@@ -2,7 +2,7 @@
 // Supabase는 여기(service_role 키)에서만 접근하고, 브라우저는 이 모듈이 노출하는
 // 인증된 API를 통해서만 데이터를 읽고 쓴다.
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { ACCOUNT_IDS } from "./constants";
+import { ACCOUNT_IDS, BUILTIN_TICKERS } from "./constants";
 
 interface KVLike {
   get(key: string): Promise<string | null>;
@@ -433,4 +433,99 @@ export async function handleDataPost(request: Request, env: DataEnv): Promise<Re
   const { error } = await client.from("kaw_data").upsert(sanitized, { onConflict: "family_code,profile,account_type" });
   if (error) return json({ error: error.message }, 500);
   return json({ ok: true });
+}
+
+// ── 시세 캐시용 ticker 화이트리스트 ────────────────────────────────────────
+// /api/kis/price 는 무인증 공개 endpoint다. 거기서 받은 임의 종목코드를 그대로 DB에 적재하면
+// 외부에서 캐시 테이블에 쓰레기 행을 늘릴 수 있으므로, **적재 대상만** 화이트리스트로 좁힌다.
+// (가격조회 응답 자체는 종전과 똑같이 돌려준다 — 막지 않는다.)
+//
+//   library  = kaw_data의 assetLibrary(_assetLib/_meta)에 등록된 ticker. 예정된 갱신(cron)이 조회할 대상.
+//   allowed  = library + 내장 자산 기본 ticker(BUILTIN_TICKERS). 적재 허용 집합.
+//              앱의 getOrDefaultLibrary()가 ticker 없는 내장 종목을 BUILTIN_TICKERS로 보완하므로,
+//              DB에 ticker가 비어 있는 내장 종목도 정상 조회 대상이 될 수 있다.
+const TICKER_RE = /^[A-Z0-9]{6}$/;
+const TICKER_SETS_TTL_MS = 5 * 60_000;
+
+interface TickerSets {
+  library: Set<string>;
+  allowed: Set<string>;
+}
+let tickerSetsCache: { at: number; sets: TickerSets } | null = null;
+
+async function loadTickerSets(client: SupabaseClient): Promise<TickerSets | null> {
+  const now = Date.now();
+  if (tickerSetsCache && now - tickerSetsCache.at < TICKER_SETS_TTL_MS) return tickerSetsCache.sets;
+
+  const { data, error } = await client
+    .from("kaw_data")
+    .select("data")
+    .in("account_type", ["_assetLib", "_meta"]);
+  // 조회 실패 시에는 캐시하지 않고 null — 호출자가 "이번엔 적재 생략"으로 안전하게 처리한다.
+  if (error) {
+    console.error("[kaw] 시세 화이트리스트 조회 실패:", error.message);
+    return null;
+  }
+
+  const library = new Set<string>();
+  for (const row of data ?? []) {
+    const lib = (row.data as { assetLibrary?: unknown } | null)?.assetLibrary;
+    if (!Array.isArray(lib)) continue;
+    for (const d of lib) {
+      const raw = (d as { ticker?: unknown })?.ticker;
+      const t = typeof raw === "string" ? raw.toUpperCase() : "";
+      if (TICKER_RE.test(t)) library.add(t);
+    }
+  }
+  const allowed = new Set(library);
+  for (const t of Object.values(BUILTIN_TICKERS)) if (t) allowed.add(t.toUpperCase());
+
+  const sets = { library, allowed };
+  tickerSetsCache = { at: now, sets };
+  return sets;
+}
+
+// 예정된 갱신(cron)이 조회할 종목 목록 — assetLibrary에 등록된 unique ticker만, 중복 없이.
+// 한 번의 실행이 과하게 길어지지 않도록 상한을 둔다(종목 간 100ms 간격으로 순차 조회하므로).
+const SCHEDULED_TICKER_LIMIT = 50;
+
+export async function listLivePriceTickers(env: DataEnv): Promise<string[]> {
+  const client = serviceClient(env);
+  if (!client) return [];
+  const sets = await loadTickerSets(client);
+  if (!sets) return [];
+  return [...sets.library].sort().slice(0, SCHEDULED_TICKER_LIMIT);
+}
+
+// ── 실시간 시세 캐시 적재 (read-only 분석 경로용) ──────────────────────────
+// /api/kis/price 의 응답 내용·형식은 전혀 건드리지 않는다. 이미 만들어진 결과를 받아
+// 성공한 시세만 public.kaw_live_prices 에 ticker당 1행으로 덮어쓰는 부가 작업이다.
+// 실패(source: "failed")는 쓰지 않는다 — 마지막 성공값을 남겨두는 편이 분석에 유용하고,
+// 일시적 실패가 캐시를 지워버리는 일도 막는다.
+export async function upsertLivePrices(
+  env: DataEnv,
+  results: Record<string, { price: number; source: string }>,
+  fetchedAt: string,
+): Promise<void> {
+  const client = serviceClient(env);
+  if (!client) return;
+  const candidates = Object.entries(results).filter(
+    ([, r]) => r.price > 0 && (r.source === "kis" || r.source === "naver"),
+  );
+  if (!candidates.length) return;
+
+  const sets = await loadTickerSets(client);
+  if (!sets) return; // 화이트리스트를 확인할 수 없으면 적재하지 않는다
+  const rows = candidates
+    .filter(([ticker]) => sets.allowed.has(ticker.toUpperCase()))
+    .map(([ticker, r]) => ({
+      ticker: ticker.toUpperCase(),
+      price: r.price,
+      source: r.source,
+      fetched_at: fetchedAt,
+    }));
+  if (!rows.length) return;
+
+  const { error } = await client.from("kaw_live_prices").upsert(rows, { onConflict: "ticker" });
+  if (error) console.error("[kaw] 시세 캐시 적재 실패:", error.message);
 }

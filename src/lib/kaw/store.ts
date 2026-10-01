@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, type AccountId, type AssetKey, type ProfileKey } from "./constants";
+import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, BUILTIN_TICKERS, type AccountId, type AssetKey, type ProfileKey } from "./constants";
 import { loadFamilyData, SESSION_AUTH_KEY, SESSION_TOKEN_KEY, getSessionToken, clearSessionProfile } from "./auth";
 
 // 액세스 코드: 환경변수에 없으면 "soye" 고정
@@ -86,17 +86,8 @@ export interface StoreState {
 }
 
 // ── Built-in ticker codes (KRX 6자리) ─────────────────────────────────────
-export const BUILTIN_TICKERS: Partial<Record<AssetKey, string>> = {
-  us:    "360750",
-  kr:    "294400",
-  cn:    "283580",
-  in:    "453810",
-  gold:  "0072R0",
-  ust10: "0085P0",
-  ust30: "484790",
-  ktb30: "385560",
-  cash:  "429000",
-};
+// 정의는 constants.ts로 옮겼다(서버 전용 모듈도 써야 해서). 기존 import 경로 호환용 재export.
+export { BUILTIN_TICKERS } from "./constants";
 
 // ── Global asset library helper ────────────────────────────────────────────
 export function getOrDefaultLibrary(state: StoreState): AssetDef[] {

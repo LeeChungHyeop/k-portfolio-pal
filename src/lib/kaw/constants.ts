@@ -44,3 +44,17 @@ export const GROUP_COLORS: Record<string,string> = {
   "안전자산":   "oklch(0.55 0.14 160)",
   "현금성자산": "oklch(0.65 0.05 250)",
 };
+
+// 내장 자산의 KRX 6자리 종목코드. 서버(Worker) 전용 모듈에서도 써야 해서 store.ts가 아니라
+// 여기(React 의존성 없는 공용 모듈)에 둔다. store.ts는 호환을 위해 그대로 재export한다.
+export const BUILTIN_TICKERS: Partial<Record<AssetKey, string>> = {
+  us:    "360750",
+  kr:    "294400",
+  cn:    "283580",
+  in:    "453810",
+  gold:  "0072R0",
+  ust10: "0085P0",
+  ust30: "484790",
+  ktb30: "385560",
+  cash:  "429000",
+};

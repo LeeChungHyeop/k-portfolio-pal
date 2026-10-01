@@ -7,7 +7,7 @@ import { fetchKisPrices, fetchNaverHistoryPrices } from "./lib/kaw/kis-server";
 import {
   handleAuthFamily, handleVerifyPin, handleVerifyMaster, handleVerifySecretQuestion,
   handleSetPin, handleSetMaster, handleAddProfile, handleRestoreProfile, handleDeleteProfile,
-  handleDataGet, handleDataPost,
+  handleDataGet, handleDataPost, upsertLivePrices,
 } from "./lib/kaw/data-server";
 
 // Cloudflare Workers environment bindings
@@ -127,6 +127,13 @@ export default {
         const tickers = Array.isArray(body?.tickers) ? (body.tickers as string[]).filter(t => typeof t === "string" && /^[A-Z0-9]{6}$/i.test(t)).slice(0, 20) : [];
         if (!tickers.length) return Response.json({ results: {}, timestamp: new Date().toISOString() });
         const { results, timestamp } = await fetchKisPrices(tickers, env.KIS_APP_KEY, env.KIS_APP_SECRET, env.RATE_LIMIT);
+        // 응답은 그대로 내려주고, read-only 분석용 시세 캐시 적재는 백그라운드 best-effort로만 처리한다.
+        // 실패해도 이 요청의 응답에는 영향이 없다.
+        const cacheWrite = upsertLivePrices(env, results, timestamp).catch((e) =>
+          console.error("시세 캐시 적재 실패:", e),
+        );
+        const waitUntil = (ctx as { waitUntil?: (p: Promise<unknown>) => void } | null)?.waitUntil;
+        if (typeof waitUntil === "function") waitUntil.call(ctx, cacheWrite);
         return Response.json({ results, timestamp }, { headers: { "Cache-Control": "no-store" } });
       } catch (err) {
         console.error("KIS price error:", err);
