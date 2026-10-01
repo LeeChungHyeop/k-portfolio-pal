@@ -44,12 +44,18 @@ grant select, insert, update on table public.kaw_live_prices to service_role;
 -- 900초(15분) = 예정된 갱신 주기(10분)보다 넉넉하게. 5분으로 두면 10분 주기 갱신에서
 -- 정상 캐시가 절반의 시간 동안 stale 로 표시된다.
 -- 장 마감 후·주말에는 정상적으로 stale 이 되며, 그것은 오류가 아니다.
+--
+-- search_path 를 pg_catalog 로 고정한다: 고정하지 않으면 Supabase security advisor 가
+-- function_search_path_mutable 경고를 띄운다(호출자 search_path 에 따라 함수 안에서 참조되는
+-- 이름이 바뀔 수 있는 상태). 이 함수는 상수만 돌려주지만 새 DB 에 처음 적용할 때도
+-- 경고가 나오지 않도록 정의 자체에 포함해 둔다.
 
 create or replace function public.kaw_price_stale_seconds()
   returns integer
   language sql
   immutable
   parallel safe
+  set search_path = pg_catalog
 as $fn$ select 900 $fn$;
 
 comment on function public.kaw_price_stale_seconds() is

@@ -4,7 +4,7 @@
 
 | 파일 | 내용 |
 |---|---|
-| `001_live_prices_and_portfolio_view.sql` | 시세 캐시 테이블 `kaw_live_prices`, 신선도 상수 함수 `kaw_price_stale_seconds()`(900초), 분석 view `kaw_portfolio_live_view` |
+| `001_live_prices_and_portfolio_view.sql` | 시세 캐시 테이블 `kaw_live_prices`, 신선도 상수 함수 `kaw_price_stale_seconds()`(900초, `search_path = pg_catalog` 고정), 분석 view `kaw_portfolio_live_view` |
 
 ## 데이터 흐름
 
@@ -142,3 +142,7 @@ where family_code = 'soye' and profile = 'hyeobi'
   GRANT 회수, `service_role` 만 select.
 - ChatGPT 는 `service_role`(또는 Supabase MCP 의 관리 연결)로 **SELECT 만** 하면 된다.
   공개 API URL 에 키를 붙이는 경로는 만들지 않았다.
+- `kaw_price_stale_seconds()` 는 정의에 `set search_path = pg_catalog` 가 들어 있다.
+  고정하지 않으면 Supabase security advisor 가 `function_search_path_mutable` 경고를 띄운다.
+  production DB 에는 이미 `ALTER FUNCTION ... SET search_path = pg_catalog` 로 적용돼 있고,
+  001 을 새 DB 에 처음 적용할 때도 같은 상태가 되도록 정의에 포함했다.
