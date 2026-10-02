@@ -430,8 +430,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               onClick={() => onNavigate(kpiScope as Page)}
               className="flex items-center gap-0.5 text-xs text-violet-600 dark:text-violet-300 hover:underline shrink-0"
             >
-              {ACCOUNT_LABELS_SHORT[kpiScope]} 계좌 열기
-              <ChevronRight className="w-3.5 h-3.5" />
+              <span className="whitespace-nowrap">리밸런싱</span>
+              <ChevronRight className="w-3.5 h-3.5 shrink-0" />
             </button>
           )}
         </div>

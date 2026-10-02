@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar as DateCalendar } from "@/components/ui/calendar";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon, ShieldAlert, Banknote, Check } from "lucide-react";
+import { Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon, ShieldAlert, Banknote, Check } from "lucide-react";
 import { toast } from "sonner";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { syncGrowthBacktest } from "@/lib/kaw/backtest";
@@ -222,7 +222,7 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
    리밸런싱 탭
 ───────────────────────────────────────────── */
 function RebalanceTab({ accountId }: { accountId: AccountId }) {
-  const { state, updateAccount, updateRowHolding, addHistory, saveAccountQuantities, setHistoryBacktest,
+  const { state, updateAccount, updateRowHolding, finalizeRebalance, saveAccountQuantities, setHistoryBacktest,
     confirmContributionDeposit } = usePortfolioStore();
   const account = state.accounts[accountId];
   const library = getOrDefaultLibrary(state);
@@ -469,6 +469,17 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   });
   const effectiveTotal = effectiveRows.reduce((s, r) => s + r.value, 0);
 
+  // 현재가 기준으로 계산한 "예상" 잔여현금. 실제 체결가/수수료/호가 차이 때문에
+  // 증권사 원화예수금과 다를 수 있으므로 완료 단계에서 실제 값을 다시 확인받는다.
+  const estimatedRemainingCash = Math.max(0, Math.round(effectiveBase - effectiveTotal));
+  const [finalizeOpen, setFinalizeOpen] = useState(false);
+  const [finalCashBalance, setFinalCashBalance] = useState(0);
+
+  function openFinalizeDialog() {
+    setFinalCashBalance(estimatedRemainingCash);
+    setFinalizeOpen(true);
+  }
+
   // 퇴직연금·IRP 위험자산 한도(70%) — 목표비중이 아니라 "지금 입력된 수량 x 가격 + 실제 예수금"
   // 기준으로 다시 본다. 정수 주 단위 매매 때문에 목표가 30%여도 실제 결과가 미달할 수 있고,
   // 매수 이후 시장가격 변동만으로도 70%를 넘을 수 있다. 예수금은 위험자산이 아니지만
@@ -488,17 +499,10 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     [accountId, effectiveRows, account.cashBalance, library],
   );
 
-  // ── 스냅샷 ─────────────────────────────────────────────────────────────
-  function snapshotNow() {
-    // 비중 규칙 위반 여부와 무관하게 항상 저장한다 — 이 화면은 "실제 상태를 기록"하는 곳이고,
-    // 가격 변동으로 한도를 넘긴 보유는 즉시 매도 의무 없이 유지할 수 있다.
-    // 목표비중 30% 규칙은 설정 → 투자성향 저장 단계에서 막는다.
-    if (isLiveActive) {
-      // 라이브 평가금액을 store에 반영 후 저장
-      effectiveRows.forEach((r) => {
-        if (r.value > 0) updateRowHolding(accountId, r.rowId, r.value);
-      });
-    }
+  // ── 리밸런싱 완료 ────────────────────────────────────────────────────────
+  function completeRebalance(finalCash: number) {
+    // 비중 규칙 위반 여부와 무관하게 실제 완료 상태는 저장한다. 이 화면은 주문 계획이 아니라
+    // "실제 체결 후 계좌 상태"를 확정하는 마지막 단계다.
     const holdingsSnap: Partial<Record<AssetKey, number>> = {};
     effectiveRows.forEach((r) => {
       if (r.value > 0 && ASSET_ORDER.includes(r.assetId as AssetKey)) {
@@ -506,26 +510,40 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         holdingsSnap[k] = (holdingsSnap[k] ?? 0) + r.value;
       }
     });
-    const newEntry: Omit<HistoryEntry, "returnPct"> = {
+
+    const rowHoldingsSnap = Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.value]));
+    const entryBase = {
       id: crypto.randomUUID(),
       date: account.rebalanceDate,
       baseAmount: effectiveBase,
       totalValue: effectiveTotal,
       deposit: account.deposit,
-      // 미입력(undefined)이면 키를 남기지 않는다 — 과거 기록과 똑같이 "모름"으로 구분된다.
-      ...(cashEntered ? { cashBalance } : {}),
       holdings: holdingsSnap,
-      rowHoldingsSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.value])),
-      rowQuantitiesSnap: { ...quantities },
       rowEtfSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.etfName])),
       rowLabelSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.label])),
       rowAssetSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.assetId])),
     };
-    addHistory(accountId, newEntry);
-    toast.success("리밸런싱이 저장됐습니다");
-    setFrozenInvested(null); // 저장 직후 이어서 조정할 수 있게, 방금 저장한 상태를 새 기준으로 다시 고정
-    // 케이올웨더 성장형 백테스트 값도 조용히 같이 계산해서 저장 (지수비교 메뉴에서 재사용)
-    syncGrowthBacktest([...account.history, { ...newEntry, returnPct: null }])
+
+    finalizeRebalance(accountId, {
+      cashBalance: finalCash,
+      quantities: { ...quantities },
+      rowHoldings: rowHoldingsSnap,
+      entry: entryBase,
+    });
+
+    setFinalizeOpen(false);
+    toast.success(`리밸런싱 완료 · 예수금 ${formatKRW(finalCash)}원 반영`);
+    setFrozenInvested(null);
+
+    // 성장형 백테스트도 "완료된 실제 상태"와 같은 히스토리 시점에 저장한다.
+    const backtestEntry: HistoryEntry = {
+      ...entryBase,
+      cashBalance: finalCash,
+      rowHoldingsSnap,
+      rowQuantitiesSnap: { ...quantities },
+      returnPct: null,
+    };
+    syncGrowthBacktest([...account.history, backtestEntry])
       .then((result) => setHistoryBacktest(accountId, result))
       .catch(() => { /* 실패해도 무시 — 지수비교 메뉴에서 다시 시도됨 */ });
   }
@@ -814,13 +832,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
             )}
           </div>
           <div>
-            <label className="text-xs text-muted-foreground">실제 예수금 (원)</label>
+            <label className="text-xs text-muted-foreground">현재 예수금 (매매 전)</label>
             <NumberInput value={cashBalance}
               onChange={(v) => updateAccount(accountId, { cashBalance: v })}
               placeholder={cashEntered ? "0" : "입력 필요"}
               className={`mt-1 font-semibold ${cashEntered ? "" : "border-amber-500/60"}`} />
             <p className={`text-[10px] mt-1 ${cashEntered ? "text-muted-foreground" : "text-amber-500 font-medium"}`}>
-              {cashEntered ? "증권사 앱의 예수금을 그대로 입력" : "실제 예수금을 입력해주세요"}
+              {cashEntered ? "리밸런싱 시작 전 잔액 · 매매 후 예수금은 완료 단계에서 다시 확인" : "리밸런싱 시작 전 실제 예수금을 입력해주세요"}
             </p>
           </div>
           <div>
@@ -1015,12 +1033,64 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
 
         <div className="flex items-center justify-end gap-3">
           <Button
-            onClick={snapshotNow}
+            onClick={openFinalizeDialog}
             disabled={effectiveTotal <= 0 || dateMode === "future"}
           >
-            <Camera className="w-4 h-4 mr-1.5" /> 리밸런싱 저장
+            <Check className="w-4 h-4 mr-1.5" /> 리밸런싱 완료
           </Button>
         </div>
+
+        <Dialog open={finalizeOpen} onOpenChange={setFinalizeOpen}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="text-base">리밸런싱 완료 확인</DialogTitle>
+            </DialogHeader>
+
+            <div className="space-y-3 text-sm">
+              <div className="rounded-lg bg-muted/40 border px-3 py-2.5 space-y-1.5">
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">리밸런싱 전 총자산</span>
+                  <span className="tabular-nums font-medium">{formatKRW(effectiveBase)}원</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">완료 수량 ETF 평가액</span>
+                  <span className="tabular-nums font-medium">{formatKRW(effectiveTotal)}원</span>
+                </div>
+                <div className="flex justify-between gap-3 pt-1 border-t">
+                  <span className="text-muted-foreground">현재가 기준 예상 예수금</span>
+                  <span className="tabular-nums font-semibold text-violet-600 dark:text-violet-400">
+                    {formatKRW(estimatedRemainingCash)}원
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium">매매 완료 후 실제 원화예수금</label>
+                <NumberInput
+                  value={finalCashBalance}
+                  onChange={setFinalCashBalance}
+                  className="mt-1 font-semibold"
+                  placeholder="0"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  예상값은 현재가 기준 참고값입니다. 실제 체결 후 증권사 앱의 원화예수금을 입력해주세요.
+                </p>
+              </div>
+
+              <div className="flex justify-between gap-3 rounded-lg border px-3 py-2.5">
+                <span className="text-muted-foreground">확정 총자산</span>
+                <span className="tabular-nums font-bold">{formatKRW(effectiveTotal + finalCashBalance)}원</span>
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button variant="ghost" onClick={() => setFinalizeOpen(false)}>취소</Button>
+              <Button onClick={() => completeRebalance(finalCashBalance)}>
+                <Check className="w-4 h-4 mr-1" /> 완료 저장
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </Card>
     </div>
   );
