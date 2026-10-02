@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar as DateCalendar } from "@/components/ui/calendar";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon, ShieldAlert, Banknote, Check } from "lucide-react";
+import { Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon, ShieldAlert, Banknote, Check } from "lucide-react";
 import { toast } from "sonner";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { syncGrowthBacktest } from "@/lib/kaw/backtest";
