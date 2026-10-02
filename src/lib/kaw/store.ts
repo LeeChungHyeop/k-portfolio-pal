@@ -773,6 +773,52 @@ export function usePortfolioStore() {
       dbSave(familyCode, currentUser, memState).catch(console.error);
     }
   }, []);
+
+  // ── 리밸런싱 완료 저장 ────────────────────────────────────────────────────
+  // 보유수량/평가액/예수금/history 를 한 번의 state update 로 확정한다.
+  // 예수금은 매매 전 값을 그대로 들고 가면 안 된다 — 실제 주문이 끝난 뒤 증권사 잔액을
+  // 사용자가 확인해서 넘기며, 그 값을 현재 계좌 상태와 history 양쪽에 같은 값으로 저장한다.
+  // 외부 입출금(cashflow)은 건드리지 않는다. 리밸런싱은 계좌 내부 자산형태 변화일 뿐이다.
+  const finalizeRebalance = useCallback((
+    id: AccountId,
+    args: {
+      cashBalance: number;
+      quantities: Record<string, number>;
+      rowHoldings: Record<string, number>;
+      entry: Omit<HistoryEntry, "returnPct" | "cashBalance" | "rowQuantitiesSnap" | "rowHoldingsSnap">;
+    },
+  ) => {
+    const finalCash = Math.max(0, Math.round(args.cashBalance));
+    setState((s) => {
+      const acc = s.accounts[id];
+      const nextEntry: HistoryEntry = {
+        ...args.entry,
+        cashBalance: finalCash,
+        rowQuantitiesSnap: { ...args.quantities },
+        rowHoldingsSnap: { ...args.rowHoldings },
+        returnPct: null,
+      };
+      const sorted = [...acc.history, nextEntry].sort((a, b) => a.date.localeCompare(b.date));
+      return {
+        ...s,
+        accounts: {
+          ...s.accounts,
+          [id]: {
+            ...acc,
+            cashBalance: finalCash,
+            liveQuantities: { ...(acc.liveQuantities ?? {}), ...args.quantities },
+            rowHoldings: { ...(acc.rowHoldings ?? {}), ...args.rowHoldings },
+            history: recalcReturns(sorted),
+          },
+        },
+      };
+    });
+    // setState 는 memState 를 동기적으로 갱신한다. 완료 버튼 직후 바로 서버에도 반영해
+    // 다른 기기/대시보드가 오래된 예수금을 보는 시간을 최소화한다.
+    if (familyCode && currentUser && memState) {
+      dbSave(familyCode, currentUser, memState).catch(console.error);
+    }
+  }, []);
   const removeHistory   = useCallback((id: AccountId, hid: string) =>
     setState((s) => {
       const acc = s.accounts[id];
@@ -958,7 +1004,7 @@ export function usePortfolioStore() {
     hasSupabase,
     setProfile, setAllocation, resetAllocation,
     updateAccount, updateHolding,
-    addHistory, removeHistory, updateHistory, setHistoryBacktest,
+    addHistory, finalizeRebalance, removeHistory, updateHistory, setHistoryBacktest,
     resetAll, importJson,
     setAccountActive, setAccountProfile,
     setAccountAllocation, resetAccountAllocations,
