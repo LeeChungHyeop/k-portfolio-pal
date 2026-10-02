@@ -1,6 +1,14 @@
 import { useEffect, useState, useCallback } from "react";
-import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, BUILTIN_TICKERS, DEFAULT_MONTHLY_DEPOSIT, type AccountId, type AssetKey, type ProfileKey, type RetirementRiskClass } from "./constants";
+import { ASSET_ORDER, ASSET_GROUPS, PROFILE_PRESETS, ACCOUNT_IDS, BUILTIN_TICKERS, DEFAULT_MONTHLY_DEPOSIT, CONTRIBUTION_SCHEDULE_SEED, type AccountId, type AssetKey, type ProfileKey, type RetirementRiskClass } from "./constants";
 import { loadFamilyData, SESSION_AUTH_KEY, SESSION_TOKEN_KEY, getSessionToken, clearSessionProfile } from "./auth";
+import {
+  buildMigratedCashflows, periodOf,
+  type CashflowEntry,
+} from "./cashflow";
+import {
+  confirmContribution, upsertAmountVersion,
+  type RecurringContributionSchedule, type ContributionAmountVersion,
+} from "./contribution";
 
 // 액세스 코드: 환경변수에 없으면 "soye" 고정
 export const ACCESS_CODE: string = import.meta.env.VITE_ACCESS_CODE || "soye";
@@ -83,6 +91,13 @@ export interface AccountState {
   // 외부 증권사 API 연동은 없으므로 자동으로 채워지는 경로도 없다.
   // 한 번도 입력하지 않은 계좌는 undefined 이며, 그 경우 0으로 취급한다(추정하지 않는다).
   cashBalance?: number;
+  // 외부 입출금 장부. **누적 납입원금의 유일한 근거**다 (= amount 합).
+  // cashBalance 를 여기에 더하지 않는다 — 예수금은 이미 납입된 돈의 현재 형태일 뿐이다.
+  // 기존 데이터는 hydration 때 history 에서 무손실 복원된다(cashflow.ts buildMigratedCashflows).
+  cashflows?: CashflowEntry[];
+  // 정기납입 스케줄(예정값). 실제 입금은 사용자가 "입금 확인"을 눌러야 cashflows 에 들어간다.
+  // 금액은 effectiveFrom + amount 버전으로 쌓아 과거 월의 계산이 변하지 않게 한다.
+  contributionSchedule?: RecurringContributionSchedule;
   rebalanceDate: string;
   holdings: Holding[];
   rowHoldings?: Record<string, number>;  // row instance ID → current market value
@@ -287,6 +302,30 @@ function migrateState(parsed: StoreState, injectSeed = false): StoreState {
 
     // 히스토리를 날짜 오름차순으로 정렬 (역순 저장 데이터 대응)
     acc.history = [...acc.history].sort((a, b) => a.date.localeCompare(b.date));
+
+    // cashflow 장부 복원 (1회). 기존 계산식의 두 조각(첫 기록의 baseAmount + 이후 deposit)을
+    // 날짜가 붙은 흐름으로 **무손실 재표현**하므로 누적 납입원금은 1원도 달라지지 않는다.
+    // 추정은 하지 않는다 — cashBalance 나 baseAmount - totalValue 역산은 넣지 않는다.
+    // 빈 배열([])도 "이미 복원됨"으로 보기 때문에 다시 migration 하지 않는다.
+    if (!Array.isArray(acc.cashflows)) acc.cashflows = buildMigratedCashflows(acc.history);
+
+    // 정기납입 스케줄 최초 생성 (1회). 금액은 코드에 박지 않고 **이 계좌에 이미 저장된
+    // deposit**(사용자가 입력해둔 월 납입액)을 첫 금액 버전으로 옮긴다. 적용 시작월은
+    // 생성 시점의 월이므로 그 이전 달은 pending 으로 뜨지 않는다 — 과거를 추정하지 않는다.
+    // 만들고 나면 이 블록은 다시 돌지 않고, 이후로는 계좌에 저장된 설정만이 근거다.
+    if (!acc.contributionSchedule) {
+      const seed = CONTRIBUTION_SCHEDULE_SEED[id];
+      const amount = Math.max(0, acc.deposit ?? 0);
+      acc.contributionSchedule = {
+        id: `sched:${id}`,
+        enabled: seed.enabled && amount > 0,
+        dayOfMonth: seed.dayOfMonth,
+        timing: seed.timing,
+        amountVersions: amount > 0
+          ? [{ effectiveFrom: new Date().toISOString().slice(0, 7), amount }]
+          : [],
+      };
+    }
 
     // Migrate to row-based asset management (legacy)
     if (!acc.assetRows?.length) {
@@ -724,6 +763,9 @@ export function usePortfolioStore() {
     setState((s) => {
       const acc = s.accounts[id];
       const sorted = [...acc.history, { ...entry, returnPct: null }].sort((a, b) => a.date.localeCompare(b.date));
+      // 리밸런싱 저장은 cashflow 를 만들거나 수정하지 않는다. 입금과 리밸런싱은 독립된
+      // 이벤트이고(입금 → 예수금 → 나중에 매수), 외부 입금은 정기납입 "입금 확인" 또는
+      // 수동 기록으로만 장부에 들어온다. history.deposit 은 과거 호환·기록용으로만 남는다.
       return { ...s, accounts: { ...s.accounts, [id]: { ...acc, history: recalcReturns(sorted) } } };
     });
     // 리밸런싱 저장은 즉시 DB에 반영 (디바운스 누락 방지)
@@ -775,6 +817,91 @@ export function usePortfolioStore() {
     setState((s) => ({
       ...s, accounts: { ...s.accounts, [id]: { ...s.accounts[id], liveQuantities: { ...s.accounts[id].liveQuantities, ...quantities } } },
     })), []);
+  // ── Cashflow 장부 ────────────────────────────────────────────────────────
+  // 리밸런싱 저장으로 자동 기록되지 않는 흐름(ISA 자금 출금, 누락된 입금 정정 등)을 직접 넣는다.
+  // 금액 부호가 의미를 갖는다: 입금 +, 출금 -.
+  const addCashflow = useCallback((id: AccountId, entry: Omit<CashflowEntry, "id"> & { id?: string }) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      const next: CashflowEntry = {
+        id: entry.id ?? `cf:${crypto.randomUUID()}`,
+        date: entry.date,
+        amount: Math.round(entry.amount),
+        type: entry.type,
+        source: entry.source ?? "manual",
+        // 수동 기록도 귀속 월을 채워두지만 식별에는 쓰지 않는다 — 같은 달·같은 금액이
+        // 여러 건이어도 그대로 유지한다(월 1건 규칙은 자동 기록에만 적용된다).
+        period: entry.period ?? periodOf(entry.date),
+        ...(entry.note ? { note: entry.note } : {}),
+      };
+      const cashflows = [...(acc.cashflows ?? []), next]
+        .sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, cashflows } } };
+    }), []);
+
+  // ── 정기납입 ──────────────────────────────────────────────────────────────
+  // 입금 확인: (scheduleId, period) 가 identity 라 같은 달에 다시 눌러도 1건만 유지된다.
+  // 실제 입금액이 예정 금액과 다르면 amount 로 넘기고, applyGoingForward 를 켜면 그 달을
+  // effectiveFrom 으로 하는 **새 금액 버전**을 추가한다(기존 버전은 덮어쓰지 않는다).
+  const confirmContributionDeposit = useCallback((
+    id: AccountId,
+    args: { period: string; amount: number; applyGoingForward?: boolean },
+  ) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      const schedule = acc.contributionSchedule;
+      if (!schedule) return s;
+      const cashflows = confirmContribution(acc.cashflows, {
+        schedule, period: args.period, amount: args.amount,
+      });
+      const nextSchedule = args.applyGoingForward
+        ? { ...schedule, amountVersions: upsertAmountVersion(schedule.amountVersions, args.period, Math.round(args.amount)) }
+        : schedule;
+      return { ...s, accounts: { ...s.accounts, [id]: {
+        ...acc, cashflows, contributionSchedule: nextSchedule,
+      } } };
+    }), []);
+
+  const updateContributionSchedule = useCallback((
+    id: AccountId, patch: Partial<Omit<RecurringContributionSchedule, "id" | "amountVersions">>,
+  ) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      if (!acc.contributionSchedule) return s;
+      return { ...s, accounts: { ...s.accounts, [id]: {
+        ...acc, contributionSchedule: { ...acc.contributionSchedule, ...patch },
+      } } };
+    }), []);
+
+  /** 금액 버전 추가/수정. 기존 버전을 덮어쓰지 않는다(같은 effectiveFrom 만 교체). */
+  const setContributionAmount = useCallback((id: AccountId, effectiveFrom: string, amount: number) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      if (!acc.contributionSchedule) return s;
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, contributionSchedule: {
+        ...acc.contributionSchedule,
+        amountVersions: upsertAmountVersion(acc.contributionSchedule.amountVersions, effectiveFrom, Math.round(amount)),
+      } } } };
+    }), []);
+
+  const removeContributionAmountVersion = useCallback((id: AccountId, effectiveFrom: string) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      if (!acc.contributionSchedule) return s;
+      return { ...s, accounts: { ...s.accounts, [id]: { ...acc, contributionSchedule: {
+        ...acc.contributionSchedule,
+        amountVersions: acc.contributionSchedule.amountVersions.filter((v) => v.effectiveFrom !== effectiveFrom),
+      } } } };
+    }), []);
+
+  const removeCashflow = useCallback((id: AccountId, cashflowId: string) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      return { ...s, accounts: { ...s.accounts, [id]: {
+        ...acc, cashflows: (acc.cashflows ?? []).filter((c) => c.id !== cashflowId),
+      } } };
+    }), []);
+
   const updateRowMemo        = useCallback((id: AccountId, memoKey: string, text: string) =>
     setState((s) => {
       const acc = s.accounts[id];
@@ -840,6 +967,9 @@ export function usePortfolioStore() {
     updateRowHolding,
     updateRowMemo,
     saveAccountQuantities,
+    addCashflow, removeCashflow,
+    confirmContributionDeposit, updateContributionSchedule,
+    setContributionAmount, removeContributionAmountVersion,
     activateProfile: useCallback((id: string) => activateProfile(id), []),
     deactivateProfile: useCallback(() => deactivateProfile(), []),
     logoutCode:    useCallback(() => logoutCode(), []),

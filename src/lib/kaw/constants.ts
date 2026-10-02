@@ -44,6 +44,26 @@ export const DEFAULT_MONTHLY_DEPOSIT: Record<AccountId, number> = {
   retirement: 0, isa: 0, pension: 0, irp: 250000,
 };
 
+// ── 정기납입 스케줄 **최초 생성용 seed** ────────────────────────────────────
+// 런타임 폴백이 아니다. 계좌에 스케줄이 아직 없을 때 **한 번** 만들 때만 쓰고, 그 뒤로는
+// 계좌 데이터(`AccountState.contributionSchedule`)에 저장된 사용자 설정이 유일한 근거다.
+// **금액은 여기에 적지 않는다** — 최초 생성 시 그 계좌의 기존 `deposit`(사용자가 입력해둔
+// 월 납입액)을 첫 금액 버전으로 옮긴다. 금액을 코드에 박아두면 매년 바뀌는 퇴직연금
+// 납입액을 코드 수정 없이 관리할 수 없다.
+//
+// timing: 퇴직연금만 "after_close" — 25일 **저녁**에 입금되어 그 날 장중에는 쓸 수 없고,
+// 25일 이후 첫 거래 가능일부터 매수할 수 있다. 나머지는 25일 자동이체("same_day").
+// ISA 는 정기납입이 없어 비활성으로 만든다(사용자가 설정에서 켤 수 있다).
+export const CONTRIBUTION_SCHEDULE_SEED: Record<
+  AccountId,
+  { dayOfMonth: number; timing: "same_day" | "after_close"; enabled: boolean }
+> = {
+  retirement: { dayOfMonth: 25, timing: "after_close", enabled: true },
+  isa:        { dayOfMonth: 25, timing: "same_day",    enabled: false },
+  pension:    { dayOfMonth: 25, timing: "same_day",    enabled: true },
+  irp:        { dayOfMonth: 25, timing: "same_day",    enabled: true },
+};
+
 export const GROUP_COLORS: Record<string,string> = {
   "주식":       "oklch(0.62 0.18 250)",
   "대체투자":   "oklch(0.75 0.16 75)",

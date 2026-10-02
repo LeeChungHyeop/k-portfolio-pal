@@ -6,6 +6,7 @@
 |---|---|
 | `001_live_prices_and_portfolio_view.sql` | 시세 캐시 테이블 `kaw_live_prices`, 신선도 상수 함수 `kaw_price_stale_seconds()`(900초, `search_path = pg_catalog` 고정), 분석 view `kaw_portfolio_live_view` |
 | `002_cash_balance.sql` | **실제 예수금** 도입에 맞춰 `kaw_portfolio_live_view` 재정의 (`cash_balance` / `total_asset_value` 컬럼 추가, 기준금액을 `ETF 평가액 + 실제 예수금` 으로 변경) |
+| `003_daily_snapshots.sql` | **일별 자산 스냅샷** 테이블 `kaw_daily_portfolio_snapshots` 신설 (기간 성과 계산용). 001/002 의 객체는 건드리지 않는다 |
 
 001 은 이미 production 에 적용돼 있어 그대로 두고, view 의 최신 정의는 **002** 다.
 `002` 는 view 를 `drop` → `create` 한다(컬럼 순서를 의미 단위로 묶기 위해). 기존 컬럼은
@@ -171,3 +172,89 @@ where family_code = 'soye' and profile = 'hyeobi'
   고정하지 않으면 Supabase security advisor 가 `function_search_path_mutable` 경고를 띄운다.
   production DB 에는 이미 `ALTER FUNCTION ... SET search_path = pg_catalog` 로 적용돼 있고,
   001 을 새 DB 에 처음 적용할 때도 같은 상태가 되도록 정의에 포함했다.
+
+
+## 003 — 일별 자산 스냅샷 `kaw_daily_portfolio_snapshots`
+
+기간 성과(일간/월간/연간)를 계산하기 위한 시계열이다. **`kaw_data.history` 는 쓰지 않는다**
+— 그건 "리밸런싱을 저장한 날"의 기록일 뿐 일별 평가가 아니라서, 일간 수익률로 환산하면
+틀린 숫자가 나온다.
+
+이 테이블은 **날짜별 평가액만** 담는다. 외부 입출금은 **담지 않는다** — source of truth 는
+앱의 cashflow 장부(`AccountState.cashflows`)다. 장부는 과거 날짜에 나중에 추가·수정·삭제될
+수 있어서(15:40 스냅샷 이후 그 날 저녁에 입금을 기록하거나, 며칠 뒤 과거 입출금을 보정하는
+경우) 여기에 복사해두면 곧 stale 해진다. 기간 성과는 이 평가액과 **계산 시점의 현재 장부**를
+결합해서 낸다.
+
+| 컬럼 | 뜻 |
+|---|---|
+| `snapshot_date` | 한국시간 기준 날짜. (family_code, profile, account_type, snapshot_date) 가 PK |
+| `market_value` | ETF 평가액 = 마지막 확정 리밸런싱의 `rowQuantitiesSnap` x 그 시점 시세 |
+| `cash_balance` | 실제 예수금 |
+| `total_asset_value` | 총자산 = `market_value` + `cash_balance`. **`deposit` 은 더하지 않는다** |
+| `price_fetched_at` | 평가에 쓴 시세 중 가장 오래된 조회시각(적재 근거) |
+| `holding_count` | 평가에 들어간 보유종목 수(사후 점검용) |
+
+### 적재 경로
+
+```
+Cloudflare Cron (평일 UTC 06:40 = 한국시간 15:40, 그 날의 마지막 슬롯)
+   └─ scheduled()  →  refreshLivePrices()        (기존 시세 갱신, 그대로)
+                    →  writeDailySnapshots()      (추가)
+                         └─ buildDailySnapshotRows()   ← 순수 함수, 단위 테스트로 고정
+                         └─ upsert on (family_code, profile, account_type, snapshot_date)
+```
+
+- 15:40 슬롯에서만 쓴다. 다른 슬롯(09:00~15:30)에서는 시세만 갱신한다.
+- **같은 날 여러 번 돌아도 PK + upsert 로 한 행만 유지된다.**
+- **보유종목 중 신선한 시세(900초 이내)를 못 구한 종목이 하나라도 있으면 그 계좌의 그 날
+  행을 아예 쓰지 않는다.** 일부만 최신인 평가액은 그 날 성과를 틀리게 만들기 때문이다.
+  `rowHoldingsSnap`(저장된 평가금액) 폴백도 쓰지 않는다 — 화면 표시용 폴백이지 그 날의 시세가 아니다.
+- **한국 공휴일은 판단하지 않는다.** 휴장일에 적재되는 값은 직전 거래일 종가 x 보유수량이고,
+  그것은 그 날의 실제 평가액으로서 옳다(그 날 손익이 0이 될 뿐이다). 없는 거래를 만들지 않는다.
+- **cashflow 를 적재하지 않는다.** 스냅샷 생성 시 장부를 읽지도 않는다.
+
+### 읽기 경로
+
+브라우저는 이 테이블에 직접 붙지 않는다. Worker 의 인증된 `GET /api/snapshots`
+(세션 토큰 필요, `handleSnapshotsGet`)만 쓰며, 세션의 `family_code`/`profile` 로 필터된다.
+돌아오는 것은 평가액뿐이고, 외부 입출금은 브라우저가 이미 가진 `account.cashflows` 를 쓴다.
+`anon`/`authenticated` GRANT 는 회수돼 있고 RLS 정책이 0개라 `service_role` 만 접근 가능하다.
+
+### 기간 성과 계산 (`src/lib/kaw/performance.ts`)
+
+```
+calculatePerformance(snapshots, cashflows, scope, period)
+
+기간 손익  = 기말 총자산 - 기초 총자산 - 기간 중 외부 입출금
+기간 수익률 = 기간 손익 / (기초 총자산 + Σ 외부흐름 x 남은기간비율)     ← Modified Dietz
+```
+
+입력이 둘이고 각자 하나의 사실만 담당한다: **스냅샷 = 평가액**, **장부 = 외부 입출금**.
+장부를 고치면 재스냅샷 없이 과거 기간 성과가 즉시 교정된다. 기간 흐름은 장부에서 더하므로
+**스냅샷이 없는 날(휴장일·누락일)의 흐름도 빠뜨리지 않는다.**
+
+흐름의 귀속 구간은 `CashflowEntry.timing` 에 따라 다르다. cashflow 의 `date` 는 항상 실제
+입출금일이고, 날짜를 옮기는 대신 귀속만 조정한다:
+
+| timing | 포함 조건 | 뜻 |
+|---|---|---|
+| `same_day`(기본) | `기초일 < 날짜 <= 기말일` | 그 날 바로 쓸 수 있는 돈 |
+| `after_close` | `기초일 <= 날짜 < 기말일` | 그 날 15:40 스냅샷 **뒤**에 들어온 돈(퇴직연금 25일 저녁 입금) |
+
+`after_close` 는 그 날로 끝나는 구간에는 들어가지 않고 그 날에서 시작하는 구간에 들어간다.
+25일이 휴일이라 25일 스냅샷이 없으면 전후 유효 스냅샷 사이 구간에 자연스럽게 포함된다 —
+공휴일 달력을 만들지 않는다.
+
+`(기말 - 기초) / 기초` 를 쓰지 않는다 — 입금만 해도 수익률이 올라가기 때문이다.
+구간 앞 스냅샷이 없는 가장 이른 구간은 구간 내부 첫 스냅샷을 기초로 쓰고 `partial` 로
+표시하며, 스냅샷이 1개뿐인 구간은 가짜 0% 대신 **결과에서 제외**한다.
+
+**전체 scope 는 네 계좌 스냅샷이 모두 있는 날짜만 쓴다**(`requireAccountIds`). 한 계좌라도
+빠진 날은 point 를 만들지 않는다 — 만들면 그 계좌 금액만큼 전체 자산이 급락한 것처럼
+보이고, 그 날은 다음 구간의 기초점으로도 쓰이지 않는다. 계좌별 scope 는 그 계좌 스냅샷만
+있으면 계산한다.
+
+검증: `npx vite-node scripts/verify-cashflow-principal.ts` — production 데이터로
+`totalAsset == ETF + cash`, `gain == totalAsset - principal`, 장부 복원 무손실,
+예수금 이중계산 없음을 계좌별로 대조한다(SELECT 만 한다).

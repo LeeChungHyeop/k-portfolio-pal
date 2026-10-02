@@ -3,6 +3,10 @@
 // 인증된 API를 통해서만 데이터를 읽고 쓴다.
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { ACCOUNT_IDS, BUILTIN_TICKERS } from "./constants";
+import {
+  buildDailySnapshotRows, kstDateString, SNAPSHOT_UPSERT_CONFLICT,
+  type SnapshotAccountInput, type SnapshotPrice,
+} from "./snapshot";
 
 interface KVLike {
   get(key: string): Promise<string | null>;
@@ -528,4 +532,120 @@ export async function upsertLivePrices(
 
   const { error } = await client.from("kaw_live_prices").upsert(rows, { onConflict: "ticker" });
   if (error) console.error("[kaw] 시세 캐시 적재 실패:", error.message);
+}
+
+// ── 일별 자산 스냅샷 (kaw_daily_portfolio_snapshots) ────────────────────────
+// 기간 성과(일간/월간/연간) 계산의 유일한 입력이다. 리밸런싱 history 는 "저장한 날"의
+// 기록일 뿐이라 일별 평가가 아니므로 성과 계산에 쓰지 않는다.
+//
+// 행을 만드는 규칙(금액 정의, 시세 미확보 시 건너뛰기, 공휴일 처리)은 전부 순수 모듈
+// `snapshot.ts` 에 있고 테스트로 고정돼 있다. 여기서는 DB 읽기/쓰기만 한다.
+
+export { kstDateString, kstTimeString } from "./snapshot";
+
+// kaw_price_stale_seconds() 와 같은 900초. 이보다 오래된 시세는 "신선하지 않다"고 본다.
+const SNAPSHOT_PRICE_MAX_AGE_MS = 900_000;
+
+interface LibEntry { defaultEtf?: unknown; ticker?: unknown }
+
+function tickerMapFromLibraries(rows: Array<{ data: unknown }>): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const row of rows) {
+    const lib = (row.data as { assetLibrary?: unknown } | null)?.assetLibrary;
+    if (!Array.isArray(lib)) continue;
+    for (const d of lib as LibEntry[]) {
+      const etf = typeof d?.defaultEtf === "string" ? d.defaultEtf : "";
+      const tk = typeof d?.ticker === "string" ? d.ticker.toUpperCase() : "";
+      if (etf && TICKER_RE.test(tk) && !m.has(etf)) m.set(etf, tk);
+    }
+  }
+  return m;
+}
+
+export async function writeDailySnapshots(
+  env: DataEnv,
+  now: Date = new Date(),
+): Promise<{ written: number; skipped: string[] }> {
+  const client = serviceClient(env);
+  if (!client) return { written: 0, skipped: ["supabase 미설정"] };
+
+  const snapshotDate = kstDateString(now);
+
+  const [accountsRes, libRes, pricesRes] = await Promise.all([
+    client.from("kaw_data").select("family_code, profile, account_type, data").in("account_type", [...ACCOUNT_IDS]),
+    client.from("kaw_data").select("data").in("account_type", ["_assetLib", "_meta"]),
+    client.from("kaw_live_prices").select("ticker, price, fetched_at"),
+  ]);
+  if (accountsRes.error) { console.error("[kaw] 스냅샷: 계좌 조회 실패:", accountsRes.error.message); return { written: 0, skipped: ["계좌 조회 실패"] }; }
+  if (libRes.error)      { console.error("[kaw] 스냅샷: 라이브러리 조회 실패:", libRes.error.message); return { written: 0, skipped: ["라이브러리 조회 실패"] }; }
+  if (pricesRes.error)   { console.error("[kaw] 스냅샷: 시세 조회 실패:", pricesRes.error.message); return { written: 0, skipped: ["시세 조회 실패"] }; }
+
+  const tickerByEtf = tickerMapFromLibraries(libRes.data ?? []);
+
+  // 신선한 시세만 넘긴다 — 오래된 시세는 애초에 후보에 넣지 않아 그 계좌가 건너뛰어진다.
+  const freshPrice = new Map<string, SnapshotPrice>();
+  for (const p of pricesRes.data ?? []) {
+    const ticker = String(p.ticker ?? "").toUpperCase();
+    const price = Number(p.price ?? 0);
+    const fetchedAt = String(p.fetched_at ?? "");
+    const parsed = Date.parse(fetchedAt);
+    const age = Number.isFinite(parsed) ? now.getTime() - parsed : Infinity;
+    if (price > 0 && age <= SNAPSHOT_PRICE_MAX_AGE_MS) freshPrice.set(ticker, { price, fetchedAt });
+  }
+
+  // 스냅샷에는 평가액만 담는다. cashflow 는 읽지도 쓰지도 않는다 —
+  // source of truth 는 앱의 장부이고, 기간 성과는 계산 시점에 그 장부와 결합된다.
+  const accounts: SnapshotAccountInput[] = (accountsRes.data ?? []).map((row) => {
+    const data = row.data as { history?: unknown; cashBalance?: unknown } | null;
+    return {
+      familyCode: String(row.family_code),
+      profile: String(row.profile ?? ""),
+      accountType: String(row.account_type),
+      history: Array.isArray(data?.history) ? (data!.history as SnapshotAccountInput["history"]) : [],
+      cashBalance: typeof data?.cashBalance === "number" ? data.cashBalance : undefined,
+    };
+  });
+
+  const { rows, skipped } = buildDailySnapshotRows(accounts, tickerByEtf, freshPrice, snapshotDate);
+  const skipMsgs = skipped.map((s) => `${s.label}: ${s.reason}`);
+  if (!rows.length) return { written: 0, skipped: skipMsgs };
+
+  // 같은 날 여러 번 실행돼도 PK 충돌 → upsert 로 1행만 유지된다.
+  const { error } = await client
+    .from("kaw_daily_portfolio_snapshots")
+    .upsert(rows, { onConflict: SNAPSHOT_UPSERT_CONFLICT });
+  if (error) {
+    console.error("[kaw] 스냅샷 적재 실패:", error.message);
+    return { written: 0, skipped: [...skipMsgs, `적재 실패: ${error.message}`] };
+  }
+  return { written: rows.length, skipped: skipMsgs };
+}
+
+// ── 스냅샷 읽기 API (세션 토큰 필요) ────────────────────────────────────────
+// 브라우저는 Supabase 에 직접 붙지 않는다. 기존 /api/data 와 같은 인증 경로만 쓴다.
+// 평가액만 돌려준다 — 외부 입출금은 브라우저가 이미 가진 account.cashflows(장부)를 쓴다.
+const SNAPSHOT_ROW_LIMIT = 2000;
+
+export async function handleSnapshotsGet(request: Request, env: DataEnv): Promise<Response> {
+  const client = serviceClient(env);
+  if (!client || !env.SESSION_SECRET) return json({ error: "서버 설정 오류" }, 503);
+  const token = bearerToken(request);
+  const session = token ? await verifySession(token, env.SESSION_SECRET) : null;
+  if (!session || !(await sessionStillValid(client, session))) {
+    return json({ error: "인증이 만료됐어요. 다시 로그인해주세요." }, 401);
+  }
+
+  const from = new URL(request.url).searchParams.get("from");
+  let q = client
+    .from("kaw_daily_portfolio_snapshots")
+    .select("snapshot_date, account_type, market_value, cash_balance, total_asset_value")
+    .eq("family_code", session.code)
+    .eq("profile", session.profile)
+    .order("snapshot_date", { ascending: true })
+    .limit(SNAPSHOT_ROW_LIMIT);
+  if (from && /^\d{4}-\d{2}-\d{2}$/.test(from)) q = q.gte("snapshot_date", from);
+
+  const { data, error } = await q;
+  if (error) return json({ error: error.message }, 500);
+  return json({ rows: data ?? [] });
 }

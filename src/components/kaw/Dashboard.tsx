@@ -4,13 +4,24 @@ import {
   usePortfolioStore, formatKRW, getOrDefaultLibrary,
   type AccountState, type AssetDef, type HistoryEntry,
 } from "@/lib/kaw/store";
+import { computeAccountTotals, cumulativePrincipal } from "@/lib/kaw/cashflow";
+import {
+  aggregateByDate,
+  calculatePerformance,
+  type PeriodId, type MetricId, type PeriodPerformance,
+  type PerformanceCashflow, type ScopeSelector,
+} from "@/lib/kaw/performance";
+import { useDailySnapshots } from "@/lib/kaw/useDailySnapshots";
 import { checkSafeAssetValueLimit, requiresSafeAssetMinimum } from "@/lib/kaw/safeAsset";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { Card } from "@/components/ui/card";
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
 import {
-  TrendingUp, TrendingDown, ChevronRight, Wifi, WifiOff, RefreshCw,
-  AlertTriangle, CheckCircle2, Wallet, CalendarClock, BarChart3,
+  PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, ReferenceLine,
+} from "recharts";
+import {
+  ChevronRight, Wifi, WifiOff, RefreshCw,
+  AlertTriangle, CheckCircle2, Wallet, CalendarClock, BarChart3, Database,
 } from "lucide-react";
 import type { Page } from "@/components/kaw/Sidebar";
 
@@ -20,6 +31,10 @@ import type { Page } from "@/components/kaw/Sidebar";
 const HOLDING_PALETTE_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"];
 const HOLDING_PALETTE_DARK  = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
 const HOLDING_OTHER_COLOR = "#898781";
+
+// 기간 성과 막대 색 (양수/음수)
+const PERF_UP_LIGHT = "#1baf7a", PERF_DOWN_LIGHT = "#e34948";
+const PERF_UP_DARK  = "#199e70", PERF_DOWN_DARK  = "#e66767";
 
 function useIsDarkMode(): boolean {
   const [isDark, setIsDark] = useState(
@@ -37,14 +52,6 @@ function useIsDarkMode(): boolean {
 function lastConfirmed(account: AccountState): HistoryEntry | null {
   const sorted = [...account.history].sort((a, b) => a.date.localeCompare(b.date));
   return sorted.length > 0 ? sorted[sorted.length - 1] : null;
-}
-
-// 누적 납입원금 — 대시보드(구)와 동일한 계산식(첫 기록의 baseAmount + 이후 기록의 deposit 합).
-// 이번 작업에서 새 회계 로직(cashflow ledger 등)을 만들지 않는다.
-function cumulativePrincipal(account: AccountState): number {
-  const sorted = [...account.history].sort((a, b) => a.date.localeCompare(b.date));
-  if (sorted.length === 0) return 0;
-  return sorted[0].baseAmount + sorted.slice(1).reduce((s, h) => s + Math.max(0, h.deposit ?? 0), 0);
 }
 
 interface EtfPosition {
@@ -116,6 +123,38 @@ function DonutTooltip({ active, payload }: any) {
   );
 }
 
+// 기간 성과 막대 툴팁 — 수익률의 근거(기초자산·외부흐름·분모)를 그대로 보여준다.
+function PerfTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null;
+  const p: PeriodPerformance = payload[0].payload;
+  return (
+    <div className="rounded-xl border bg-popover p-3 shadow-md text-xs space-y-1 min-w-56">
+      <p className="font-semibold">{p.label}{p.partial ? " (기간 일부)" : ""}</p>
+      <p className="text-[11px] text-muted-foreground">{p.fromDate} → {p.toDate}</p>
+      <div className="border-t pt-1 space-y-0.5 tabular-nums">
+        <div className="flex justify-between gap-3"><span className="text-muted-foreground">기초 총자산</span><span>{formatKRW(p.beginningTotal)}</span></div>
+        <div className="flex justify-between gap-3"><span className="text-muted-foreground">기말 총자산</span><span>{formatKRW(p.endingTotal)}</span></div>
+        <div className="flex justify-between gap-3"><span className="text-muted-foreground">외부 입출금</span><span>{p.netCashflow >= 0 ? "+" : "-"}{formatKRW(Math.abs(p.netCashflow))}</span></div>
+        <div className="flex justify-between gap-3 font-semibold">
+          <span>기간 손익</span>
+          <span className={p.profit >= 0 ? "text-emerald-500" : "text-rose-500"}>
+            {p.profit >= 0 ? "+" : "-"}{formatKRW(Math.abs(p.profit))}
+          </span>
+        </div>
+        <div className="flex justify-between gap-3 font-semibold">
+          <span>기간 수익률</span>
+          <span className={(p.returnPct ?? 0) >= 0 ? "text-emerald-500" : "text-rose-500"}>
+            {p.returnPct === null ? "—" : `${p.returnPct >= 0 ? "+" : ""}${p.returnPct.toFixed(2)}%`}
+          </span>
+        </div>
+        <div className="flex justify-between gap-3 text-[11px] text-muted-foreground border-t pt-1">
+          <span>평균투자원금(분모)</span><span>{formatKRW(p.averageCapital)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function signClass(n: number): string {
   return n >= 0 ? "text-emerald-500" : "text-rose-500";
 }
@@ -123,54 +162,98 @@ function signed(n: number): string {
   return `${n >= 0 ? "+" : "-"}${formatKRW(Math.abs(n))}`;
 }
 
+const fmtAxisAmount = (v: number) => {
+  const a = Math.abs(v);
+  if (a >= 100_000_000) return `${(v / 100_000_000).toFixed(1)}억`;
+  if (a >= 10_000) return `${Math.round(v / 10_000)}만`;
+  return String(Math.round(v));
+};
+
 type ScopeId = "all" | AccountId;
 const SCOPES: { id: ScopeId; label: string }[] = [
   { id: "all", label: "전체" },
   ...ACCOUNT_IDS.map((id) => ({ id: id as ScopeId, label: ACCOUNT_LABELS_SHORT[id] })),
 ];
 
-type PeriodId = "daily" | "monthly" | "yearly";
-type MetricId = "pct" | "amount";
+// 전체 scope 는 **네 계좌 스냅샷이 모두 있는 날짜만** 쓴다(requireAccountIds).
+// 한 계좌라도 빠진 날에 point 를 만들면 그 금액만큼 전체 자산이 급락한 것처럼 보인다.
+// 계좌별 scope 는 그 계좌 스냅샷만 있으면 계산한다.
+function scopeSelector(scope: ScopeId): ScopeSelector {
+  return scope === "all"
+    ? { requireAccountIds: ACCOUNT_IDS }
+    : { accountIds: [scope] };
+}
+
+function ScopeTabs({ value, onChange, strong }: { value: ScopeId; onChange: (v: ScopeId) => void; strong?: boolean }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {SCOPES.map((s) => (
+        <button
+          key={s.id}
+          onClick={() => onChange(s.id)}
+          className={`px-2.5 py-1 rounded-lg text-xs transition-colors ${
+            value === s.id
+              ? strong
+                ? "bg-violet-500/15 text-violet-600 dark:text-violet-300 border border-violet-300/60 dark:border-violet-700/60 font-medium"
+                : "bg-muted font-medium text-foreground border border-transparent"
+              : "text-muted-foreground hover:bg-muted border border-transparent"
+          }`}
+        >
+          {s.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
-  const { state } = usePortfolioStore();
+  const { state, currentUser } = usePortfolioStore();
   const library = useMemo(() => getOrDefaultLibrary(state), [state.assetLibrary]);
   const { prices: livePrices, meta, configured, isLoading: priceLoading, successCount, totalCount } = useKisPriceContext();
   const isDark = useIsDarkMode();
   const palette = isDark ? HOLDING_PALETTE_DARK : HOLDING_PALETTE_LIGHT;
 
+  const [kpiScope, setKpiScope] = useState<ScopeId>("all");
   const [scope, setScope] = useState<ScopeId>("all");
   const [period, setPeriod] = useState<PeriodId>("monthly");
   const [perfScope, setPerfScope] = useState<ScopeId>("all");
   const [metric, setMetric] = useState<MetricId>("pct");
 
+  const snapshots = useDailySnapshots(!!currentUser);
+
   // ── 계좌별 집계 ─────────────────────────────────────────────────────────
   // ETF 평가액 = 확정수량 × 현재가, 총자산 = ETF 평가액 + 실제 예수금(cashBalance).
-  // deposit(이번 달 불입액)은 총자산에 더하지 않는다 — 납입원금 쪽 계산에만 쓰인다.
+  // 누적 납입원금 = cashflow 장부의 순입금 합계 (cashflow.ts). **예수금을 더하지 않는다** —
+  // 예수금은 이미 납입된 돈의 현재 형태일 뿐이라 더하면 이중계산이다.
+  // deposit(이번 달 불입액)도 총자산에 더하지 않는다. 장부에 1회 기록될 때만 원금에 반영된다.
   const accounts = useMemo(() => ACCOUNT_IDS.map((id) => {
     const acc = state.accounts[id];
     const positions = getEtfPositions(acc, library, livePrices);
     const etfValue = positions.reduce((s, p) => s + p.value, 0);
-    const cashEntered = acc.cashBalance !== undefined;
-    const cash = acc.cashBalance ?? 0;
-    const total = etfValue + cash;
-    const principal = cumulativePrincipal(acc);
-    const gain = total - principal;
-    const returnPct = principal > 0 ? (gain / principal) * 100 : null;
-    const last = lastConfirmed(acc);
-    const staleValue = positions.some((p) => !p.live);
+    const totals = computeAccountTotals(etfValue, acc.cashBalance, acc.cashflows);
     return {
       id, label: ACCOUNT_LABELS_SHORT[id], account: acc, positions,
-      etfValue, cash, cashEntered, total, principal, gain, returnPct, last, staleValue,
+      ...totals,
+      last: lastConfirmed(acc),
+      staleValue: positions.some((p) => !p.live),
     };
   }), [state.accounts, library, livePrices]);
 
-  const grandTotal     = accounts.reduce((s, a) => s + a.total, 0);
-  const grandEtfValue  = accounts.reduce((s, a) => s + a.etfValue, 0);
-  const grandCash      = accounts.reduce((s, a) => s + a.cash, 0);
-  const grandPrincipal = accounts.reduce((s, a) => s + a.principal, 0);
-  const grandGain      = grandTotal - grandPrincipal;
-  const grandReturnPct = grandPrincipal > 0 ? (grandGain / grandPrincipal) * 100 : null;
+  // scope 에 따른 KPI 값. 전체는 네 계좌 합계 — 원금도 장부 합계를 그대로 더한다.
+  const kpi = useMemo(() => {
+    const list = kpiScope === "all" ? accounts : accounts.filter((a) => a.id === kpiScope);
+    const etfValue = list.reduce((s, a) => s + a.etfValue, 0);
+    const cash = list.reduce((s, a) => s + a.cashBalance, 0);
+    const cashEntered = list.some((a) => a.cashEntered);
+    const totalAsset = etfValue + cash;
+    const principal = list.reduce((s, a) => s + cumulativePrincipal(a.account.cashflows), 0);
+    const gain = totalAsset - principal;
+    return {
+      label: kpiScope === "all" ? "전체" : ACCOUNT_LABELS_SHORT[kpiScope],
+      etfValue, cash, cashEntered, totalAsset, principal, gain,
+      returnPct: principal > 0 ? (gain / principal) * 100 : null,
+    };
+  }, [kpiScope, accounts]);
 
   // ── Section C: 자산 구성 (계좌 필터) ────────────────────────────────────
   const combinedEtfValues = useMemo(() => {
@@ -196,10 +279,47 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
 
   const donutData = useMemo(() => toDonutData(scopedEtfValues, etfColorMap), [scopedEtfValues, etfColorMap]);
   const donutTotal = donutData.reduce((s, r) => s + r.value, 0);
-  const scopedCash = scope === "all" ? grandCash : (accounts.find((a) => a.id === scope)?.cash ?? 0);
+  const scopedCash = scope === "all"
+    ? accounts.reduce((s, a) => s + a.cashBalance, 0)
+    : (accounts.find((a) => a.id === scope)?.cashBalance ?? 0);
   const scopedCashEntered = scope === "all"
     ? accounts.some((a) => a.cashEntered)
     : (accounts.find((a) => a.id === scope)?.cashEntered ?? false);
+
+  // ── Section D: 기간 성과 ────────────────────────────────────────────────
+  // 외부 입출금은 스냅샷이 아니라 **현재 cashflow 장부**에서 읽는다. 과거 날짜의 입출금을
+  // 나중에 추가·수정·삭제해도 재스냅샷 없이 그 기간 성과가 즉시 교정된다.
+  const perfCashflows = useMemo<PerformanceCashflow[]>(() => {
+    const out: PerformanceCashflow[] = [];
+    for (const id of ACCOUNT_IDS) {
+      for (const c of state.accounts[id].cashflows ?? []) {
+        // timing 을 같이 넘긴다 — 장마감 후 입금(퇴직연금 25일 저녁)은 날짜를 미루지 않고
+        // 귀속 구간만 조정하기 때문이다(performance.ts isFlowInSegment).
+        out.push({ accountId: id, date: c.date, amount: c.amount, timing: c.timing });
+      }
+    }
+    return out;
+  }, [state.accounts]);
+
+  const perf = useMemo(
+    () => calculatePerformance(
+      snapshots.data?.rows ?? [],
+      perfCashflows,
+      scopeSelector(perfScope),
+      period,
+    ),
+    [snapshots.data, perfCashflows, perfScope, period],
+  );
+  const perfChartData = useMemo(
+    () => perf.map((p) => ({ ...p, bar: metric === "pct" ? (p.returnPct ?? 0) : p.profit })),
+    [perf, metric],
+  );
+  // 안내 문구용 — 현재 scope 에서 실제로 쓸 수 있는 날짜 수
+  // (전체 scope 면 네 계좌가 모두 있는 날만 센다).
+  const usableDayCount = useMemo(
+    () => aggregateByDate(snapshots.data?.rows ?? [], scopeSelector(perfScope)).length,
+    [snapshots.data, perfScope],
+  );
 
   // ── Section E: 포트폴리오 상태 ──────────────────────────────────────────
   // 새 판정 기준을 만들지 않는다 — 기존 checkSafeAssetValueLimit / 예수금 입력여부 /
@@ -277,6 +397,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
   }, [accounts, library, meta, configured]);
 
   const isLiveActive = configured && Object.keys(livePrices).length > 0;
+  const perfUp = isDark ? PERF_UP_DARK : PERF_UP_LIGHT;
+  const perfDown = isDark ? PERF_DOWN_DARK : PERF_DOWN_LIGHT;
 
   return (
     <div className="p-4 md:p-6 space-y-5 md:space-y-6 max-w-5xl mx-auto">
@@ -299,74 +421,68 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
         </div>
       </div>
 
-      {/* ── Section A: 전체 현황 KPI ──────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <Card className="p-4 space-y-1">
-          <p className="text-xs text-muted-foreground">총자산</p>
-          <p className="text-xl md:text-2xl font-bold tabular-nums leading-tight">{formatKRW(grandTotal)}</p>
-          <p className="text-[11px] text-muted-foreground tabular-nums">
-            ETF {formatKRW(grandEtfValue)} · 예수금 {formatKRW(grandCash)}
-          </p>
-        </Card>
-        <Card className="p-4 space-y-1">
-          <p className="text-xs text-muted-foreground">누적 납입원금</p>
-          <p className="text-xl md:text-2xl font-bold tabular-nums leading-tight">{formatKRW(grandPrincipal)}</p>
-          <p className="text-[11px] text-muted-foreground">리밸런싱 기록 기준</p>
-        </Card>
-        <Card className="p-4 space-y-1">
-          <p className="text-xs text-muted-foreground">누적 손익</p>
-          <p className={`text-xl md:text-2xl font-bold tabular-nums leading-tight ${grandPrincipal > 0 ? signClass(grandGain) : ""}`}>
-            {grandPrincipal > 0 ? signed(grandGain) : "—"}
-          </p>
-          <p className="text-[11px] text-muted-foreground">총자산 − 납입원금</p>
-        </Card>
-        <Card className="p-4 space-y-1">
-          <p className="text-xs text-muted-foreground">누적 수익률</p>
-          <p className={`text-xl md:text-2xl font-bold tabular-nums leading-tight ${grandReturnPct !== null ? signClass(grandReturnPct) : ""}`}>
-            {grandReturnPct !== null
-              ? `${grandReturnPct >= 0 ? "+" : ""}${grandReturnPct.toFixed(2)}%`
-              : "—"}
-          </p>
-          <p className="text-[11px] text-muted-foreground">
-            {isLiveActive ? "현재 시점" : "저장된 평가금액 기준"}
-          </p>
-        </Card>
-      </div>
+      {/* ── Section A: scope 탭 + KPI 4개 ─────────────────────────────── */}
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <ScopeTabs value={kpiScope} onChange={setKpiScope} strong />
+          {kpiScope !== "all" && onNavigate && (
+            <button
+              onClick={() => onNavigate(kpiScope as Page)}
+              className="flex items-center gap-0.5 text-xs text-violet-600 dark:text-violet-300 hover:underline shrink-0"
+            >
+              {ACCOUNT_LABELS_SHORT[kpiScope]} 계좌 열기
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
 
-      {/* ── Section B: 계좌별 요약 ────────────────────────────────────── */}
-      <div>
-        <h3 className="text-sm font-semibold mb-2 px-0.5">계좌별 요약</h3>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {accounts.map((a) => {
-            const up = (a.returnPct ?? 0) >= 0;
-            return (
-              <Card
-                key={a.id}
-                onClick={() => onNavigate?.(a.id as Page)}
-                className={`p-4 space-y-1.5 transition-all ${onNavigate ? "cursor-pointer hover:border-violet-400/60 hover:shadow-md" : ""}`}
-              >
-                <div className="flex items-center justify-between gap-1">
-                  <p className="text-sm font-medium truncate">{a.label}</p>
-                  {onNavigate && <ChevronRight className="w-3.5 h-3.5 text-muted-foreground/50 shrink-0" />}
-                </div>
-                <p className="text-lg md:text-xl font-bold tabular-nums leading-tight">{formatKRW(a.total)}</p>
-                {a.returnPct !== null ? (
-                  <p className={`flex items-center gap-0.5 text-xs font-medium ${up ? "text-emerald-600" : "text-rose-600"}`}>
-                    {up ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                    {a.returnPct >= 0 ? "+" : ""}{a.returnPct.toFixed(2)}%
-                  </p>
-                ) : (
-                  <p className="text-xs text-muted-foreground">수익률 —</p>
-                )}
-                <div className="pt-1.5 border-t space-y-0.5">
-                  <p className="text-[11px] text-muted-foreground tabular-nums">ETF {formatKRW(a.etfValue)}</p>
-                  <p className={`text-[11px] tabular-nums ${a.cashEntered ? "text-blue-600 dark:text-blue-400" : "text-amber-500"}`}>
-                    예수금 {a.cashEntered ? formatKRW(a.cash) : "미입력"}
-                  </p>
-                </div>
-              </Card>
-            );
-          })}
+          <Card
+            className={`p-4 space-y-1 ${kpiScope !== "all" && onNavigate ? "cursor-pointer transition-all hover:border-violet-400/60 hover:shadow-md" : ""}`}
+            onClick={kpiScope !== "all" && onNavigate ? () => onNavigate(kpiScope as Page) : undefined}
+          >
+            <p className="text-xs text-muted-foreground">총자산</p>
+            <p className="text-xl md:text-2xl font-bold tabular-nums leading-tight">{formatKRW(kpi.totalAsset)}</p>
+            {/* 모바일에서 금액만 다음 줄로 밀리지 않도록 항목별로 한 줄씩 둔다 */}
+            <div className="pt-1.5 border-t space-y-0.5">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-[11px] text-muted-foreground shrink-0">ETF</span>
+                <span className="text-[11px] tabular-nums text-muted-foreground">{formatKRW(kpi.etfValue)}</span>
+              </div>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-[11px] text-muted-foreground shrink-0">예수금</span>
+                <span className={`text-[11px] tabular-nums ${kpi.cashEntered ? "text-blue-600 dark:text-blue-400" : "text-amber-500"}`}>
+                  {kpi.cashEntered ? formatKRW(kpi.cash) : "미입력"}
+                </span>
+              </div>
+            </div>
+          </Card>
+
+          <Card className="p-4 space-y-1">
+            <p className="text-xs text-muted-foreground">누적 납입원금</p>
+            <p className="text-xl md:text-2xl font-bold tabular-nums leading-tight">{formatKRW(kpi.principal)}</p>
+            <p className="text-[11px] text-muted-foreground">외부 입금 − 출금 누계</p>
+          </Card>
+
+          <Card className="p-4 space-y-1">
+            <p className="text-xs text-muted-foreground">누적 손익</p>
+            <p className={`text-xl md:text-2xl font-bold tabular-nums leading-tight ${kpi.principal > 0 ? signClass(kpi.gain) : ""}`}>
+              {kpi.principal > 0 ? signed(kpi.gain) : "—"}
+            </p>
+            <p className="text-[11px] text-muted-foreground">총자산 − 납입원금</p>
+          </Card>
+
+          <Card className="p-4 space-y-1">
+            <p className="text-xs text-muted-foreground">누적 수익률</p>
+            <p className={`text-xl md:text-2xl font-bold tabular-nums leading-tight ${kpi.returnPct !== null ? signClass(kpi.returnPct) : ""}`}>
+              {kpi.returnPct !== null
+                ? `${kpi.returnPct >= 0 ? "+" : ""}${kpi.returnPct.toFixed(2)}%`
+                : "—"}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              {isLiveActive ? "현재 시점" : "저장된 평가금액 기준"}
+            </p>
+          </Card>
         </div>
       </div>
 
@@ -374,21 +490,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       <Card className="p-4 md:p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-semibold">자산 구성</h3>
-          <div className="flex flex-wrap gap-1">
-            {SCOPES.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => setScope(s.id)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
-                  scope === s.id
-                    ? "bg-violet-500/15 text-violet-600 dark:text-violet-300 border border-violet-300/60 dark:border-violet-700/60"
-                    : "text-muted-foreground hover:bg-muted border border-transparent"
-                }`}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
+          <ScopeTabs value={scope} onChange={setScope} strong />
         </div>
 
         {donutData.length === 0 ? (
@@ -435,7 +537,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
         </div>
       </Card>
 
-      {/* ── Section D: 기간 성과 (1차 — UI 골격만) ───────────────────── */}
+      {/* ── Section D: 기간 성과 ──────────────────────────────────────── */}
       <Card className="p-4 md:p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-semibold">기간 성과</h3>
@@ -457,19 +559,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex flex-wrap gap-1">
-            {SCOPES.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => setPerfScope(s.id)}
-                className={`px-2.5 py-1 rounded-lg text-xs transition-colors ${
-                  perfScope === s.id ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:bg-muted/60"
-                }`}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
+          <ScopeTabs value={perfScope} onChange={setPerfScope} />
           <div className="flex gap-1 md:ml-auto">
             {([["pct", "수익률(%)"], ["amount", "수익금(원)"]] as const).map(([id, label]) => (
               <button
@@ -485,19 +575,65 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
           </div>
         </div>
 
-        {/* 기존 리밸런싱 history 는 "리밸런싱을 한 날"의 기록일 뿐 실제 일별 성과가 아니다.
-            이를 일간/월간 수익률로 표시하면 틀린 숫자가 되므로, 일별 자산 스냅샷이 쌓이기
-            전까지는 빈 상태로 둔다. (DB/cron 변경은 이번 작업 범위 밖) */}
-        <div className="h-40 rounded-xl border border-dashed grid place-items-center text-center px-4">
-          <div className="space-y-1">
-            <BarChart3 className="w-6 h-6 text-muted-foreground/40 mx-auto" />
-            <p className="text-sm text-muted-foreground">일별 자산 스냅샷 데이터 구축 후 기간별 성과를 제공합니다</p>
-            <p className="text-[11px] text-muted-foreground/70 flex items-center justify-center gap-1">
-              <CalendarClock className="w-3 h-3" />
-              현재 기록은 리밸런싱 시점 기준이라 기간 수익률로 환산할 수 없습니다
-            </p>
+        {/* 기간 손익 = 기말 총자산 - 기초 총자산 - 기간 중 외부 입출금.
+            수익률은 Modified Dietz (분모 = 기초자산 + 기간 가중 외부흐름) — performance.ts 참고.
+            스냅샷이 2개 이상 쌓여야 구간이 하나 만들어진다. 없는 구간을 0으로 채우지 않는다. */}
+        {snapshots.isLoading ? (
+          <div className="h-48 grid place-items-center text-sm text-muted-foreground">
+            <span className="flex items-center gap-2"><RefreshCw className="w-4 h-4 animate-spin" /> 스냅샷을 불러오는 중…</span>
           </div>
-        </div>
+        ) : snapshots.data?.unavailable ? (
+          <div className="h-48 rounded-xl border border-dashed grid place-items-center text-center px-4">
+            <div className="space-y-1">
+              <Database className="w-6 h-6 text-muted-foreground/40 mx-auto" />
+              <p className="text-sm text-muted-foreground">일별 스냅샷 저장소가 아직 준비되지 않았습니다</p>
+              <p className="text-[11px] text-muted-foreground/70">migration 003 적용 후 매 거래일 자동으로 쌓입니다</p>
+            </div>
+          </div>
+        ) : perfChartData.length === 0 ? (
+          <div className="h-48 rounded-xl border border-dashed grid place-items-center text-center px-4">
+            <div className="space-y-1">
+              <BarChart3 className="w-6 h-6 text-muted-foreground/40 mx-auto" />
+              <p className="text-sm text-muted-foreground">
+                {usableDayCount === 0
+                  ? "일별 자산 스냅샷을 모으는 중입니다"
+                  : `스냅샷 ${usableDayCount}일치 — 구간을 만들려면 2일 이상 필요합니다`}
+              </p>
+              <p className="text-[11px] text-muted-foreground/70 flex items-center justify-center gap-1">
+                <CalendarClock className="w-3 h-3" />
+                매 거래일 장 마감 후(한국시간 15:40) 하루 한 번 기록됩니다
+              </p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={perfChartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
+                  <YAxis
+                    tick={{ fontSize: 11 }}
+                    width={metric === "pct" ? 44 : 56}
+                    tickFormatter={(v: number) => (metric === "pct" ? `${v.toFixed(1)}%` : fmtAxisAmount(v))}
+                  />
+                  <ReferenceLine y={0} stroke="currentColor" opacity={0.35} />
+                  <Tooltip content={<PerfTooltip />} cursor={{ fillOpacity: 0.08 }} />
+                  <Bar dataKey="bar" radius={[3, 3, 0, 0]}>
+                    {perfChartData.map((p) => (
+                      <Cell key={p.key} fill={p.bar >= 0 ? perfUp : perfDown} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <p className="text-[11px] text-muted-foreground/80">
+              기간 손익 = 기말 총자산 − 기초 총자산 − 기간 중 외부 입출금.
+              수익률은 기간 중 들어온 돈을 남은 기간만큼만 분모에 반영합니다(Modified Dietz).
+              {perfChartData.some((p) => p.partial) && " 가장 이른 구간은 그 앞 스냅샷이 없어 구간 내부 첫 스냅샷을 기준으로 계산했습니다."}
+            </p>
+          </>
+        )}
       </Card>
 
       {/* ── Section E: 포트폴리오 상태 ────────────────────────────────── */}

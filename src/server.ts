@@ -8,6 +8,7 @@ import {
   handleAuthFamily, handleVerifyPin, handleVerifyMaster, handleVerifySecretQuestion,
   handleSetPin, handleSetMaster, handleAddProfile, handleRestoreProfile, handleDeleteProfile,
   handleDataGet, handleDataPost, upsertLivePrices, listLivePriceTickers,
+  handleSnapshotsGet, writeDailySnapshots, kstTimeString,
 } from "./lib/kaw/data-server";
 
 // Cloudflare Workers environment bindings
@@ -117,10 +118,33 @@ async function refreshLivePrices(env: Env): Promise<void> {
   console.log(`예정된 시세 갱신: ${ok}/${tickers.length}건 성공 (${timestamp})`);
 }
 
+// ── 하루 1회 자산 스냅샷 ────────────────────────────────────────────────────
+// 시세 cron 은 그대로 두고, **그 날의 마지막 슬롯(한국시간 15:40)** 에만 이어서 스냅샷을 쓴다.
+// 15:40 조회값이 장 마감 이후 최종 종가 역할을 하므로 그 시점 평가액이 그 날의 종가 평가액이다.
+// 슬롯 판정은 Cloudflare 가 알려준 예정 시각(scheduledTime)으로 하고, 없으면 현재 시각으로 본다.
+const DAILY_SNAPSHOT_KST_TIME = "15:40";
+
+function isDailySnapshotSlot(event: unknown): boolean {
+  const scheduledTime = (event as { scheduledTime?: number } | null)?.scheduledTime;
+  const at = typeof scheduledTime === "number" ? new Date(scheduledTime) : new Date();
+  return kstTimeString(at) === DAILY_SNAPSHOT_KST_TIME;
+}
+
 export default {
   // wrangler.jsonc 의 crons 가 이 핸들러를 부른다. 앱의 요청 처리(fetch)와는 완전히 분리돼 있다.
-  async scheduled(_event: unknown, env: Env, ctx: { waitUntil: (p: Promise<unknown>) => void }) {
-    ctx.waitUntil(refreshLivePrices(env).catch((e) => console.error("예정된 시세 갱신 실패:", e)));
+  async scheduled(event: unknown, env: Env, ctx: { waitUntil: (p: Promise<unknown>) => void }) {
+    ctx.waitUntil((async () => {
+      // 시세를 먼저 갱신해야 스냅샷이 최신 시세로 평가된다. 시세 갱신이 실패해도 스냅샷
+      // 쪽에서 "신선한 시세 없음"으로 그 날 행을 건너뛰므로 틀린 값이 남지는 않는다.
+      await refreshLivePrices(env).catch((e) => console.error("예정된 시세 갱신 실패:", e));
+      if (!isDailySnapshotSlot(event)) return;
+      try {
+        const { written, skipped } = await writeDailySnapshots(env);
+        console.log(`일별 자산 스냅샷: ${written}건 적재` + (skipped.length ? ` / 건너뜀 ${skipped.length}건: ${skipped.join("; ")}` : ""));
+      } catch (e) {
+        console.error("일별 자산 스냅샷 실패:", e);
+      }
+    })());
   },
 
   async fetch(request: Request, env: Env, ctx: unknown) {
@@ -203,6 +227,9 @@ export default {
     // ── 계좌 데이터 (세션 토큰 필요) ──────────────────────────────────────
     if (pathname === "/api/data" && request.method === "GET") return handleDataGet(request, env);
     if (pathname === "/api/data" && request.method === "POST") return handleDataPost(request, env);
+
+    // ── 일별 자산 스냅샷 읽기 (기간 성과용, 세션 토큰 필요) ─────────────────
+    if (pathname === "/api/snapshots" && request.method === "GET") return handleSnapshotsGet(request, env);
 
     // ── TanStack Start app (SSR + static) ───────────────────────────────
     try {

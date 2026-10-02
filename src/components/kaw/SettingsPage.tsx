@@ -10,6 +10,7 @@ import {
   type HistoryEntry, type AccountState, type AssetDef, type ProfileRowDef,
 } from "@/lib/kaw/store";
 import { checkSafeAssetMinimum, resolveRetirementRiskClass } from "@/lib/kaw/safeAsset";
+import { currentAmountVersion } from "@/lib/kaw/contribution";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -137,6 +138,130 @@ function parseExcelWorkbook(wb: XLSX.WorkBook): Record<AccountId, AccountState> 
 // ══════════════════════════════════════════════════════════════════════════════
 // Main Component
 // ══════════════════════════════════════════════════════════════════════════════
+// ── 정기납입 설정 (간단 확인/수정) ──────────────────────────────────────────
+// draft 저장 흐름을 타지 않고 store 에 바로 쓴다 — 스케줄은 목표비중처럼 묶어서 저장할
+// 값이 아니고, 금액 버전은 덮어쓰기가 아니라 추가이기 때문이다.
+function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
+  const { state, updateContributionSchedule, setContributionAmount, removeContributionAmountVersion } = usePortfolioStore();
+  const schedule = state.accounts[accountId].contributionSchedule;
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const [newFrom, setNewFrom] = useState(thisMonth);
+  const [newAmount, setNewAmount] = useState("");
+
+  if (!schedule) return null;
+  const current = currentAmountVersion(schedule, thisMonth);
+  const versions = [...schedule.amountVersions].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+
+  return (
+    <Card className="p-5 space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">정기납입</h3>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="checkbox"
+            checked={schedule.enabled}
+            onChange={(e) => updateContributionSchedule(accountId, { enabled: e.target.checked })}
+          />
+          사용
+        </label>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs text-muted-foreground">매월 납입일</label>
+          <Input
+            type="number" min={1} max={31}
+            value={schedule.dayOfMonth}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (v >= 1 && v <= 31) updateContributionSchedule(accountId, { dayOfMonth: v });
+            }}
+            className="mt-1"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-muted-foreground">입금 시점</label>
+          <Select
+            value={schedule.timing}
+            onValueChange={(v) => updateContributionSchedule(accountId, { timing: v as "same_day" | "after_close" })}
+          >
+            <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="same_day">당일 입금 (바로 사용)</SelectItem>
+              <SelectItem value="after_close">장마감 후 입금 (다음 거래일부터)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <div className="rounded-lg bg-muted/40 px-3 py-2.5 text-xs space-y-0.5">
+        <p className="font-semibold">
+          현재 적용금액{" "}
+          <span className="tabular-nums">{current ? `${formatKRW(current.amount)}원` : "—"}</span>
+        </p>
+        <p className="text-muted-foreground">
+          적용 시작월 {current ? current.effectiveFrom.replace("-", ".") : "—"}
+          {schedule.timing === "after_close" && " · 납입일 저녁 입금, 다음 거래일부터 매수 가능"}
+        </p>
+      </div>
+
+      {/* 금액 이력 — 기존 버전을 덮어쓰지 않고 "언제부터 얼마"를 한 줄씩 쌓는다.
+          퇴직연금처럼 매년 금액이 바뀌어도 과거 월의 계산은 변하지 않는다. */}
+      <div className="space-y-1.5">
+        <p className="text-xs font-medium text-muted-foreground">금액 이력</p>
+        {versions.length === 0 ? (
+          <p className="text-xs text-muted-foreground">아직 없습니다. 아래에서 추가하세요.</p>
+        ) : versions.map((v) => (
+          <div key={v.effectiveFrom} className="flex items-center gap-2 text-xs">
+            <span className="tabular-nums w-20 shrink-0">{v.effectiveFrom.replace("-", ".")}부터</span>
+            <span className="tabular-nums font-medium flex-1">{formatKRW(v.amount)}원</span>
+            {v.effectiveFrom === current?.effectiveFrom && (
+              <span className="text-[10px] text-violet-500 shrink-0">적용 중</span>
+            )}
+            <button
+              onClick={() => removeContributionAmountVersion(accountId, v.effectiveFrom)}
+              className="p-1 rounded hover:bg-rose-500/10 text-muted-foreground hover:text-rose-500 shrink-0"
+              title="이 버전 삭제"
+            >
+              <Trash2 className="w-3 h-3" />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-end gap-2 pt-1 border-t">
+        <div className="w-28">
+          <label className="text-[11px] text-muted-foreground">적용 시작월</label>
+          <Input type="month" value={newFrom} onChange={(e) => setNewFrom(e.target.value)} className="mt-1 h-9" />
+        </div>
+        <div className="flex-1">
+          <label className="text-[11px] text-muted-foreground">금액 (원)</label>
+          <Input
+            inputMode="numeric" value={newAmount} placeholder="688074"
+            onChange={(e) => setNewAmount(e.target.value.replace(/[^0-9]/g, ""))}
+            className="mt-1 h-9"
+          />
+        </div>
+        <Button
+          size="sm"
+          disabled={!/^\d{4}-\d{2}$/.test(newFrom) || !(Number(newAmount) > 0)}
+          onClick={() => {
+            setContributionAmount(accountId, newFrom, Number(newAmount));
+            setNewAmount("");
+          }}
+        >
+          추가
+        </Button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        실제 입금은 계좌 화면의 <span className="font-medium">입금 확인</span>을 눌렀을 때만 장부에 들어갑니다.
+        여기 설정은 예정 금액입니다.
+      </p>
+    </Card>
+  );
+}
+
+
 export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
   const { currentUser } = usePortfolioStore();
   const isMaster = currentUser === "hyeobi";
@@ -1028,6 +1153,8 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
               </Button>
             </div>
           </Card>
+
+          <ContributionScheduleCard accountId={selectedAccount} />
 
           {/* 자산별 설정 테이블 */}
           <Card className="overflow-hidden">

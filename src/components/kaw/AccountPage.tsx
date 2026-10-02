@@ -10,11 +10,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar as DateCalendar } from "@/components/ui/calendar";
 import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
-import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon, ShieldAlert } from "lucide-react";
+import { Camera, Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon, ShieldAlert, Banknote, Check } from "lucide-react";
 import { toast } from "sonner";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { syncGrowthBacktest } from "@/lib/kaw/backtest";
 import { checkSafeAssetMinimum, checkSafeAssetValueLimit, MAX_RISK_ASSET_PCT } from "@/lib/kaw/safeAsset";
+import {
+  pendingContributions,
+  type PendingContribution,
+} from "@/lib/kaw/contribution";
 
 // YYYY-MM-DD 문자열 ↔ Date 변환 (로컬 자정 기준 — UTC 파싱으로 하루 밀리는 것 방지)
 function ymdToDate(ymd: string): Date {
@@ -30,6 +34,85 @@ function dateToYmd(date: Date): string {
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
+
+// ── 정기납입 입금 확인 ────────────────────────────────────────────────────
+// 스케줄은 "예정"이고 cashflow 는 "실제 발생"이다. 날짜가 됐다고 자동 확정하지 않는 이유:
+// cashBalance 는 증권사에서 자동으로 가져오는 값이 아니라 사용자가 관리하는 값이라서,
+// 자동이체 실패나 금액 변경 같은 예외에서 장부가 조용히 틀어진다. 그래서 버튼 1회로 둔다.
+function ContributionConfirmDialog({ pending, label, timing, onConfirm, onClose }: {
+  pending: PendingContribution | null;
+  label: string;
+  timing: "same_day" | "after_close";
+  onConfirm: (args: { period: string; amount: number; applyGoingForward: boolean }) => void;
+  onClose: () => void;
+}) {
+  const [amount, setAmount] = useState(0);
+  const [applyGoingForward, setApplyGoingForward] = useState(false);
+
+  useEffect(() => {
+    if (pending) { setAmount(pending.expectedAmount); setApplyGoingForward(false); }
+  }, [pending]);
+
+  if (!pending) return null;
+  const changed = amount !== pending.expectedAmount;
+
+  return (
+    <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="text-base">
+            {pending.period.replace("-", ".")} {label} 정기납입 확인
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-muted-foreground">실제 입금액 (원)</label>
+            <NumberInput value={amount} onChange={setAmount} className="mt-1 font-semibold" />
+            <p className="text-[11px] text-muted-foreground mt-1 tabular-nums">
+              예정 {formatKRW(pending.expectedAmount)}원 · 예정일 {pending.scheduledOn}
+            </p>
+          </div>
+
+          {timing === "after_close" && (
+            <p className="text-[11px] text-muted-foreground rounded-lg bg-muted/50 px-2.5 py-2">
+              입금일은 <span className="font-medium tabular-nums">{pending.scheduledOn}</span> 그대로 기록합니다.
+              다만 그 날 장마감 후에 들어온 돈이라 기간 성과에서는
+              {" "}{pending.scheduledOn.slice(5).replace("-", "/")}까지의 구간이 아니라
+              그 다음 구간부터 반영됩니다(다음 거래일부터 매수 가능).
+            </p>
+          )}
+
+          {changed && amount > 0 && (
+            <label className="flex items-start gap-2 text-xs cursor-pointer rounded-lg border px-2.5 py-2">
+              <input
+                type="checkbox"
+                checked={applyGoingForward}
+                onChange={(e) => setApplyGoingForward(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                앞으로도 이 금액을 사용
+                <span className="block text-[11px] text-muted-foreground mt-0.5">
+                  {pending.period.replace("-", ".")}부터 적용되는 새 금액 버전을 추가합니다.
+                  과거 금액은 그대로 보존됩니다.
+                </span>
+              </span>
+            </label>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>취소</Button>
+          <Button
+            disabled={!(amount > 0)}
+            onClick={() => onConfirm({ period: pending.period, amount, applyGoingForward })}
+          >
+            <Check className="w-4 h-4 mr-1" /> 입금 확인
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 // 콤마 포맷 숫자 입력 — null=비포커스(콤마표시), string=포커스(raw 숫자)
 function NumberInput({ value, onChange, className, placeholder }: {
@@ -139,7 +222,8 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
    리밸런싱 탭
 ───────────────────────────────────────────── */
 function RebalanceTab({ accountId }: { accountId: AccountId }) {
-  const { state, updateAccount, updateRowHolding, addHistory, saveAccountQuantities, setHistoryBacktest } = usePortfolioStore();
+  const { state, updateAccount, updateRowHolding, addHistory, saveAccountQuantities, setHistoryBacktest,
+    confirmContributionDeposit } = usePortfolioStore();
   const account = state.accounts[accountId];
   const library = getOrDefaultLibrary(state);
 
@@ -353,6 +437,15 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   // 지금 총자산 = 실시간 ETF 평가액 + 실제 예수금
   const totalAssetValue = liveTotal + cashBalance;
 
+  // ── 정기납입 입금 확인 대기 ────────────────────────────────────────────
+  // 예정일이 지났는데 아직 장부에 없는 달만 뜬다. 그 달에 이미 반영된 자동 입금이 있으면
+  // (예: 복원된 history 기록) 뜨지 않는다 — 두 번 더하지 않기 위해서다.
+  const pendingList = useMemo(
+    () => pendingContributions(account.contributionSchedule, account.cashflows, { today }),
+    [account.contributionSchedule, account.cashflows, today],
+  );
+  const [confirmTarget, setConfirmTarget] = useState<PendingContribution | null>(null);
+
   // 퇴직연금·IRP 비위험자산 최소 30% 검증 (목표비중 기준).
   // rows 를 쓰는 이유: 행에 지정된 ETF명이 들어 있어야 종목코드 분류표로 정확히 찾는다
   // (행 id 가 `kr` 인데 실제 종목은 다른 상품일 수 있다).
@@ -536,6 +629,40 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         {dateMode === "future" && (
           <p className="text-xs text-amber-500 font-medium">선택한 날짜가 미래입니다. 리밸런싱을 저장할 수 없습니다.</p>
         )}
+
+        {/* 정기납입 입금 확인 — 입금과 리밸런싱은 독립된 이벤트다. 여기서 확인한 입금만
+            cashflow 장부(= 누적 납입원금)에 들어간다. 리밸런싱 저장은 장부를 건드리지 않는다. */}
+        {pendingList.map((pc) => (
+          <div key={pc.period} className="rounded-lg border border-blue-500/40 bg-blue-500/10 px-4 py-3 flex items-start gap-3">
+            <Banknote className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1 space-y-0.5">
+              <p className="text-xs font-bold text-blue-600 dark:text-blue-400">
+                {pc.period.replace("-", ".")} {ACCOUNT_LABELS_SHORT[accountId]} 정기납입
+              </p>
+              <p className="text-xs tabular-nums text-muted-foreground">
+                {formatKRW(pc.expectedAmount)}원 · {pc.scheduledOn.slice(5).replace("-", "/")}
+                {pc.timing === "after_close" ? " 저녁 입금" : " 입금"}
+              </p>
+              {pc.timing === "after_close" && (
+                <p className="text-[11px] text-muted-foreground">다음 거래일부터 매수 가능</p>
+              )}
+            </div>
+            <Button size="sm" className="shrink-0" onClick={() => setConfirmTarget(pc)}>
+              입금 확인
+            </Button>
+          </div>
+        ))}
+        <ContributionConfirmDialog
+          pending={confirmTarget}
+          label={ACCOUNT_LABELS_SHORT[accountId]}
+          timing={account.contributionSchedule?.timing ?? "same_day"}
+          onClose={() => setConfirmTarget(null)}
+          onConfirm={({ period, amount, applyGoingForward }) => {
+            confirmContributionDeposit(accountId, { period, amount, applyGoingForward });
+            setConfirmTarget(null);
+            toast.success(`${period.replace("-", ".")} 정기납입 ${formatKRW(amount)}원을 장부에 기록했습니다`);
+          }}
+        />
 
         {/* 퇴직연금·IRP 안전자산 최소 30% 위반 경고 — 이 목표비중대로 추가매수를 실행하면
             위험자산이 한도(70%)를 넘으므로 저장까지 막는다. 설정에서 비중을 고치면 바로 풀린다. */}
