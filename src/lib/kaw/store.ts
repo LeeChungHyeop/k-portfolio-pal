@@ -712,7 +712,7 @@ function setupVisibilityRefresh() {
     if (pendingLocalSave) return;
     dbLoad(familyCode, currentUser).then((state) => {
       if (!state || pendingLocalSave) return;
-      memState = migrateState(state);
+      memState = migrateState(state, currentUser === "hyeobi");
       saveLocal(memState);
       notify();
     }).catch(() => {});
