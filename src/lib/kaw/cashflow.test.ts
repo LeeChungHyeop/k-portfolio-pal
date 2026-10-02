@@ -6,6 +6,7 @@ import {
   findScheduledCashflow,
   netCashflowByDate,
   periodOf,
+  principalAsOf,
   type CashflowEntry,
   type CashflowHistoryLike,
 } from "./cashflow";
@@ -215,5 +216,30 @@ describe("netCashflowByDate — 기간 수익률용 날짜별 순흐름", () => 
     expect(m.get("2026-07-15")).toBe(-14_500_000);
     expect(m.get("2026-08-01")).toBe(250_000);
     expect(m.get("2026-09-01")).toBeUndefined();
+  });
+});
+
+describe("principalAsOf", () => {
+  const cashflows: CashflowEntry[] = [
+    { id: "a", date: "2026-01-02", amount: 1_000_000, type: "adjustment" },
+    { id: "b", date: "2026-01-25", amount: 500_000, type: "deposit" },
+    { id: "c", date: "2026-02-10", amount: -200_000, type: "withdrawal" },
+  ];
+
+  it("기준일(포함)까지의 순입금만 센다", () => {
+    expect(principalAsOf(cashflows, "2026-01-01")).toBe(0);
+    expect(principalAsOf(cashflows, "2026-01-02")).toBe(1_000_000);
+    expect(principalAsOf(cashflows, "2026-01-25")).toBe(1_500_000);
+    expect(principalAsOf(cashflows, "2026-02-09")).toBe(1_500_000);
+    expect(principalAsOf(cashflows, "2026-02-10")).toBe(1_300_000);
+  });
+
+  it("마지막 날짜 이후 기준이면 전체 합계(cumulativePrincipal)와 같다", () => {
+    expect(principalAsOf(cashflows, "2026-12-31")).toBe(cumulativePrincipal(cashflows));
+  });
+
+  it("장부가 없으면 0 이다 — 추정하지 않는다", () => {
+    expect(principalAsOf(undefined, "2026-02-10")).toBe(0);
+    expect(principalAsOf([], "2026-02-10")).toBe(0);
   });
 });

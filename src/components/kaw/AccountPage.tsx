@@ -13,7 +13,7 @@ import { LineChart, Line, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, Responsive
 import { Plus, Trash2, ChevronDown, ChevronRight, Save, Pencil, RefreshCw, Wifi, WifiOff, Zap, History, CalendarIcon, ShieldAlert, Banknote, Check } from "lucide-react";
 import { toast } from "sonner";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
-import { syncGrowthBacktest } from "@/lib/kaw/backtest";
+import { syncGrowthBacktest, accountUsesSafeAssetMix } from "@/lib/kaw/backtest";
 import { checkSafeAssetMinimum, checkSafeAssetValueLimit, MAX_RISK_ASSET_PCT } from "@/lib/kaw/safeAsset";
 import {
   pendingContributions,
@@ -543,7 +543,12 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       rowQuantitiesSnap: { ...quantities },
       returnPct: null,
     };
-    syncGrowthBacktest([...account.history, backtestEntry])
+    // 지수비교 화면과 **같은 맥락**으로 계산해야 한다. 장부(원금)와 퇴직연금/IRP 안전자산 혼합을
+    // 빼고 저장하면, schemaVersion 이 같아서 재계산도 안 되는 어긋난 스냅샷이 영구히 남는다.
+    syncGrowthBacktest([...account.history, backtestEntry], {
+      cashflows: account.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix(accountId),
+    })
       .then((result) => setHistoryBacktest(accountId, result))
       .catch(() => { /* 실패해도 무시 — 지수비교 메뉴에서 다시 시도됨 */ });
   }
@@ -1120,7 +1125,10 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
     };
     addHistory(accountId, newEntry);
     setManualTotal(""); setManualDeposit("");
-    syncGrowthBacktest([...account.history, { ...newEntry, returnPct: null }])
+    syncGrowthBacktest([...account.history, { ...newEntry, returnPct: null }], {
+      cashflows: account.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix(accountId),
+    })
       .then((result) => setHistoryBacktest(accountId, result))
       .catch(() => { /* 실패해도 무시 — 지수비교 메뉴에서 다시 시도됨 */ });
   }

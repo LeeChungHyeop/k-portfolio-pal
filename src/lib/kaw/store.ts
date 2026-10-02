@@ -6,7 +6,7 @@ import {
   type CashflowEntry,
 } from "./cashflow";
 import {
-  confirmContribution, upsertAmountVersion,
+  confirmContribution, upsertAmountVersion, createInitialSchedule,
   type RecurringContributionSchedule, type ContributionAmountVersion,
 } from "./contribution";
 
@@ -237,7 +237,15 @@ function recalcReturns(history: HistoryEntry[]): HistoryEntry[] {
   });
 }
 
-function migrateState(parsed: StoreState, injectSeed = false): StoreState {
+/**
+ * migrateState 가 "없어서 새로 만든" 영속 대상. hydration 중에 만들어진 값은 아직 DB 에 없으므로
+ * 호출자가 memState 를 확정한 뒤 `persistMigrationOnce()` 로 **1회만** 저장한다.
+ */
+interface MigrationResult {
+  createdContributionSchedule: boolean;
+}
+
+function migrateState(parsed: StoreState, injectSeed = false, out?: MigrationResult): StoreState {
   const seed = seedState();
   // Migrate global MP → growth if leftover
   if ((parsed.profile as string) === "MP") parsed.profile = "growth";
@@ -314,17 +322,14 @@ function migrateState(parsed: StoreState, injectSeed = false): StoreState {
     // 생성 시점의 월이므로 그 이전 달은 pending 으로 뜨지 않는다 — 과거를 추정하지 않는다.
     // 만들고 나면 이 블록은 다시 돌지 않고, 이후로는 계좌에 저장된 설정만이 근거다.
     if (!acc.contributionSchedule) {
-      const seed = CONTRIBUTION_SCHEDULE_SEED[id];
-      const amount = Math.max(0, acc.deposit ?? 0);
-      acc.contributionSchedule = {
-        id: `sched:${id}`,
-        enabled: seed.enabled && amount > 0,
-        dayOfMonth: seed.dayOfMonth,
-        timing: seed.timing,
-        amountVersions: amount > 0
-          ? [{ effectiveFrom: new Date().toISOString().slice(0, 7), amount }]
-          : [],
-      };
+      acc.contributionSchedule = createInitialSchedule(
+        `sched:${id}`,
+        CONTRIBUTION_SCHEDULE_SEED[id],
+        acc.deposit,
+        new Date().toISOString().slice(0, 7),
+      );
+      // 여기서 바로 저장하지 않는다. 호출자(hydration)가 memState 확정 후 1회만 영속한다.
+      if (out) out.createdContributionSchedule = true;
     }
 
     // Migrate to row-based asset management (legacy)
@@ -436,7 +441,7 @@ function loadLocal(): StoreState {
     let st: StoreState | null = null;
     try {
       const raw = localStorage.getItem(storeKey(familyCode, currentUser));
-      if (raw) st = migrateState(JSON.parse(raw) as StoreState, isSeed);
+      if (raw) st = migrateState(JSON.parse(raw) as StoreState, isSeed, hydrationMigration);
     } catch {}
     if (!st) st = isSeed ? seedState() : emptyState();
     const sharedLib = loadSharedLib(familyCode);
@@ -445,7 +450,7 @@ function loadLocal(): StoreState {
   }
   try {
     const raw = localStorage.getItem(LEGACY_STORE_KEY);
-    if (raw) return migrateState(JSON.parse(raw) as StoreState, true);
+    if (raw) return migrateState(JSON.parse(raw) as StoreState, true, hydrationMigration);
   } catch {}
   return seedState();
 }
@@ -541,6 +546,23 @@ function scheduleSave() {
   }, 800);
 }
 
+// ── hydration 중 생성된 값의 1회 영속 ──────────────────────────────────────
+// migrateState 가 DB 에 없던 값(contributionSchedule)을 처음 만들면, 그대로 두면 다음 접속에서
+// 또 만들어지므로 한 번은 저장해야 한다. 단 **프로필당 세션 1회만** 시도한다 —
+// 저장이 실패하거나 서버가 값을 돌려주지 않아도 폴링마다 dbSave 를 반복하지 않기 위해서다.
+const hydrationMigration: MigrationResult = { createdContributionSchedule: false };
+const migrationPersistAttempted = new Set<string>();
+
+function persistMigrationOnce() {
+  const created = hydrationMigration.createdContributionSchedule;
+  hydrationMigration.createdContributionSchedule = false;
+  if (!created || !familyCode || !currentUser) return;
+  const key = `${familyCode}:${currentUser}`;
+  if (migrationPersistAttempted.has(key)) return;
+  migrationPersistAttempted.add(key);
+  scheduleSave();
+}
+
 // ── 폴링 동기화 (Realtime 웹소켓 대신) ──────────────────────────────────────
 // 다른 기기/탭에서 저장한 변경사항을 주기적으로 확인해 반영한다.
 function startPolling(code: string) {
@@ -554,10 +576,11 @@ function startPolling(code: string) {
       if (!state) return;
       if (pendingLocalSave) return; // 조회하는 동안 새로 로컬 변경이 생겼으면 이 (더 오래된) 결과는 버림
       isApplyingRemote = true;
-      memState = migrateState(state, currentUser === "hyeobi");
+      memState = migrateState(state, currentUser === "hyeobi", hydrationMigration);
       saveLocal(memState);
       isApplyingRemote = false;
       notify();
+      persistMigrationOnce();
     } catch { /* 다음 폴링에서 재시도 */ }
   }, POLL_INTERVAL_MS);
 }
@@ -617,12 +640,13 @@ export async function activateProfile(profileId: string): Promise<void> {
     const loaded = await dbLoad(familyCode, profileId);
     if (loaded) {
       // DB 데이터는 반드시 migrateState를 거쳐 새 필드(profileRows 등)를 초기화
-      memState = migrateState(loaded, profileId === "hyeobi");
+      memState = migrateState(loaded, profileId === "hyeobi", hydrationMigration);
     } else {
       // DB 실패 시 로컬 캐시 우선 사용 (로컬 캐시도 내부에서 migrateState 적용)
       memState = loadLocal();
     }
     saveLocal(memState);
+    persistMigrationOnce();
     startPolling(familyCode);
   } catch {}
 
@@ -636,7 +660,11 @@ export async function syncNow(): Promise<void> {
   notify();
   try {
     const state = await dbLoad(familyCode, currentUser);
-    if (state) { memState = migrateState(state, currentUser === "hyeobi"); saveLocal(memState); }
+    if (state) {
+      memState = migrateState(state, currentUser === "hyeobi", hydrationMigration);
+      saveLocal(memState);
+      persistMigrationOnce();
+    }
     startPolling(familyCode);
   } catch (e) {
     console.error("[kaw] syncNow error:", e);
@@ -665,6 +693,7 @@ export function logoutCode() {
   currentUser = "";
   memState = null;
   dbError = null;
+  migrationPersistAttempted.clear();
   notify();
 }
 
@@ -694,9 +723,10 @@ function setupVisibilityRefresh() {
     if (pendingLocalSave) return;
     dbLoad(familyCode, currentUser).then((state) => {
       if (!state || pendingLocalSave) return;
-      memState = migrateState(state);
+      memState = migrateState(state, false, hydrationMigration);
       saveLocal(memState);
       notify();
+      persistMigrationOnce();
     }).catch(() => {});
   });
 }
@@ -722,8 +752,13 @@ async function initFromStorage() {
 
     try {
       const dbState = await dbLoad(code, sessionProfile);
-      if (dbState) { memState = migrateState(dbState, sessionProfile === "hyeobi"); saveLocal(memState); notify(); }
+      if (dbState) {
+        memState = migrateState(dbState, sessionProfile === "hyeobi", hydrationMigration);
+        saveLocal(memState);
+        notify();
+      }
     } catch { /* 로컬 캐시로 계속 진행 */ }
+    persistMigrationOnce();
     startPolling(code);
   }
 

@@ -96,6 +96,21 @@ export function cumulativePrincipal(cashflows: readonly CashflowEntry[] | undefi
   return cashflows.reduce((s, c) => s + (Number.isFinite(c.amount) ? c.amount : 0), 0);
 }
 
+/**
+ * 기준일(포함)까지의 누적 납입원금. 시점별 누적수익률(지수비교 등)에서 쓴다.
+ * 전체 합계는 `cumulativePrincipal` 과 같다 — 둘 다 장부만 근거로 한다.
+ */
+export function principalAsOf(
+  cashflows: readonly CashflowEntry[] | undefined,
+  date: string,
+): number {
+  if (!cashflows?.length) return 0;
+  return cashflows.reduce(
+    (s, c) => (c.date <= date && Number.isFinite(c.amount) ? s + c.amount : s),
+    0,
+  );
+}
+
 export interface AccountTotals {
   etfValue: number;
   /** 실제 예수금. 미입력(undefined)은 0으로 계산하되 cashEntered 로 구분해 표시한다. */

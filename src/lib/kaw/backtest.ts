@@ -1,19 +1,29 @@
 import { useEffect, useMemo, useState } from "react";
-import { ASSET_ORDER, PROFILE_PRESETS, type AssetKey } from "./constants";
+import { ASSET_ORDER, PROFILE_PRESETS, type AccountId, type AssetKey } from "./constants";
 import { BUILTIN_TICKERS, type HistoryEntry } from "./store";
+import { principalAsOf, type CashflowEntry } from "./cashflow";
 
 // 계산 로직이 바뀔 때마다 올려서, 이전 버전 로직으로 저장된 backtestGrowth를 자동으로 재계산 대상으로 표시한다.
 // v2: 가격 데이터가 없는 자산(상장 전 등)의 비중이 재배분 없이 그냥 증발하던 버그 수정
 // v3: 퇴직연금/IRP는 법상 안전자산 30% 이상 편입 의무가 있어, 코스피200/S&P500 비교선도 100% 몰빵이 아니라
 //     "지수 70% + 안전자산 30%"로 계산하도록 변경 (퇴직연금/IRP 전용, ISA/연금저축펀드는 기존 100% 그대로)
-export const BACKTEST_SCHEMA_VERSION = 3;
+// v4: (1) 현금성자산 종목코드 오류(429000 → 449170) 정정 전에 계산된 값 무효화,
+//     (2) 누적 납입원금을 history.deposit 조각이 아니라 **cashflow 장부**에서 가져오도록 변경,
+//     (3) 안전자산 다리에 가격이 없을 때 그 30%가 증발하던 문제 수정(남은 다리로 비중 재배분)
+export const BACKTEST_SCHEMA_VERSION = 4;
+
+// 퇴직연금/IRP는 법상 안전자산(위험자산 아닌 자산) 30% 이상 편입 의무가 있어, 지수 비교선도
+// "지수 70% + 안전자산 30%"로 계산한다. ISA/연금저축펀드는 규제 대상이 아니라 지수 100% 그대로다.
+// 판정 근거는 이 한 곳뿐이다 — 화면/저장 양쪽이 같은 값을 쓰도록 여기서만 정의한다.
+export const SAFE_MIX_ACCOUNTS: readonly AccountId[] = ["retirement", "irp"];
+export const SAFE_MIX_WEIGHT = 0.3;
+export const accountUsesSafeAssetMix = (id: AccountId): boolean => SAFE_MIX_ACCOUNTS.includes(id);
 
 // 퇴직연금/IRP의 S&P500 비교선에서 안전자산 30%로 편입한다고 가정하는 종목 — 우리 자산 라이브러리의
 // 9개 기본 자산에 없는 별도 종목이라 티커를 직접 지정한다 (ACE 미국S&P500미국채혼합50액티브).
 export const SAFE_MIX_SP500_TICKER = "438080";
 // 코스피200 비교선의 안전자산 30%는 이미 기본 자산에 있는 국고채30년(ktb30, RISE KIS국고채30년Enhanced)을 그대로 쓴다.
 const SAFE_MIX_KOSPI_ASSET: AssetKey = "ktb30";
-const SAFE_MIX_WEIGHT = 0.3;
 
 // 계좌 히스토리 한 시점에 저장해 두는 "성장형으로 쭉 운용했다면"의 스냅샷.
 // 리밸런싱 시점마다 한 번만 계산해서 HistoryEntry에 영구 저장해 두고,
@@ -35,26 +45,59 @@ interface DatedBacktestPoint extends BacktestGrowth {
   date: string;
 }
 
+// ── 시점별 투입 원금 ───────────────────────────────────────────────────────
+//
+// 누적 납입원금의 유일한 근거는 **cashflow 장부**다 (cashflow.ts §1). history.deposit 은
+// 리밸런싱 기록의 메모일 뿐이고, 리밸런싱 사이에 들어온 입금이나 출금은 담지 못한다.
+//
+// 각 리밸런싱 시점에 "그때 새로 들어온 돈"은 (직전 시점, 이 시점] 구간의 순입금이며,
+// 첫 시점은 그 날짜까지의 전부(= 시작 보유자산 포함)다. 마지막 시점 이후의 입금은
+// 아직 투자되지 않은 돈이므로 여기에 넣지 않는다 — 화면의 "현재" 포인트에서 예수금으로 더한다.
+//
+// 장부가 없으면(옛 데이터·단위테스트) 기존 조각으로 폴백한다.
+export function depositScheduleFor(
+  sorted: readonly HistoryEntry[],
+  cashflows: readonly CashflowEntry[] | undefined,
+): number[] {
+  if (!cashflows?.length) {
+    return sorted.map((h, i) => (i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0)));
+  }
+  let prev = 0;
+  return sorted.map((h) => {
+    const upTo = principalAsOf(cashflows, h.date);
+    const amt = upTo - prev;
+    prev = upTo;
+    return amt;
+  });
+}
+
 // 여러 자산을 고정 비중으로 섞어(예: 지수 70% + 안전자산 30%) 실제와 동일한 입금 스케줄로 매번
-// 재배분해 샀다면을 시뮬레이션. weight 합이 1이면 단일 자산(100%), 아니면 다리(leg)별로 나눠 담는다.
+// 재배분해 샀다면을 시뮬레이션. leg 가 하나면 단일 자산(100%), 여럿이면 비중대로 나눠 담는다.
 function computeWeightedBacktest(
   sorted: HistoryEntry[],
+  depositAmts: number[],
   legs: { weight: number; priceOf: (date: string) => number | undefined }[],
 ): { pct: number | null; units: number[] }[] {
   const units = legs.map(() => 0);
   let cumDeposit = 0;
   let lastValue = 0; // 가격 데이터가 일시적으로 없을 때 직전 평가액을 유지하기 위한 폴백
   return sorted.map((h, i) => {
-    const depositAmt = i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
+    const depositAmt = depositAmts[i] ?? 0;
     cumDeposit += depositAmt;
     const anyPriced = legs.some((leg) => (leg.priceOf(h.date) ?? 0) > 0);
     const drifted = anyPriced
       ? legs.reduce((sum, leg, li) => sum + units[li] * (leg.priceOf(h.date) ?? 0), 0)
       : lastValue;
     const totalValue = drifted + depositAmt;
+    // 가격이 없는 다리(상장 전 등)는 이번 시점에 못 사므로, 그 비중만큼 돈이 증발하지 않도록
+    // 가격이 있는 다리끼리 비중을 비례 재배분한다 (단일 자산 비교선과 금액이 맞아야 한다).
+    const pricedWeightSum = legs.reduce(
+      (sum, leg) => sum + ((leg.priceOf(h.date) ?? 0) > 0 ? leg.weight : 0),
+      0,
+    );
     legs.forEach((leg, li) => {
       const p = leg.priceOf(h.date) ?? 0;
-      if (p > 0) units[li] = (totalValue * leg.weight) / p;
+      if (p > 0 && pricedWeightSum > 0) units[li] = (totalValue * (leg.weight / pricedWeightSum)) / p;
     });
     lastValue = totalValue;
     const pct = cumDeposit > 0 ? Math.round(((totalValue - cumDeposit) / cumDeposit) * 10000) / 100 : null;
@@ -69,9 +112,11 @@ export function computeGrowthBacktest(
   history: HistoryEntry[],
   pricesByDate: Record<string, Partial<Record<AssetKey, number>>>,
   safeAssetMixPrices?: Record<string, number | undefined>,
+  cashflows?: readonly CashflowEntry[],
 ): DatedBacktestPoint[] {
   const weights = PROFILE_PRESETS.growth;
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
+  const depositAmts = depositScheduleFor(sorted, cashflows);
   const units: Partial<Record<AssetKey, number>> = {};
   // 특정 날짜에 시세 조회가 안 될 때(신규 상장 전 등) 드리프트 평가에 쓸 직전 알려진 가격
   const lastKnownPrice: Partial<Record<AssetKey, number>> = {};
@@ -90,8 +135,8 @@ export function computeGrowthBacktest(
         { weight: SAFE_MIX_WEIGHT, priceOf: (d: string) => safeAssetMixPrices?.[d] },
       ]
     : [{ weight: 1, priceOf: (d: string) => pricesByDate[d]?.us }];
-  const kospiPoints = computeWeightedBacktest(sorted, kospiLegs);
-  const sp500Points = computeWeightedBacktest(sorted, sp500Legs);
+  const kospiPoints = computeWeightedBacktest(sorted, depositAmts, kospiLegs);
+  const sp500Points = computeWeightedBacktest(sorted, depositAmts, sp500Legs);
 
   return sorted.map((h, i) => {
     const prices = pricesByDate[h.date] ?? {};
@@ -105,7 +150,7 @@ export function computeGrowthBacktest(
       return sum + heldUnits * p;
     }, 0);
 
-    const depositAmt = i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
+    const depositAmt = depositAmts[i] ?? 0;
     cumDeposit += depositAmt;
     const totalValue = driftedValue + depositAmt;
 
@@ -143,7 +188,9 @@ export function computeGrowthBacktest(
 
 // ── 과거 종가 조회 + localStorage 캐싱 ──────────────────────────────────────
 // v2: 과거 종가 페이지 추정 버그 수정 이전에 브라우저에 저장된 실패(0원) 캐시를 무효화하기 위해 버전업
-const PRICE_CACHE_KEY = "kaw.backtest.prices.v2";
+// v3: 현금성자산 종목코드가 429000(없는 코드) → 449170 으로 정정됐다. 429000 으로 받아둔 0원 캐시가
+//     남아 있으면 현금성자산이 영구히 0원으로 계산되므로 키를 올려 전부 다시 받는다.
+const PRICE_CACHE_KEY = "kaw.backtest.prices.v3";
 
 function loadPriceCache(): Record<string, Record<string, number>> {
   try {
@@ -183,15 +230,23 @@ async function fetchHistoricalPrices(
   const sortedDates = [...new Set(dates)].sort();
   const cache = loadPriceCache();
   const allTickers = [...new Set([...GROWTH_TICKERS, ...extraTickers])];
-  const missingDates = sortedDates.filter(
-    (d) => !cache[d] || extraTickers.some((t) => cache[d][t] === undefined),
-  );
 
-  for (const date of missingDates) {
-    const fetched = await fetchPricesForDate(date, allTickers);
-    cache[date] = { ...cache[date], ...fetched };
+  // **날짜 행이 있다는 이유로 건너뛰지 않는다.** 그 날짜 캐시가 만들어진 뒤에 추가되거나 정정된
+  // 종목(예: 현금성자산 449170, 퇴직연금 안전자산 438080)은 행 안에 비어 있으므로, 날짜별로
+  // "아직 없는 종목만" 모아서 그것만 다시 조회한다.
+  // 응답에 없던 종목(상장 전·휴장)은 0 으로 박아두지 않는다 — 네트워크 실패와 구분할 수 없어
+  // 잘못된 0 이 영구히 남기 때문이다. 그런 날짜는 다음 방문에도 한 번 더 조회되지만,
+  // 읽을 때 직전 종가로 보정되므로 계산 결과는 달라지지 않는다.
+  let fetchedAny = false;
+  for (const date of sortedDates) {
+    const row = cache[date] ?? {};
+    const needed = allTickers.filter((t) => row[t] === undefined);
+    if (!needed.length) continue;
+    const fetched = await fetchPricesForDate(date, needed);
+    cache[date] = { ...row, ...fetched };
+    fetchedAny = true;
   }
-  if (missingDates.length) savePriceCache(cache);
+  if (fetchedAny) savePriceCache(cache);
 
   const lastKnown: Partial<Record<AssetKey, number>> = {};
   const lastKnownExtra: Record<string, number> = {};
@@ -225,12 +280,23 @@ async function fetchHistoricalPrices(
   return { byAsset, byTicker };
 }
 
+/**
+ * 백테스트 계산에 필요한 계좌 맥락. **두 값 모두 계좌에서 가져와야 한다** —
+ * `cashflows` 는 누적 납입원금의 유일한 근거이고, `safeAssetMix` 는 퇴직연금/IRP 여부다
+ * (`accountUsesSafeAssetMix(accountId)` 로 정한다). 빠뜨리면 저장된 스냅샷이 화면 계산과
+ * 어긋나고, schemaVersion 이 같아서 자동 재계산도 되지 않는다.
+ */
+export interface BacktestContext {
+  cashflows?: readonly CashflowEntry[];
+  safeAssetMix?: boolean;
+}
+
 // 계좌 히스토리 전체에 대해 성장형 백테스트를 계산해 entryId → 결과 맵으로 반환.
 // 날짜별 종가는 로컬 캐시를 거치므로, 이미 계산된 적 있는 날짜는 네트워크 호출 없이 즉시 처리된다.
 // safeAssetMix=true면 퇴직연금/IRP 규정(안전자산 30% 이상)에 맞춰 코스피200/S&P500 비교선을 지수 70%+안전자산 30%로 계산한다.
 export async function syncGrowthBacktest(
   history: HistoryEntry[],
-  safeAssetMix = false,
+  { cashflows, safeAssetMix = false }: BacktestContext = {},
 ): Promise<Record<string, BacktestGrowth>> {
   if (!history.length) return {};
   const extraTickers = safeAssetMix ? [SAFE_MIX_SP500_TICKER] : [];
@@ -238,7 +304,7 @@ export async function syncGrowthBacktest(
   const safeAssetMixPrices = safeAssetMix
     ? Object.fromEntries(Object.entries(byTicker).map(([date, row]) => [date, row[SAFE_MIX_SP500_TICKER]]))
     : undefined;
-  const points = computeGrowthBacktest(history, byAsset, safeAssetMixPrices);
+  const points = computeGrowthBacktest(history, byAsset, safeAssetMixPrices, cashflows);
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const result: Record<string, BacktestGrowth> = {};
   sorted.forEach((h, i) => {
@@ -259,7 +325,7 @@ export async function syncGrowthBacktest(
 export function useEnsureGrowthBacktest(
   history: HistoryEntry[],
   onResult: (updates: Record<string, BacktestGrowth>) => void,
-  safeAssetMix = false,
+  { cashflows, safeAssetMix = false }: BacktestContext = {},
 ) {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(false);
@@ -279,7 +345,7 @@ export function useEnsureGrowthBacktest(
     let cancelled = false;
     setSyncing(true);
     setError(false);
-    syncGrowthBacktest(history, safeAssetMix)
+    syncGrowthBacktest(history, { cashflows, safeAssetMix })
       .then((result) => {
         if (!cancelled) onResult(result);
       })

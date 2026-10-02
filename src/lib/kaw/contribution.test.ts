@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   amountForPeriod,
   confirmContribution,
+  createInitialSchedule,
   currentAmountVersion,
   nextPeriod,
   pendingContributions,
@@ -442,5 +443,86 @@ describe("리밸런싱 저장 → cashflow 변화 없음", () => {
     expect(storeSrc).toContain("confirmContributionDeposit");
     expect(storeSrc).toContain("addCashflow");
     expect(storeSrc).toContain("buildMigratedCashflows");
+  });
+});
+
+describe("createInitialSchedule (최초 1회 생성)", () => {
+  const seed = { dayOfMonth: 25, timing: "after_close" as const, enabled: true };
+
+  it("금액은 계좌에 저장된 월 납입액을 첫 버전으로 옮긴다 — 코드에 박지 않는다", () => {
+    const s = createInitialSchedule("sched:retirement", seed, 688_074, "2026-10");
+    expect(s).toEqual({
+      id: "sched:retirement",
+      enabled: true,
+      dayOfMonth: 25,
+      timing: "after_close",
+      amountVersions: [{ effectiveFrom: "2026-10", amount: 688_074 }],
+    });
+  });
+
+  it("적용 시작월이 생성 시점의 월이라 그 이전 달은 pending 으로 뜨지 않는다", () => {
+    const s = createInitialSchedule("sched:retirement", seed, 688_074, "2026-10");
+    expect(amountForPeriod(s, "2026-09")).toBeNull();
+    expect(amountForPeriod(s, "2026-10")).toBe(688_074);
+    expect(
+      pendingContributions(s, [], { today: "2026-10-31" }).map((p) => p.period),
+    ).toEqual(["2026-10"]);
+  });
+
+  it("금액이 없으면 버전 없이 비활성으로 만든다 (금액을 추정하지 않는다)", () => {
+    expect(createInitialSchedule("sched:isa", seed, 0, "2026-10")).toMatchObject({
+      enabled: false,
+      amountVersions: [],
+    });
+    expect(createInitialSchedule("sched:isa", seed, undefined, "2026-10")).toMatchObject({
+      enabled: false,
+      amountVersions: [],
+    });
+  });
+
+  it("seed 가 비활성이면 금액이 있어도 비활성이다 (ISA)", () => {
+    const s = createInitialSchedule("sched:isa", { ...seed, enabled: false }, 300_000, "2026-10");
+    expect(s.enabled).toBe(false);
+    expect(s.amountVersions).toEqual([{ effectiveFrom: "2026-10", amount: 300_000 }]);
+  });
+});
+
+describe("store: hydration 에서 만든 스케줄의 1회 영속", () => {
+  const storeSrc = fs.readFileSync(path.join(import.meta.dirname, "store.ts"), "utf8");
+
+  it("migrateState 는 생성 사실만 알리고 직접 저장하지 않는다", () => {
+    const start = storeSrc.indexOf("function migrateState");
+    const end = storeSrc.indexOf("// ── Module-level state", start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const body = storeSrc.slice(start, end);
+    expect(body).toContain("createInitialSchedule");
+    expect(body).toContain("out.createdContributionSchedule = true");
+    expect(body).not.toContain("dbSave(");
+    expect(body).not.toContain("scheduleSave()");
+  });
+
+  it("영속은 프로필당 세션 1회만 시도한다 — 폴링마다 dbSave 를 반복하지 않는다", () => {
+    const start = storeSrc.indexOf("function persistMigrationOnce");
+    expect(start).toBeGreaterThan(0);
+    const body = storeSrc.slice(start, storeSrc.indexOf("// ── 폴링", start));
+    // 플래그를 즉시 내려서 같은 생성이 두 번 저장되지 않게 한다
+    expect(body).toContain("hydrationMigration.createdContributionSchedule = false");
+    expect(body).toContain("migrationPersistAttempted.has(key)");
+    expect(body).toContain("migrationPersistAttempted.add(key)");
+    expect(body).toContain("scheduleSave()");
+    // setInterval/폴링을 새로 만들지 않는다
+    expect(body).not.toContain("setInterval");
+    expect(body).not.toContain("setTimeout");
+  });
+
+  it("DB 를 읽는 hydration 경로마다 생성 감지 → 영속이 걸려 있다", () => {
+    // migrateState 호출은 모두 hydrationMigration 을 넘겨야 생성을 감지할 수 있다
+    const calls = storeSrc.match(/migrateState\(/g) ?? [];
+    const withOut = storeSrc.match(/hydrationMigration\)/g) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(7);
+    expect(withOut.length).toBe(calls.length - 1); // 정의 1건 제외
+    // 각 hydration 경로(최초 로드 / 프로필 활성화 / 수동 동기화 / 폴링 / 가시성 복귀)에서 호출
+    expect((storeSrc.match(/persistMigrationOnce\(\)/g) ?? []).length).toBeGreaterThanOrEqual(6);
   });
 });
