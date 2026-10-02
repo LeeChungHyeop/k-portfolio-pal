@@ -222,7 +222,7 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
    리밸런싱 탭
 ───────────────────────────────────────────── */
 function RebalanceTab({ accountId }: { accountId: AccountId }) {
-  const { state, updateAccount, finalizeRebalance, saveAccountQuantities, setHistoryBacktest,
+  const { state, updateAccount, updateRowHolding, finalizeRebalance, saveAccountQuantities, setHistoryBacktest,
     confirmContributionDeposit } = usePortfolioStore();
   const account = state.accounts[accountId];
   const library = getOrDefaultLibrary(state);

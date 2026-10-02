@@ -799,15 +799,23 @@ export function usePortfolioStore() {
         returnPct: null,
       };
       const sorted = [...acc.history, nextEntry].sort((a, b) => a.date.localeCompare(b.date));
+      // 과거 날짜로 소급 기록하는 경우(dateMode === "past")에는 계좌의 **현재** 상태를
+      // 건드리지 않는다. cashBalance / liveQuantities / rowHoldings 는 "지금" 값이므로,
+      // 몇 달 전 리밸런싱을 채워 넣었다고 오늘의 실제 예수금을 과거 값으로 덮어쓰면
+      // 총자산이 틀어진다(cashBalance 는 1급 영속 상태다).
+      // 같은 날짜가 이미 있으면 새 기록이 뒤에 오므로(안정 정렬) 최신으로 본다.
+      const isLatest = sorted[sorted.length - 1].id === nextEntry.id;
       return {
         ...s,
         accounts: {
           ...s.accounts,
           [id]: {
             ...acc,
-            cashBalance: finalCash,
-            liveQuantities: { ...(acc.liveQuantities ?? {}), ...args.quantities },
-            rowHoldings: { ...(acc.rowHoldings ?? {}), ...args.rowHoldings },
+            ...(isLatest ? {
+              cashBalance: finalCash,
+              liveQuantities: { ...(acc.liveQuantities ?? {}), ...args.quantities },
+              rowHoldings: { ...(acc.rowHoldings ?? {}), ...args.rowHoldings },
+            } : {}),
             history: recalcReturns(sorted),
           },
         },
