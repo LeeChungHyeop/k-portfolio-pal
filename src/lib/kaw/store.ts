@@ -9,6 +9,7 @@ import {
   confirmContribution, upsertAmountVersion,
   type RecurringContributionSchedule, type ContributionAmountVersion,
 } from "./contribution";
+import { HYEOBI_RETIREMENT_DB_BENCHMARK, type RetirementDbBenchmark } from "./retirement-db";
 
 // 액세스 코드: 환경변수에 없으면 "soye" 고정
 export const ACCESS_CODE: string = import.meta.env.VITE_ACCESS_CODE || "soye";
@@ -98,6 +99,9 @@ export interface AccountState {
   // 정기납입 스케줄(예정값). 실제 입금은 사용자가 "입금 확인"을 눌러야 cashflows 에 들어간다.
   // 금액은 effectiveFrom + amount 버전으로 쌓아 과거 월의 계산이 변하지 않게 한다.
   contributionSchedule?: RecurringContributionSchedule;
+  // 퇴직연금 DC 전환 이후 "DB를 유지했다면" 가상 퇴직급여 비교용 입력/설정.
+  // retirement 계좌에서만 사용하며, 급여·평가급 원천값을 함께 저장해 과거 시계열을 재계산한다.
+  retirementDbBenchmark?: RetirementDbBenchmark;
   rebalanceDate: string;
   holdings: Holding[];
   rowHoldings?: Record<string, number>;  // row instance ID → current market value
@@ -221,7 +225,15 @@ function baseAccountSettings() {
   };
 }
 function seedAccount(id: AccountId): AccountState {
-  return { ...baseAccountSettings(), baseAmount: 0, deposit: DEFAULT_MONTHLY_DEPOSIT[id], rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: makeHistory(SEED_HISTORY[id] ?? []) };
+  return {
+    ...baseAccountSettings(),
+    baseAmount: 0,
+    deposit: DEFAULT_MONTHLY_DEPOSIT[id],
+    ...(id === "retirement" ? { retirementDbBenchmark: structuredClone(HYEOBI_RETIREMENT_DB_BENCHMARK) } : {}),
+    rebalanceDate: new Date().toISOString().slice(0, 10),
+    holdings: seedHoldings(),
+    history: makeHistory(SEED_HISTORY[id] ?? []),
+  };
 }
 function seedState(): StoreState {
   return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, seedAccount(id)])) as Record<AccountId, AccountState> };
@@ -294,6 +306,12 @@ function migrateState(parsed: StoreState, injectSeed = false): StoreState {
 
     // cashBalance(실제 예수금)는 기본값을 만들지 않는다. 기존 데이터에서 추정할 방법이 없으므로
     // 사용자가 처음 입력할 때까지 undefined 로 두고, 화면에서는 0으로만 표시한다.
+
+    // 혀비의 퇴직연금 계좌에는 실제 DB→DC 전환 정산액을 앵커로 한 비교 벤치마크를 1회 주입한다.
+    // 이후 급여 원천값 수정은 account 데이터 자체에 저장되므로 seed 로 덮어쓰지 않는다.
+    if (id === "retirement" && injectSeed && !acc.retirementDbBenchmark) {
+      acc.retirementDbBenchmark = structuredClone(HYEOBI_RETIREMENT_DB_BENCHMARK);
+    }
 
     // IRP 첫 항목 baseAmount 오류 수정 (3120898 → 3000000)
     if (injectSeed && id === "irp" && acc.history.length > 0 && acc.history[0].id === "seed-2025-12-29" && acc.history[0].baseAmount === 3120898) {
@@ -694,7 +712,7 @@ function setupVisibilityRefresh() {
     if (pendingLocalSave) return;
     dbLoad(familyCode, currentUser).then((state) => {
       if (!state || pendingLocalSave) return;
-      memState = migrateState(state);
+      memState = migrateState(state, currentUser === "hyeobi");
       saveLocal(memState);
       notify();
     }).catch(() => {});
