@@ -502,6 +502,15 @@ describe("store: hydration 에서 만든 스케줄의 1회 영속", () => {
     expect(body).not.toContain("scheduleSave()");
   });
 
+  it("적용 시작월은 UTC 가 아니라 KST 기준으로 넘긴다", () => {
+    const start = storeSrc.indexOf("createInitialSchedule(");
+    expect(start).toBeGreaterThan(0);
+    const call = storeSrc.slice(start, storeSrc.indexOf(");", start));
+    expect(call).toContain("kstMonthString()");
+    // 매월 1일 오전(KST)에 이전 달로 생성되던 UTC 계산이 남아 있지 않다
+    expect(call).not.toContain("toISOString");
+  });
+
   it("영속은 프로필당 세션 1회만 시도한다 — 폴링마다 dbSave 를 반복하지 않는다", () => {
     const start = storeSrc.indexOf("function persistMigrationOnce");
     expect(start).toBeGreaterThan(0);

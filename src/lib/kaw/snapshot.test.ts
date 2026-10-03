@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildDailySnapshotRows,
   kstDateString,
+  kstMonthString,
   kstTimeString,
   SNAPSHOT_UPSERT_CONFLICT,
   type SnapshotAccountInput,
@@ -203,5 +204,33 @@ describe("KST 변환 — 스냅샷 날짜·슬롯 판정", () => {
   it("다른 cron 슬롯은 15:40 이 아니다 (스냅샷을 쓰지 않는 시각)", () => {
     expect(kstTimeString(new Date("2026-10-01T06:30:00.000Z"))).toBe("15:30");
     expect(kstTimeString(new Date("2026-10-01T00:00:00.000Z"))).toBe("09:00");
+  });
+});
+
+describe("kstMonthString — 정기납입 적용 시작월(YYYY-MM)", () => {
+  it("월 경계: UTC 2026-10-31 15:30 = KST 2026-11-01 00:30 → 2026-11", () => {
+    const at = new Date("2026-10-31T15:30:00.000Z");
+    expect(kstDateString(at)).toBe("2026-11-01");
+    expect(kstMonthString(at)).toBe("2026-11");
+    // UTC 로 그냥 자르면 이전 달이 나온다 — 이 버그를 막는 테스트다
+    expect(at.toISOString().slice(0, 7)).toBe("2026-10");
+  });
+
+  it("그 달 마지막 순간: UTC 2026-11-01 14:59 = KST 2026-11-01 23:59 → 2026-11", () => {
+    const at = new Date("2026-11-01T14:59:00.000Z");
+    expect(kstMonthString(at)).toBe("2026-11");
+  });
+
+  it("낮 시간대는 UTC·KST 월이 같다", () => {
+    expect(kstMonthString(new Date("2026-11-15T03:00:00.000Z"))).toBe("2026-11");
+    expect(kstMonthString(new Date("2026-11-15T23:00:00.000Z"))).toBe("2026-11");
+  });
+
+  it("연 경계도 KST 기준으로 넘어간다: UTC 2026-12-31 15:00 → 2027-01", () => {
+    expect(kstMonthString(new Date("2026-12-31T15:00:00.000Z"))).toBe("2027-01");
+  });
+
+  it("월말 UTC 오전은 아직 같은 달이다: UTC 2026-10-31 09:00 = KST 18:00 → 2026-10", () => {
+    expect(kstMonthString(new Date("2026-10-31T09:00:00.000Z"))).toBe("2026-10");
   });
 });

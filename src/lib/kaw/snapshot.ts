@@ -71,6 +71,17 @@ export function kstDateString(at: Date = new Date()): string {
   return new Date(at.getTime() + 9 * 3_600_000).toISOString().slice(0, 10);
 }
 
+/**
+ * UTC 시각 → 한국시간 기준 YYYY-MM.
+ *
+ * 브라우저 local timezone 에 의존하지 않고 고정 +9 로 계산한다(KST 는 서머타임이 없다).
+ * `toISOString().slice(0, 7)` 을 그대로 쓰면 매월 1일 00:00~08:59 KST 에 **이전 달**이 나온다
+ * (예: 2026-11-01 00:30 KST = UTC 2026-10-31 → "2026-10").
+ */
+export function kstMonthString(at: Date = new Date()): string {
+  return kstDateString(at).slice(0, 7);
+}
+
 /** 한국시간 기준 HH:MM */
 export function kstTimeString(at: Date = new Date()): string {
   return new Date(at.getTime() + 9 * 3_600_000).toISOString().slice(11, 16);

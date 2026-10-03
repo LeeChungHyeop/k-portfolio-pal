@@ -5,6 +5,7 @@ import {
   buildMigratedCashflows, periodOf,
   type CashflowEntry,
 } from "./cashflow";
+import { kstMonthString } from "./snapshot";
 import {
   confirmContribution, upsertAmountVersion, createInitialSchedule,
   type RecurringContributionSchedule, type ContributionAmountVersion,
@@ -329,7 +330,10 @@ function migrateState(parsed: StoreState, injectSeed = false, out?: MigrationRes
         `sched:${id}`,
         CONTRIBUTION_SCHEDULE_SEED[id],
         acc.deposit,
-        new Date().toISOString().slice(0, 7),
+        // 적용 시작월은 **한국시간 기준**이다. UTC 로 계산하면 매월 1일 오전(KST)에 최초
+        // hydration 된 계좌의 effectiveFrom 이 이전 달로 생겨, 그 달 정기납입이 pending 으로
+        // 뜨고 금액 버전도 한 달 앞당겨 적용된다.
+        kstMonthString(),
       );
       // 여기서 바로 저장하지 않는다. 호출자(hydration)가 memState 확정 후 1회만 영속한다.
       if (out) out.createdContributionSchedule = true;
