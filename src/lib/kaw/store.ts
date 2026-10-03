@@ -44,6 +44,9 @@ export interface HistoryEntry {
     kospiUnits: number; sp500Units: number;
     kospiSafeUnits: number; sp500SafeUnits: number;
     schemaVersion: number;
+    // 계산에 쓴 cashflow 장부의 지문. 지금 장부와 다르면 같은 schemaVersion 이어도 재계산된다
+    // (backtest.ts cashflowFingerprint / needsBacktestRecompute).
+    cashflowKey?: string;
   };
 }
 export interface AssetRowDef {

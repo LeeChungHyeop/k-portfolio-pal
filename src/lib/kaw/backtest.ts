@@ -39,6 +39,13 @@ export interface BacktestGrowth {
   kospiSafeUnits: number; // 퇴직연금/IRP 전용 — 코스피200 비교선의 안전자산(30%, 국고채30년) 보유 유닛
   sp500SafeUnits: number; // 퇴직연금/IRP 전용 — S&P500 비교선의 안전자산(30%, ACE 미국S&P500미국채혼합50액티브) 보유 유닛
   schemaVersion: number;
+  /**
+   * 이 값을 계산할 때 쓴 cashflow 장부의 지문(`cashflowFingerprint`).
+   * 지금 장부의 지문과 다르면 schemaVersion 이 같아도 다시 계산해야 한다 — 그래야 과거 입금을
+   * 보정했을 때 실제수익률(장부에서 즉시 계산)과 비교선(저장값)이 서로 다른 원금을 쓰지 않는다.
+   * v4 이전에 저장된 값에는 이 필드가 없다(undefined → 한 번 재계산된 뒤 채워진다).
+   */
+  cashflowKey?: string;
 }
 
 interface DatedBacktestPoint extends BacktestGrowth {
@@ -71,6 +78,30 @@ export function depositScheduleFor(
   });
 }
 
+/** 장부가 없어 history 조각으로 폴백한 상태를 가리키는 지문. 폴백 의미를 지문 쪽에서도 유지한다. */
+export const LEGACY_CASHFLOW_KEY = "legacy";
+
+/**
+ * 저장된 백테스트를 다시 계산해야 하는지 판정하기 위한 **장부 지문**.
+ *
+ * 담는 값은 benchmark 계산에 실제로 영향을 주는 것만이다:
+ *   - `date`   — 어느 시점에 투입된 돈인지 (시점별 투입액과 누적원금이 달라진다)
+ *   - `amount` — 얼마인지
+ *   - `timing` — 장마감 후 입금은 그 날 장중에 쓸 수 없다. 지금 계산은 날짜만 보지만
+ *                귀속 구간 규칙(performance.ts)과 같은 입력이라 지문에 포함해 둔다.
+ * `id` / `source` / `note` 는 담지 않는다 — 메모만 고쳤다고 재계산할 이유가 없다.
+ *
+ * 배열 순서에 흔들리지 않도록 조합한 문자열을 정렬한다. `timing` 미지정은 performance.ts 와
+ * 같은 규칙으로 `same_day` 로 정규화한다(나중에 명시값이 붙어도 지문이 바뀌지 않는다).
+ */
+export function cashflowFingerprint(cashflows: readonly CashflowEntry[] | undefined): string {
+  if (!cashflows?.length) return LEGACY_CASHFLOW_KEY;
+  return cashflows
+    .map((c) => `${c.date}|${c.amount}|${c.timing ?? "same_day"}`)
+    .sort()
+    .join(",");
+}
+
 // 여러 자산을 고정 비중으로 섞어(예: 지수 70% + 안전자산 30%) 실제와 동일한 입금 스케줄로 매번
 // 재배분해 샀다면을 시뮬레이션. leg 가 하나면 단일 자산(100%), 여럿이면 비중대로 나눠 담는다.
 function computeWeightedBacktest(
@@ -79,25 +110,36 @@ function computeWeightedBacktest(
   legs: { weight: number; priceOf: (date: string) => number | undefined }[],
 ): { pct: number | null; units: number[] }[] {
   const units = legs.map(() => 0);
+  const lastKnownPrice = legs.map(() => 0);
   let cumDeposit = 0;
-  let lastValue = 0; // 가격 데이터가 일시적으로 없을 때 직전 평가액을 유지하기 위한 폴백
+  let lastValue = 0; // 모든 다리의 가격이 없을 때 직전 평가액을 유지하기 위한 폴백
   return sorted.map((h, i) => {
     const depositAmt = depositAmts[i] ?? 0;
     cumDeposit += depositAmt;
-    const anyPriced = legs.some((leg) => (leg.priceOf(h.date) ?? 0) > 0);
+    // 이 시점에 쓸 다리별 가격. 조회가 안 된 다리는 **직전에 알려진 가격**으로 평가한다 —
+    // 이미 보유 중인 다리를 0원으로 취급하면 그 비중만큼 평가액이 꺼졌다가 다음 시점에 되살아난다
+    // (운영 경로는 fetchHistoricalPrices 가 이미 carry-forward 하지만, 여기서도 자체적으로 막는다).
+    // 한 번도 가격이 없었던 다리(상장 전)는 0이며, 그건 아래에서 비중 재배분으로 처리된다.
+    const priceAt = legs.map((leg, li) => {
+      const p = leg.priceOf(h.date) ?? 0;
+      if (p > 0) lastKnownPrice[li] = p;
+      return p > 0 ? p : lastKnownPrice[li];
+    });
+    const anyPriced = priceAt.some((p) => p > 0);
     const drifted = anyPriced
-      ? legs.reduce((sum, leg, li) => sum + units[li] * (leg.priceOf(h.date) ?? 0), 0)
+      ? legs.reduce((sum, _leg, li) => sum + units[li] * priceAt[li], 0)
       : lastValue;
     const totalValue = drifted + depositAmt;
-    // 가격이 없는 다리(상장 전 등)는 이번 시점에 못 사므로, 그 비중만큼 돈이 증발하지 않도록
-    // 가격이 있는 다리끼리 비중을 비례 재배분한다 (단일 자산 비교선과 금액이 맞아야 한다).
+    // 아직 상장 전이라 가격이 한 번도 없었던 다리는 이번 시점에 못 사므로, 그 비중만큼 돈이
+    // 증발하지 않도록 가격이 있는 다리끼리 비중을 비례 재배분한다 (단일 자산 비교선과 금액이 맞아야 한다).
     const pricedWeightSum = legs.reduce(
-      (sum, leg) => sum + ((leg.priceOf(h.date) ?? 0) > 0 ? leg.weight : 0),
+      (sum, leg, li) => sum + (priceAt[li] > 0 ? leg.weight : 0),
       0,
     );
     legs.forEach((leg, li) => {
-      const p = leg.priceOf(h.date) ?? 0;
-      if (p > 0 && pricedWeightSum > 0) units[li] = (totalValue * (leg.weight / pricedWeightSum)) / p;
+      if (priceAt[li] > 0 && pricedWeightSum > 0) {
+        units[li] = (totalValue * (leg.weight / pricedWeightSum)) / priceAt[li];
+      }
     });
     lastValue = totalValue;
     const pct = cumDeposit > 0 ? Math.round(((totalValue - cumDeposit) / cumDeposit) * 10000) / 100 : null;
@@ -117,6 +159,7 @@ export function computeGrowthBacktest(
   const weights = PROFILE_PRESETS.growth;
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const depositAmts = depositScheduleFor(sorted, cashflows);
+  const cashflowKey = cashflowFingerprint(cashflows);
   const units: Partial<Record<AssetKey, number>> = {};
   // 특정 날짜에 시세 조회가 안 될 때(신규 상장 전 등) 드리프트 평가에 쓸 직전 알려진 가격
   const lastKnownPrice: Partial<Record<AssetKey, number>> = {};
@@ -182,6 +225,7 @@ export function computeGrowthBacktest(
       kospiSafeUnits: kospiPoints[i].units[1] ?? 0,
       sp500SafeUnits: sp500Points[i].units[1] ?? 0,
       schemaVersion: BACKTEST_SCHEMA_VERSION,
+      cashflowKey,
     };
   });
 }
@@ -310,18 +354,32 @@ export async function syncGrowthBacktest(
   sorted.forEach((h, i) => {
     const {
       totalValue, returnPct, units, kospi200Pct, sp500Pct,
-      kospiUnits, sp500Units, kospiSafeUnits, sp500SafeUnits, schemaVersion,
+      kospiUnits, sp500Units, kospiSafeUnits, sp500SafeUnits, schemaVersion, cashflowKey,
     } = points[i];
     result[h.id] = {
       totalValue, returnPct, units, kospi200Pct, sp500Pct,
-      kospiUnits, sp500Units, kospiSafeUnits, sp500SafeUnits, schemaVersion,
+      kospiUnits, sp500Units, kospiSafeUnits, sp500SafeUnits, schemaVersion, cashflowKey,
     };
   });
   return result;
 }
 
-// 히스토리 중 backtestGrowth가 없는 항목이 있으면 (신규 계좌 또는 과거 백필 대상)
-// 한 번만 조용히 계산해서 onResult로 넘겨준다.
+/**
+ * 저장된 스냅샷이 지금 기준으로 다시 계산되어야 하는가.
+ *   - 아예 없음 (신규 계좌 / 과거 백필 대상)
+ *   - 계산 로직 버전이 다름 (schemaVersion)
+ *   - **계산에 쓴 장부가 지금 장부와 다름** (cashflowKey) — 과거 입금을 보정하면 비교선도 따라와야 한다
+ */
+export function needsBacktestRecompute(
+  entry: HistoryEntry["backtestGrowth"],
+  cashflowKey: string,
+): boolean {
+  if (!entry) return true;
+  if (entry.schemaVersion !== BACKTEST_SCHEMA_VERSION) return true;
+  return entry.cashflowKey !== cashflowKey;
+}
+
+// 히스토리 중 다시 계산해야 할 항목이 있으면 한 번만 조용히 계산해서 onResult로 넘겨준다.
 export function useEnsureGrowthBacktest(
   history: HistoryEntry[],
   onResult: (updates: Record<string, BacktestGrowth>) => void,
@@ -330,18 +388,24 @@ export function useEnsureGrowthBacktest(
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(false);
 
-  // backtestGrowth가 아예 없거나, 현재 계산 로직 버전(BACKTEST_SCHEMA_VERSION)보다 낮은 버전으로 저장된 경우 재계산 대상
-  const missingKey = useMemo(
+  const cashflowKey = useMemo(() => cashflowFingerprint(cashflows), [cashflows]);
+  const staleIds = useMemo(
     () =>
       history
-        .filter((h) => !h.backtestGrowth || h.backtestGrowth.schemaVersion !== BACKTEST_SCHEMA_VERSION)
+        .filter((h) => needsBacktestRecompute(h.backtestGrowth, cashflowKey))
         .map((h) => h.id)
         .join(","),
-    [history],
+    [history, cashflowKey],
   );
 
+  // 재계산 트리거. **대상 목록만으로 트리거하면 안 된다** — 장부가 또 바뀌어 대상 목록이 그대로일
+  // 때(예: 전 구간이 이미 대상) 새 장부로 다시 돌지 않기 때문이다. 그래서 지문을 같이 넣는다.
+  // 대상이 없으면 빈 문자열이라 effect 는 즉시 반환한다. 계산 결과에는 지금 지문이 박혀 저장되므로
+  // 다음 render 에서 staleIds 가 비고, setHistoryBacktest → 재계산 loop 는 생기지 않는다.
+  const syncKey = staleIds ? `${cashflowKey}|${staleIds}` : "";
+
   useEffect(() => {
-    if (!missingKey) return;
+    if (!syncKey) return;
     let cancelled = false;
     setSyncing(true);
     setError(false);
@@ -359,7 +423,7 @@ export function useEnsureGrowthBacktest(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [missingKey, safeAssetMix]);
+  }, [syncKey, safeAssetMix]);
 
   return { syncing, error };
 }
