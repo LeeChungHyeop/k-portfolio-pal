@@ -97,6 +97,41 @@ export function nextPeriod(period: string): string {
   return month === 12 ? `${year + 1}-01` : `${year}-${pad2(month + 1)}`;
 }
 
+// ── 최초 생성 ───────────────────────────────────────────────────────────────
+
+export interface ContributionScheduleSeed {
+  dayOfMonth: number;
+  timing: ContributionTiming;
+  enabled: boolean;
+}
+
+/**
+ * 계좌에 스케줄이 아직 없을 때 **한 번** 만드는 초기 스케줄.
+ *
+ * - 금액은 코드에 박지 않고 그 계좌에 이미 저장된 월 납입액(`deposit`)을 첫 버전으로 옮긴다.
+ * - 적용 시작월은 `thisMonth`(생성 시점의 월)이므로 그 이전 달은 pending 으로 뜨지 않는다 —
+ *   과거 입금을 추정하지 않기 위해서다.
+ * - 금액이 0이면 버전 없이 비활성으로 만든다(사용자가 설정에서 금액을 넣으면 켜진다).
+ *
+ * 순수 함수다. 만들어진 값은 호출자가 계좌에 넣고 **DB 에 1회 영속**해야 한다
+ * (store.ts 의 migrateState / persistMigrationOnce 참고).
+ */
+export function createInitialSchedule(
+  scheduleId: string,
+  seed: ContributionScheduleSeed,
+  deposit: number | undefined,
+  thisMonth: string,
+): RecurringContributionSchedule {
+  const amount = Math.max(0, Math.round(deposit ?? 0));
+  return {
+    id: scheduleId,
+    enabled: seed.enabled && amount > 0,
+    dayOfMonth: seed.dayOfMonth,
+    timing: seed.timing,
+    amountVersions: amount > 0 ? [{ effectiveFrom: thisMonth, amount }] : [],
+  };
+}
+
 // ── 금액 버전 조회 ──────────────────────────────────────────────────────────
 
 /**

@@ -18,15 +18,19 @@ import {
   ReferenceLine,
 } from "recharts";
 import { RefreshCw } from "lucide-react";
-import { useEnsureGrowthBacktest, SAFE_MIX_SP500_TICKER } from "@/lib/kaw/backtest";
+import {
+  useEnsureGrowthBacktest, SAFE_MIX_SP500_TICKER, SAFE_MIX_ACCOUNTS, SAFE_MIX_WEIGHT,
+  accountUsesSafeAssetMix,
+} from "@/lib/kaw/backtest";
+import {
+  cumulativePrincipal, investedPrincipalAsOf, principalAsOf, type CashflowEntry,
+} from "@/lib/kaw/cashflow";
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
 
-// 퇴직연금/IRP는 법상 안전자산(위험자산 아닌 자산) 30% 이상 편입 의무가 있어서, 코스피200/S&P500
-// 비교선도 100% 몰빵이 아니라 "지수 70% + 안전자산 30%"로 계산한다 (ISA/연금저축펀드는 규제 대상이 아니라 그대로 100%).
-const SAFE_MIX_ACCOUNTS: AccountId[] = ["retirement", "irp"];
-const SAFE_MIX_WEIGHT = 0.3;
+// 안전자산 30% 혼합 대상 계좌와 비중은 backtest.ts 가 유일한 정의다 — 저장된 스냅샷과 화면이
+// 어긋나지 않도록 여기서 따로 정의하지 않고 그대로 가져다 쓴다.
 
 const COLOR_ACTUAL = "oklch(0.62 0.18 250)";
 const COLOR_GROWTH = "oklch(0.72 0.17 80)";
@@ -176,7 +180,10 @@ function applyAxisBreak(rows: ComparePoint[], brk: AxisBreak | null): ComparePoi
 
 // 기존 대시보드의 "전체자산추이"와 동일한 규칙: 월별 최신 리밸런싱 시점 하나만 채택.
 // 성장형 백테스트 값은 리밸런싱 시점에 미리 계산해 h.backtestGrowth로 저장돼 있으므로 그대로 읽기만 한다.
-function buildComparePoints(history: HistoryEntry[]): ComparePoint[] {
+function buildComparePoints(
+  history: HistoryEntry[],
+  cashflows: readonly CashflowEntry[] | undefined,
+): ComparePoint[] {
   if (!history.length) return [];
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
 
@@ -187,24 +194,33 @@ function buildComparePoints(history: HistoryEntry[]): ComparePoint[] {
     if (!existing || h.date > existing) latestDateByMonth.set(month, h.date);
   });
 
-  let cumDeposit = 0;
+  // 누적 납입원금은 cashflow 장부가 유일한 근거다 (history.deposit 은 리밸런싱 기록의 메모일 뿐
+  // 리밸런싱 사이의 입출금을 담지 못한다). 장부가 아직 없는 데이터만 기존 조각으로 폴백한다.
   const cumDepositByDate = new Map<string, number>();
-  sorted.forEach((h, i) => {
-    cumDeposit += i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
-    cumDepositByDate.set(h.date, cumDeposit);
-  });
+  if (cashflows?.length) {
+    sorted.forEach((h) => cumDepositByDate.set(h.date, principalAsOf(cashflows, h.date)));
+  } else {
+    let cumDeposit = 0;
+    sorted.forEach((h, i) => {
+      cumDeposit += i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
+      cumDepositByDate.set(h.date, cumDeposit);
+    });
+  }
 
   return [...latestDateByMonth.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([month, date]) => {
       const h = sorted.find((x) => x.date === date)!;
       const cd = cumDepositByDate.get(date) ?? 0;
-      const 실제수익률 = cd > 0 ? Math.round(((h.totalValue - cd) / cd) * 10000) / 100 : null;
+      // 실제 총자산 = 그 시점 ETF 평가액 + 그 시점 예수금. 예수금을 빼면 리밸런싱 후 남은 현금이
+      // 사라져 실제 수익률이 원금 대비 과소 표시된다(예수금이 없던 옛 기록은 0으로 계산).
+      const 실제자산 = h.totalValue + (h.cashBalance ?? 0);
+      const 실제수익률 = cd > 0 ? Math.round(((실제자산 - cd) / cd) * 10000) / 100 : null;
       const bt = h.backtestGrowth;
       return {
         label: month.replace("-", "."),
         date,
-        실제자산: h.totalValue,
+        실제자산,
         성장형자산: bt?.totalValue ?? 0,
         실제수익률,
         성장형수익률: bt?.returnPct ?? null,
@@ -223,6 +239,8 @@ function buildLivePoint(
   library: ReturnType<typeof getOrDefaultLibrary>,
   livePrices: Record<string, number>,
   safeAssetMix: boolean,
+  cashBalance: number | undefined,
+  cashflows: readonly CashflowEntry[] | undefined,
 ): ComparePoint | null {
   if (!history.length) return null;
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
@@ -231,7 +249,7 @@ function buildLivePoint(
 
   const qtySnap = last.rowQuantitiesSnap;
   const etfSnap = last.rowEtfSnap;
-  const 실제자산 = qtySnap && etfSnap
+  const etf실제 = qtySnap && etfSnap
     ? Object.entries(qtySnap).reduce((sum, [rowId, qty]) => {
         const etfName = etfSnap[rowId];
         const ticker = etfName ? (library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker ?? "") : "";
@@ -239,6 +257,9 @@ function buildLivePoint(
         return sum + qty * price;
       }, 0)
     : 0;
+  // 실제 총자산 = 실시간 ETF 평가액 + 실제 예수금 (CLAUDE.md 도메인 규칙). 예수금을 빼면
+  // 아직 매수하지 않은 돈이 손실로 보인다.
+  const 실제자산 = etf실제 + (cashBalance ?? 0);
 
   const units = last.backtestGrowth.units;
   const 성장형자산 = ASSET_ORDER.reduce((sum, key) => {
@@ -258,12 +279,21 @@ function buildLivePoint(
     에스피자산 += (last.backtestGrowth.sp500SafeUnits ?? 0) * (livePrices[SAFE_MIX_SP500_TICKER] ?? 0);
   }
 
-  if (실제자산 <= 0 || 성장형자산 <= 0) return null;
+  if (etf실제 <= 0 || 성장형자산 <= 0) return null;
 
-  let cumDeposit = 0;
-  sorted.forEach((h, i) => {
-    cumDeposit += i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0);
-  });
+  // 누적 납입원금 = 장부 전체 순입금. 장부가 없는 옛 데이터만 기존 조각으로 폴백한다.
+  let cumDeposit: number;
+  let 미투자 = 0; // 마지막 리밸런싱 이후 들어와 아직 투자되지 않은 돈
+  if (cashflows?.length) {
+    cumDeposit = cumulativePrincipal(cashflows);
+    // 비교선(성장형/지수)은 **마지막 리밸런싱 시점에 투자 가능했던 돈까지만** 투자해 둔 상태다.
+    // 그 뒤에 들어온 입금과, 같은 날짜의 장마감 후 입금(after_close — 그 날 장중에 못 산다)은
+    // 원금에는 들어가므로 비교선에도 "아직 예수금으로 들고 있는 돈"으로 더해, 실제 쪽
+    // (예수금 포함)과 같은 기준으로 비교한다.
+    미투자 = cumDeposit - investedPrincipalAsOf(cashflows, last.date);
+  } else {
+    cumDeposit = sorted.reduce((sum, h, i) => sum + (i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0)), 0);
+  }
   const pctVs = (value: number) =>
     cumDeposit > 0 && value > 0 ? Math.round(((value - cumDeposit) / cumDeposit) * 10000) / 100 : null;
 
@@ -271,11 +301,11 @@ function buildLivePoint(
     label: "현재",
     date: "현재",
     실제자산,
-    성장형자산,
+    성장형자산: 성장형자산 + 미투자,
     실제수익률: pctVs(실제자산),
-    성장형수익률: pctVs(성장형자산),
-    코스피200: pctVs(코스피자산),
-    "S&P500": pctVs(에스피자산),
+    성장형수익률: pctVs(성장형자산 + 미투자),
+    코스피200: pctVs(코스피자산 + 미투자),
+    "S&P500": pctVs(에스피자산 + 미투자),
   };
 }
 
@@ -287,17 +317,21 @@ export function IndexComparison() {
 
   // 계좌별로 backtestGrowth가 없는 히스토리가 있으면 (신규 계좌 또는 최초 1회) 조용히 계산해서 저장.
   // 퇴직연금/IRP는 safeAssetMix=true로 코스피200/S&P500 비교선에 안전자산 30%를 섞어 계산한다.
-  const retirementSync = useEnsureGrowthBacktest(state.accounts.retirement.history, (r) =>
-    setHistoryBacktest("retirement", r), true,
+  const retirementSync = useEnsureGrowthBacktest(
+    state.accounts.retirement.history, (r) => setHistoryBacktest("retirement", r),
+    { cashflows: state.accounts.retirement.cashflows, safeAssetMix: accountUsesSafeAssetMix("retirement") },
   );
-  const isaSync = useEnsureGrowthBacktest(state.accounts.isa.history, (r) =>
-    setHistoryBacktest("isa", r),
+  const isaSync = useEnsureGrowthBacktest(
+    state.accounts.isa.history, (r) => setHistoryBacktest("isa", r),
+    { cashflows: state.accounts.isa.cashflows, safeAssetMix: accountUsesSafeAssetMix("isa") },
   );
-  const pensionSync = useEnsureGrowthBacktest(state.accounts.pension.history, (r) =>
-    setHistoryBacktest("pension", r),
+  const pensionSync = useEnsureGrowthBacktest(
+    state.accounts.pension.history, (r) => setHistoryBacktest("pension", r),
+    { cashflows: state.accounts.pension.cashflows, safeAssetMix: accountUsesSafeAssetMix("pension") },
   );
-  const irpSync = useEnsureGrowthBacktest(state.accounts.irp.history, (r) =>
-    setHistoryBacktest("irp", r), true,
+  const irpSync = useEnsureGrowthBacktest(
+    state.accounts.irp.history, (r) => setHistoryBacktest("irp", r),
+    { cashflows: state.accounts.irp.cashflows, safeAssetMix: accountUsesSafeAssetMix("irp") },
   );
   const syncByAccount: Record<AccountId, { syncing: boolean; error: boolean }> = {
     retirement: retirementSync,
@@ -310,9 +344,12 @@ export function IndexComparison() {
     const out = {} as Record<AccountId, ComparePoint[]>;
     ACCOUNT_IDS.forEach((id) => {
       const account = state.accounts[id];
-      const points = buildComparePoints(account.history);
+      const points = buildComparePoints(account.history, account.cashflows);
       const livePoint = configured
-        ? buildLivePoint(account.history, library, livePrices, SAFE_MIX_ACCOUNTS.includes(id))
+        ? buildLivePoint(
+            account.history, library, livePrices, accountUsesSafeAssetMix(id),
+            account.cashBalance, account.cashflows,
+          )
         : null;
       out[id] = livePoint ? [...points, livePoint] : points;
     });

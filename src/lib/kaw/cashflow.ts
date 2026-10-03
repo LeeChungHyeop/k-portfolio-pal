@@ -96,6 +96,45 @@ export function cumulativePrincipal(cashflows: readonly CashflowEntry[] | undefi
   return cashflows.reduce((s, c) => s + (Number.isFinite(c.amount) ? c.amount : 0), 0);
 }
 
+/**
+ * 기준일(포함)까지의 누적 납입원금. 시점별 누적수익률(지수비교 등)에서 쓴다.
+ * 전체 합계는 `cumulativePrincipal` 과 같다 — 둘 다 장부만 근거로 한다.
+ */
+export function principalAsOf(
+  cashflows: readonly CashflowEntry[] | undefined,
+  date: string,
+): number {
+  if (!cashflows?.length) return 0;
+  return cashflows.reduce(
+    (s, c) => (c.date <= date && Number.isFinite(c.amount) ? s + c.amount : s),
+    0,
+  );
+}
+
+/**
+ * 기준일 시점에 **투자에 쓸 수 있었던** 누적 입금. 비교선(benchmark) 투입 시점 계산 전용이다.
+ *
+ *   same_day(미지정 포함) : 그 날 장중에 쓸 수 있는 돈      → `date <= 기준일`
+ *   after_close           : 그 날 장마감 뒤에 들어온 돈이라  → `date <  기준일`
+ *                           같은 날 기준점에는 아직 못 산다
+ *
+ * 경계 규칙은 기간 성과의 구간 귀속(performance.ts `isFlowInSegment` 의 기말 경계)과 같다.
+ * **누적 납입원금과는 다른 개념이다** — 실제 원금은 `principalAsOf`/`cumulativePrincipal`
+ * (입금일 기준, 투자 여부와 무관)이며 그 의미를 이 함수가 바꾸지 않는다. 둘의 차이가
+ * "아직 투자되지 않은 현금"이고, 비교선은 그만큼을 현금으로 들고 있는 것으로 계산한다.
+ */
+export function investedPrincipalAsOf(
+  cashflows: readonly CashflowEntry[] | undefined,
+  date: string,
+): number {
+  if (!cashflows?.length) return 0;
+  return cashflows.reduce((s, c) => {
+    if (!Number.isFinite(c.amount)) return s;
+    const usable = c.timing === "after_close" ? c.date < date : c.date <= date;
+    return usable ? s + c.amount : s;
+  }, 0);
+}
+
 export interface AccountTotals {
   etfValue: number;
   /** 실제 예수금. 미입력(undefined)은 0으로 계산하되 cashEntered 로 구분해 표시한다. */

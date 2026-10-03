@@ -4,8 +4,10 @@ import {
   computeAccountTotals,
   cumulativePrincipal,
   findScheduledCashflow,
+  investedPrincipalAsOf,
   netCashflowByDate,
   periodOf,
+  principalAsOf,
   type CashflowEntry,
   type CashflowHistoryLike,
 } from "./cashflow";
@@ -215,5 +217,65 @@ describe("netCashflowByDate — 기간 수익률용 날짜별 순흐름", () => 
     expect(m.get("2026-07-15")).toBe(-14_500_000);
     expect(m.get("2026-08-01")).toBe(250_000);
     expect(m.get("2026-09-01")).toBeUndefined();
+  });
+});
+
+describe("principalAsOf", () => {
+  const cashflows: CashflowEntry[] = [
+    { id: "a", date: "2026-01-02", amount: 1_000_000, type: "adjustment" },
+    { id: "b", date: "2026-01-25", amount: 500_000, type: "deposit" },
+    { id: "c", date: "2026-02-10", amount: -200_000, type: "withdrawal" },
+  ];
+
+  it("기준일(포함)까지의 순입금만 센다", () => {
+    expect(principalAsOf(cashflows, "2026-01-01")).toBe(0);
+    expect(principalAsOf(cashflows, "2026-01-02")).toBe(1_000_000);
+    expect(principalAsOf(cashflows, "2026-01-25")).toBe(1_500_000);
+    expect(principalAsOf(cashflows, "2026-02-09")).toBe(1_500_000);
+    expect(principalAsOf(cashflows, "2026-02-10")).toBe(1_300_000);
+  });
+
+  it("마지막 날짜 이후 기준이면 전체 합계(cumulativePrincipal)와 같다", () => {
+    expect(principalAsOf(cashflows, "2026-12-31")).toBe(cumulativePrincipal(cashflows));
+  });
+
+  it("장부가 없으면 0 이다 — 추정하지 않는다", () => {
+    expect(principalAsOf(undefined, "2026-02-10")).toBe(0);
+    expect(principalAsOf([], "2026-02-10")).toBe(0);
+  });
+});
+
+describe("investedPrincipalAsOf (비교선 투자 가능액)", () => {
+  const sameDay: CashflowEntry = { id: "s", date: "2026-10-25", amount: 500_000, type: "deposit", timing: "same_day" };
+  const afterClose: CashflowEntry = { id: "a", date: "2026-10-25", amount: 688_074, type: "deposit", timing: "after_close" };
+  const noTiming: CashflowEntry = { id: "n", date: "2026-10-25", amount: 100_000, type: "deposit" };
+
+  it("same_day 는 같은 날짜에 쓸 수 있다 (date <= 기준일)", () => {
+    expect(investedPrincipalAsOf([sameDay], "2026-10-24")).toBe(0);
+    expect(investedPrincipalAsOf([sameDay], "2026-10-25")).toBe(500_000);
+  });
+
+  it("timing 미지정은 same_day 와 같게 본다", () => {
+    expect(investedPrincipalAsOf([noTiming], "2026-10-25")).toBe(100_000);
+  });
+
+  it("after_close 는 같은 날짜에 못 쓴다 (date < 기준일)", () => {
+    expect(investedPrincipalAsOf([afterClose], "2026-10-25")).toBe(0);
+    expect(investedPrincipalAsOf([afterClose], "2026-10-26")).toBe(688_074);
+  });
+
+  it("누적 납입원금(principalAsOf)의 의미는 바뀌지 않는다 — 입금일 기준 그대로다", () => {
+    const flows = [sameDay, afterClose, noTiming];
+    // 원금은 입금일에 바로 들어간다
+    expect(principalAsOf(flows, "2026-10-25")).toBe(1_288_074);
+    expect(cumulativePrincipal(flows)).toBe(1_288_074);
+    // 그 중 장마감 후 입금만 아직 투자 불가 — 차액이 "미투자 현금"이다
+    expect(investedPrincipalAsOf(flows, "2026-10-25")).toBe(600_000);
+    expect(principalAsOf(flows, "2026-10-25") - investedPrincipalAsOf(flows, "2026-10-25")).toBe(688_074);
+  });
+
+  it("장부가 없으면 0 이다", () => {
+    expect(investedPrincipalAsOf(undefined, "2026-10-25")).toBe(0);
+    expect(investedPrincipalAsOf([], "2026-10-25")).toBe(0);
   });
 });
