@@ -19,7 +19,6 @@ import {
   pendingContributions,
   type PendingContribution,
 } from "@/lib/kaw/contribution";
-import { RetirementDbComparison } from "@/components/kaw/RetirementDbComparison";
 
 // YYYY-MM-DD 문자열 ↔ Date 변환 (로컬 자정 기준 — UTC 파싱으로 하루 밀리는 것 방지)
 function ymdToDate(ymd: string): Date {
@@ -165,7 +164,7 @@ function QuantityInput({ value, onChange, className }: {
   );
 }
 
-type Tab = "rebalance" | "history" | "db-compare";
+type Tab = "rebalance" | "history";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "rebalance", label: "리밸런싱" },
@@ -174,9 +173,6 @@ const TABS: { id: Tab; label: string }[] = [
 
 export function AccountPage({ accountId }: { accountId: AccountId }) {
   const [tab, setTab] = useState<Tab>("rebalance");
-  const tabs: { id: Tab; label: string }[] = accountId === "retirement"
-    ? [...TABS, { id: "db-compare", label: "DB 비교" }]
-    : TABS;
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -187,7 +183,7 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
         <div className="flex items-end">
           <div className="flex-1 border-b border-border" />
           <div className="flex items-end">
-            {tabs.map(({ id, label }) => {
+            {TABS.map(({ id, label }) => {
               const isActive = tab === id;
               return (
                 <button
@@ -212,13 +208,10 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
       {/* 탭 콘텐츠 */}
       <div className="flex-1 overflow-y-auto px-4 md:px-6 py-6 border-t-0">
         <div className="max-w-5xl mx-auto">
-          {tab === "rebalance" ? (
-            <RebalanceTab key={accountId} accountId={accountId} />
-          ) : tab === "history" ? (
-            <HistoryTab key={accountId} accountId={accountId} />
-          ) : accountId === "retirement" ? (
-            <RetirementDbComparison />
-          ) : null}
+          {tab === "rebalance"
+            ? <RebalanceTab key={accountId} accountId={accountId} />
+            : <HistoryTab   key={accountId} accountId={accountId} />
+          }
         </div>
       </div>
     </div>
