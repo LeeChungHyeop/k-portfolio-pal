@@ -319,19 +319,35 @@ export function IndexComparison() {
   // 퇴직연금/IRP는 safeAssetMix=true로 코스피200/S&P500 비교선에 안전자산 30%를 섞어 계산한다.
   const retirementSync = useEnsureGrowthBacktest(
     state.accounts.retirement.history, (r) => setHistoryBacktest("retirement", r),
-    { cashflows: state.accounts.retirement.cashflows, safeAssetMix: accountUsesSafeAssetMix("retirement") },
+    {
+      cashflows: state.accounts.retirement.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix("retirement"),
+      label: ACCOUNT_LABELS_SHORT.retirement,
+    },
   );
   const isaSync = useEnsureGrowthBacktest(
     state.accounts.isa.history, (r) => setHistoryBacktest("isa", r),
-    { cashflows: state.accounts.isa.cashflows, safeAssetMix: accountUsesSafeAssetMix("isa") },
+    {
+      cashflows: state.accounts.isa.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix("isa"),
+      label: ACCOUNT_LABELS_SHORT.isa,
+    },
   );
   const pensionSync = useEnsureGrowthBacktest(
     state.accounts.pension.history, (r) => setHistoryBacktest("pension", r),
-    { cashflows: state.accounts.pension.cashflows, safeAssetMix: accountUsesSafeAssetMix("pension") },
+    {
+      cashflows: state.accounts.pension.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix("pension"),
+      label: ACCOUNT_LABELS_SHORT.pension,
+    },
   );
   const irpSync = useEnsureGrowthBacktest(
     state.accounts.irp.history, (r) => setHistoryBacktest("irp", r),
-    { cashflows: state.accounts.irp.cashflows, safeAssetMix: accountUsesSafeAssetMix("irp") },
+    {
+      cashflows: state.accounts.irp.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix("irp"),
+      label: ACCOUNT_LABELS_SHORT.irp,
+    },
   );
   const syncByAccount: Record<AccountId, { syncing: boolean; error: boolean }> = {
     retirement: retirementSync,

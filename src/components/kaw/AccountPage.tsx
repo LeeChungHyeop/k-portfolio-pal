@@ -547,9 +547,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     syncGrowthBacktest([...account.history, backtestEntry], {
       cashflows: account.cashflows,
       safeAssetMix: accountUsesSafeAssetMix(accountId),
+      label: ACCOUNT_LABELS_SHORT[accountId],
     })
       .then((result) => setHistoryBacktest(accountId, result))
-      .catch(() => { /* 실패해도 무시 — 지수비교 메뉴에서 다시 시도됨 */ });
+      .catch((err: unknown) => {
+        // 가격이 모자라면 저장하지 않는다(기존 결과를 덮어쓰지 않는다). 지수비교 메뉴에서 재시도된다.
+        console.error("[kaw] 리밸런싱 저장 후 백테스트 계산 실패 — 저장하지 않음:", accountId, err);
+      });
   }
 
   const colCount = 7 + (isLiveActive ? 1 : 0);
@@ -1127,9 +1131,12 @@ function HistoryTab({ accountId }: { accountId: AccountId }) {
     syncGrowthBacktest([...account.history, { ...newEntry, returnPct: null }], {
       cashflows: account.cashflows,
       safeAssetMix: accountUsesSafeAssetMix(accountId),
+      label: ACCOUNT_LABELS_SHORT[accountId],
     })
       .then((result) => setHistoryBacktest(accountId, result))
-      .catch(() => { /* 실패해도 무시 — 지수비교 메뉴에서 다시 시도됨 */ });
+      .catch((err: unknown) => {
+        console.error("[kaw] 수동 기록 후 백테스트 계산 실패 — 저장하지 않음:", accountId, err);
+      });
   }
 
   const safeHistory = account.history ?? [];
