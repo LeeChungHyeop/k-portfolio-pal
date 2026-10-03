@@ -10,6 +10,11 @@ import {
   validateHistoricalPricesForBacktest,
   findBacktestResultProblems,
   syncGrowthBacktest,
+  isCurrentBacktest,
+  currentBacktestOf,
+  hasStaleBacktest,
+  staleBacktestIds,
+  backtestSyncKey,
   BacktestDataError,
   PRICE_CACHE_KEY,
   cashflowFingerprint,
@@ -21,7 +26,7 @@ import {
   SAFE_MIX_WEIGHT,
   accountUsesSafeAssetMix,
 } from "./backtest";
-import { BUILTIN_TICKERS, ASSET_ORDER, type AssetKey } from "./constants";
+import { BUILTIN_TICKERS, ASSET_ORDER, ACCOUNT_IDS, type AccountId, type AssetKey } from "./constants";
 import type { CashflowEntry } from "./cashflow";
 import type { HistoryEntry } from "./store";
 
@@ -691,5 +696,153 @@ describe("오염된 v4 결과는 다시 계산된다", () => {
     };
     expect(needsBacktestRecompute(polluted, key)).toBe(true);
     expect(BACKTEST_SCHEMA_VERSION).toBe(5);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// stale backtestGrowth 화면 차단 + 보고 있는 탭만 계산
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** production 에 저장된 오염 모양 (units 비었고 totalValue 가 월 납입액, 수익률 -99%대) */
+const pollutedV4 = (cashflowKey: string) => ({
+  totalValue: 688_074,
+  returnPct: -99.07,
+  units: {},
+  kospi200Pct: -99.07,
+  sp500Pct: -99.07,
+  kospiUnits: 0,
+  sp500Units: 0,
+  kospiSafeUnits: 0,
+  sp500SafeUnits: 0,
+  schemaVersion: 4,
+  cashflowKey,
+});
+
+describe("stale 판정 — schemaVersion 과 장부 지문이 둘 다 맞아야 current", () => {
+  const cashflows = [flow("2026-01-02", 1_000_000)];
+  const key = cashflowFingerprint(cashflows);
+  const otherKey = cashflowFingerprint([flow("2026-01-02", 999)]);
+
+  it("v4 + 현재 fingerprint → stale", () => {
+    const e = pollutedV4(key);
+    expect(isCurrentBacktest(e, key)).toBe(false);
+    expect(needsBacktestRecompute(e, key)).toBe(true);
+    expect(currentBacktestOf(e, key)).toBeUndefined();
+  });
+
+  it("v5 + fingerprint mismatch → stale", () => {
+    const e = { ...pollutedV4(otherKey), schemaVersion: 5 };
+    expect(isCurrentBacktest(e, key)).toBe(false);
+    expect(currentBacktestOf(e, key)).toBeUndefined();
+  });
+
+  it("v5 + fingerprint match → current", () => {
+    const e = { ...pollutedV4(key), schemaVersion: 5 };
+    expect(isCurrentBacktest(e, key)).toBe(true);
+    expect(currentBacktestOf(e, key)).toBe(e);
+  });
+
+  it("저장값이 없으면 stale", () => {
+    expect(isCurrentBacktest(undefined, key)).toBe(false);
+    expect(currentBacktestOf(undefined, key)).toBeUndefined();
+  });
+
+  it("오염된 v4 의 688,074 / -99.07 은 화면 데이터로 쓰이지 않는다", () => {
+    const e = pollutedV4(key);
+    const usable = currentBacktestOf(e, key);
+    // 차트는 이 게이트를 통과한 값만 읽는다 → totalValue/수익률 모두 접근 불가
+    expect(usable).toBeUndefined();
+    expect(usable?.totalValue).toBeUndefined();
+    expect(usable?.returnPct).toBeUndefined();
+    expect(usable?.kospi200Pct).toBeUndefined();
+  });
+
+  it("history 중 하나라도 stale 이면 그 계좌는 차트를 그리지 않는다", () => {
+    const current = { ...pollutedV4(key), schemaVersion: 5 };
+    const mixed = [
+      { ...entry("2026-01-02"), backtestGrowth: current },
+      { ...entry("2026-02-02"), backtestGrowth: pollutedV4(key) }, // v4 하나 섞임
+    ];
+    expect(hasStaleBacktest(mixed, key)).toBe(true);
+    expect(staleBacktestIds(mixed, key)).toEqual(["h-2026-02-02"]);
+
+    const allCurrent = mixed.map((h) => ({ ...h, backtestGrowth: current }));
+    expect(hasStaleBacktest(allCurrent, key)).toBe(false);
+    expect(staleBacktestIds(allCurrent, key)).toEqual([]);
+  });
+});
+
+describe("backtestSyncKey — 보고 있는 탭만 계산한다", () => {
+  const cashflows = [flow("2026-01-02", 1_000_000)];
+  const key = cashflowFingerprint(cashflows);
+  const staleHistory = [{ ...entry("2026-01-02"), backtestGrowth: pollutedV4(key) }];
+  const currentHistory = [
+    { ...entry("2026-01-02"), backtestGrowth: { ...pollutedV4(key), schemaVersion: 5 } },
+  ];
+
+  it("enabled=false 면 stale 이어도 트리거가 비어 있다 (요청/계산 없음)", () => {
+    expect(backtestSyncKey(staleHistory, key, false)).toBe("");
+  });
+
+  it("enabled=true + stale → 트리거가 생긴다", () => {
+    expect(backtestSyncKey(staleHistory, key, true)).toBe(`${key}|h-2026-01-02`);
+  });
+
+  it("enabled=true + current → 트리거 없음 (재계산하지 않음)", () => {
+    expect(backtestSyncKey(currentHistory, key, true)).toBe("");
+  });
+
+  it("장부가 또 바뀌면 대상 목록이 같아도 트리거가 달라진다", () => {
+    const otherKey = cashflowFingerprint([flow("2026-01-02", 999)]);
+    expect(backtestSyncKey(staleHistory, otherKey, true)).not.toBe(
+      backtestSyncKey(staleHistory, key, true),
+    );
+  });
+
+  it("4계좌 중 선택된 탭만 트리거가 생긴다", () => {
+    const byAccount = { retirement: staleHistory, isa: staleHistory, pension: staleHistory, irp: staleHistory };
+    const active = (tab: AccountId) =>
+      ACCOUNT_IDS.filter((id) => backtestSyncKey(byAccount[id], key, tab === id) !== "");
+    expect(active("retirement")).toEqual(["retirement"]);
+    expect(active("isa")).toEqual(["isa"]);
+    // 탭을 바꾸면 새 계좌만 돈다
+    expect(active("pension")).toEqual(["pension"]);
+    expect(active("irp")).toEqual(["irp"]);
+  });
+
+  it("실패한 계좌는 stale 상태로 남고, 기존 v4 를 current 로 취급하지 않는다", () => {
+    // syncGrowthBacktest 가 실패하면 저장이 없으므로 history 는 그대로 v4 다
+    expect(hasStaleBacktest(staleHistory, key)).toBe(true);
+    expect(currentBacktestOf(staleHistory[0].backtestGrowth, key)).toBeUndefined();
+    // 다시 그 탭을 보면 또 시도된다
+    expect(backtestSyncKey(staleHistory, key, true)).not.toBe("");
+  });
+});
+
+describe("IndexComparison: stale 차단 / 탭 게이팅 근거 (구조 검증)", () => {
+  const src = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "components", "kaw", "IndexComparison.tsx"),
+    "utf8",
+  );
+
+  it("차트 데이터는 currentBacktestOf 게이트를 통과한 값만 쓴다", () => {
+    expect(src).toContain("const bt = currentBacktestOf(h.backtestGrowth, cashflowKey)");
+    expect(src).toContain("const lastBt = currentBacktestOf(last.backtestGrowth, cashflowKey)");
+    // 저장값을 직접 읽는 경로가 남아 있지 않다
+    expect(src).not.toContain("last.backtestGrowth.units");
+    expect(src).not.toContain("const bt = h.backtestGrowth;");
+  });
+
+  it("stale 이면 차트를 렌더하지 않는다 (동기 판정)", () => {
+    expect(src).toContain("const stale = staleByAccount[id]");
+    expect(src).toContain("const showCharts = !stale && dataByAccount[id].length >= 1");
+    expect(src).toContain("hasStaleBacktest(acc.history, cashflowFingerprint(acc.cashflows))");
+  });
+
+  it("계좌 4개 hook 을 모두 호출하되 보고 있는 탭만 enabled 다", () => {
+    for (const id of ["retirement", "isa", "pension", "irp"]) {
+      expect(src).toContain(`enabled: tab === "${id}"`);
+    }
+    expect((src.match(/useEnsureGrowthBacktest\(/g) ?? []).length).toBe(4);
   });
 });

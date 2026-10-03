@@ -488,6 +488,11 @@ export interface BacktestContext {
   safeAssetMix?: boolean;
   /** 진단 로그용 계좌 이름 (계산에는 쓰지 않는다) */
   label?: string;
+  /**
+   * false 면 계산도 네트워크 요청도 하지 않는다(기본 true). 지수비교 화면이 계좌 4개를
+   * 한꺼번에 조회하지 않도록, 보고 있는 탭만 true 로 둔다.
+   */
+  enabled?: boolean;
 }
 
 // 계좌 히스토리 전체에 대해 성장형 백테스트를 계산해 entryId → 결과 맵으로 반환.
@@ -548,33 +553,87 @@ export function needsBacktestRecompute(
   return entry.cashflowKey !== cashflowKey;
 }
 
+/**
+ * 지금 기준으로 **그릴 수 있는** 저장값인가. `needsBacktestRecompute` 의 반대다.
+ * 현재 schemaVersion 과 현재 장부 지문이 **둘 다** 맞아야 current 다.
+ */
+export function isCurrentBacktest(
+  entry: HistoryEntry["backtestGrowth"],
+  cashflowKey: string,
+): boolean {
+  return !needsBacktestRecompute(entry, cashflowKey);
+}
+
+/**
+ * 화면에 쓸 수 있는 저장값만 통과시킨다. stale 이면 `undefined` —
+ * **오염된 v4 값(units={} / totalValue=납입액 / -99% 수익률)이 차트로 새지 않게 하는 게이트다.**
+ * syncing 같은 비동기 상태가 아니라 이 동기 판정을 쓰므로 첫 render 에서도 한 프레임 안 보인다.
+ */
+export function currentBacktestOf(
+  entry: HistoryEntry["backtestGrowth"],
+  cashflowKey: string,
+): HistoryEntry["backtestGrowth"] | undefined {
+  return isCurrentBacktest(entry, cashflowKey) ? entry : undefined;
+}
+
+/** 다시 계산해야 하는 history 항목 id 들 */
+export function staleBacktestIds(
+  history: readonly HistoryEntry[],
+  cashflowKey: string,
+): string[] {
+  return history.filter((h) => needsBacktestRecompute(h.backtestGrowth, cashflowKey)).map((h) => h.id);
+}
+
+/** 하나라도 stale 이면 그 계좌의 비교 차트를 그리지 않는다(계산 중/실패 안내만 띄운다). */
+export function hasStaleBacktest(
+  history: readonly HistoryEntry[],
+  cashflowKey: string,
+): boolean {
+  return history.some((h) => needsBacktestRecompute(h.backtestGrowth, cashflowKey));
+}
+
+/**
+ * 재계산 트리거 키(순수 함수).
+ *
+ * - `enabled` 가 false 면 빈 문자열 — **네트워크 요청도 계산도 하지 않는다.**
+ *   (지수비교는 계좌 4개의 hook 을 항상 호출하되 보고 있는 탭만 enabled 로 둔다.)
+ * - 대상이 없으면(모두 current) 빈 문자열 — 계산하지 않는다.
+ * - **대상 목록만으로 트리거하면 안 된다** — 장부가 또 바뀌어 대상 목록이 그대로일 때
+ *   (예: 전 구간이 이미 대상) 새 장부로 다시 돌지 않기 때문이다. 그래서 지문을 같이 넣는다.
+ */
+export function backtestSyncKey(
+  history: readonly HistoryEntry[],
+  cashflowKey: string,
+  enabled = true,
+): string {
+  if (!enabled) return "";
+  const ids = staleBacktestIds(history, cashflowKey);
+  return ids.length ? `${cashflowKey}|${ids.join(",")}` : "";
+}
+
 // 히스토리 중 다시 계산해야 할 항목이 있으면 한 번만 조용히 계산해서 onResult로 넘겨준다.
 export function useEnsureGrowthBacktest(
   history: HistoryEntry[],
   onResult: (updates: Record<string, BacktestGrowth>) => void,
-  { cashflows, safeAssetMix = false, label }: BacktestContext = {},
+  { cashflows, safeAssetMix = false, label, enabled = true }: BacktestContext = {},
 ) {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(false);
 
   const cashflowKey = useMemo(() => cashflowFingerprint(cashflows), [cashflows]);
-  const staleIds = useMemo(
-    () =>
-      history
-        .filter((h) => needsBacktestRecompute(h.backtestGrowth, cashflowKey))
-        .map((h) => h.id)
-        .join(","),
-    [history, cashflowKey],
+  // 계산 결과에는 지금 지문이 박혀 저장되므로 다음 render 에서 대상이 비고,
+  // setHistoryBacktest → 재계산 loop 는 생기지 않는다.
+  const syncKey = useMemo(
+    () => backtestSyncKey(history, cashflowKey, enabled),
+    [history, cashflowKey, enabled],
   );
 
-  // 재계산 트리거. **대상 목록만으로 트리거하면 안 된다** — 장부가 또 바뀌어 대상 목록이 그대로일
-  // 때(예: 전 구간이 이미 대상) 새 장부로 다시 돌지 않기 때문이다. 그래서 지문을 같이 넣는다.
-  // 대상이 없으면 빈 문자열이라 effect 는 즉시 반환한다. 계산 결과에는 지금 지문이 박혀 저장되므로
-  // 다음 render 에서 staleIds 가 비고, setHistoryBacktest → 재계산 loop 는 생기지 않는다.
-  const syncKey = staleIds ? `${cashflowKey}|${staleIds}` : "";
-
   useEffect(() => {
-    if (!syncKey) return;
+    // 비활성 탭이거나 모두 최신이면 아무 요청도 하지 않는다.
+    if (!syncKey) {
+      setSyncing(false);
+      return;
+    }
     let cancelled = false;
     setSyncing(true);
     setError(false);
@@ -593,7 +652,8 @@ export function useEnsureGrowthBacktest(
         if (!cancelled) setError(true);
       })
       .finally(() => {
-        if (!cancelled) setSyncing(false);
+        // cancelled(탭 전환·장부 변경으로 교체됨) 여도 spinner 는 내린다. 저장/에러만 막는다.
+        setSyncing(false);
       });
     return () => {
       cancelled = true;
@@ -601,5 +661,5 @@ export function useEnsureGrowthBacktest(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncKey, safeAssetMix]);
 
-  return { syncing, error };
+  return { syncing, error, cashflowKey };
 }
