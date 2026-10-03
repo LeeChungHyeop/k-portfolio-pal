@@ -82,6 +82,23 @@ export function kstMonthString(at: Date = new Date()): string {
   return kstDateString(at).slice(0, 7);
 }
 
+/**
+ * 한국시간 기준 "마지막 거래일" — 주말이면 직전 금요일, 평일이면 그 날.
+ *
+ * 공휴일은 보지 않는다(앱 규칙: 주말만 롤백, 비거래일 종가는 서버가 폴백한다).
+ *
+ * 요일 판정은 **KST 날짜 문자열을 UTC 자정으로 파싱해서** 한다 — `new Date().getDay()` 는
+ * 브라우저/OS timezone 의 요일이고, 거기서 날짜를 뺀 뒤 다시 `toISOString()` 으로 UTC 로
+ * 돌리면 KST 자정 부근에 하루가 더 밀린다(예: 토 00:30 KST → 로컬 금요일 → UTC 목요일).
+ */
+export function lastTradingDayKst(at: Date = new Date()): string {
+  const kstDate = kstDateString(at);
+  const t = Date.parse(`${kstDate}T00:00:00Z`);
+  const dayOfWeek = new Date(t).getUTCDay(); // 0=일 … 6=토 (timezone 무관)
+  const back = dayOfWeek === 6 ? 1 : dayOfWeek === 0 ? 2 : 0;
+  return back === 0 ? kstDate : new Date(t - back * 86_400_000).toISOString().slice(0, 10);
+}
+
 /** 한국시간 기준 HH:MM */
 export function kstTimeString(at: Date = new Date()): string {
   return new Date(at.getTime() + 9 * 3_600_000).toISOString().slice(11, 16);

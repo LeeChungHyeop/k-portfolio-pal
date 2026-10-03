@@ -1,9 +1,12 @@
 import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import {
   buildDailySnapshotRows,
   kstDateString,
   kstMonthString,
   kstTimeString,
+  lastTradingDayKst,
   SNAPSHOT_UPSERT_CONFLICT,
   type SnapshotAccountInput,
   type SnapshotPrice,
@@ -232,5 +235,74 @@ describe("kstMonthString — 정기납입 적용 시작월(YYYY-MM)", () => {
 
   it("월말 UTC 오전은 아직 같은 달이다: UTC 2026-10-31 09:00 = KST 18:00 → 2026-10", () => {
     expect(kstMonthString(new Date("2026-10-31T09:00:00.000Z"))).toBe("2026-10");
+  });
+});
+
+describe("lastTradingDayKst — 주말이면 직전 금요일 (KST 기준)", () => {
+  it("토요일 00:30 KST(= 금요일 15:30 UTC)는 그 전날 금요일이다", () => {
+    const at = new Date("2026-10-02T15:30:00.000Z"); // KST 2026-10-03(토) 00:30
+    expect(kstDateString(at)).toBe("2026-10-03");
+    expect(lastTradingDayKst(at)).toBe("2026-10-02");
+    // UTC 날짜(10-02)와 KST 날짜(10-03)가 다른 시각에도 결과가 맞아야 한다
+    expect(at.toISOString().slice(0, 10)).toBe("2026-10-02");
+  });
+
+  it("토요일 낮에도 직전 금요일이다", () => {
+    expect(lastTradingDayKst(new Date("2026-10-03T05:00:00.000Z"))).toBe("2026-10-02");
+  });
+
+  it("일요일은 이틀 전 금요일이다", () => {
+    const at = new Date("2026-10-04T03:00:00.000Z"); // KST 2026-10-04(일) 12:00
+    expect(kstDateString(at)).toBe("2026-10-04");
+    expect(lastTradingDayKst(at)).toBe("2026-10-02");
+  });
+
+  it("일요일 00:30 KST(= 토요일 15:30 UTC)도 금요일이다", () => {
+    const at = new Date("2026-10-03T15:30:00.000Z"); // KST 2026-10-04(일) 00:30
+    expect(lastTradingDayKst(at)).toBe("2026-10-02");
+  });
+
+  it("평일은 그 날 그대로다", () => {
+    expect(lastTradingDayKst(new Date("2026-10-05T03:00:00.000Z"))).toBe("2026-10-05"); // 월
+    expect(lastTradingDayKst(new Date("2026-10-02T03:00:00.000Z"))).toBe("2026-10-02"); // 금
+  });
+
+  it("월요일 00:30 KST(= 일요일 15:30 UTC)는 직전 금요일이 아니라 그 월요일이다", () => {
+    const at = new Date("2026-10-04T15:30:00.000Z"); // KST 2026-10-05(월) 00:30
+    expect(kstDateString(at)).toBe("2026-10-05");
+    expect(lastTradingDayKst(at)).toBe("2026-10-05");
+  });
+
+  it("월 경계를 넘는 주말도 맞는다 — KST 2026-11-01(일) → 2026-10-30(금)", () => {
+    const at = new Date("2026-10-31T15:30:00.000Z"); // KST 2026-11-01(일) 00:30
+    expect(kstDateString(at)).toBe("2026-11-01");
+    expect(lastTradingDayKst(at)).toBe("2026-10-30");
+  });
+
+  it("KST 날짜 경계: UTC 2026-10-02 15:30 = KST 2026-10-03", () => {
+    expect(kstDateString(new Date("2026-10-02T15:30:00.000Z"))).toBe("2026-10-03");
+  });
+});
+
+describe("기본 날짜는 KST helper 를 쓴다 (구조 검증)", () => {
+  const storeSrc = fs.readFileSync(path.join(import.meta.dirname, "store.ts"), "utf8");
+  const accountPageSrc = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "components", "kaw", "AccountPage.tsx"),
+    "utf8",
+  );
+
+  it("store 의 기본 rebalanceDate 세 곳이 모두 kstDateString() 이다", () => {
+    expect((storeSrc.match(/rebalanceDate: kstDateString\(\)/g) ?? []).length).toBe(2); // seed / empty
+    expect(storeSrc).toContain("acc.rebalanceDate = kstDateString()");
+    // UTC 로 날짜를 만드는 경로가 남아 있지 않다
+    expect(storeSrc).not.toContain('new Date().toISOString().slice(0, 10)');
+  });
+
+  it("AccountPage 의 today / lastTradingDay 가 KST helper 다", () => {
+    expect(accountPageSrc).toContain("const today = useMemo(() => kstDateString(), [])");
+    expect(accountPageSrc).toContain("const lastTradingDay = useMemo(() => lastTradingDayKst(), [])");
+    // 로컬 요일 + UTC 변환을 섞는 옛 계산이 남아 있지 않다
+    expect(accountPageSrc).not.toContain("d.getDay()");
+    expect(accountPageSrc).not.toContain("d.setDate(d.getDate()");
   });
 });

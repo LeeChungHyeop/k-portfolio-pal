@@ -5,7 +5,7 @@ import {
   buildMigratedCashflows, periodOf,
   type CashflowEntry,
 } from "./cashflow";
-import { kstMonthString } from "./snapshot";
+import { kstDateString, kstMonthString } from "./snapshot";
 import {
   confirmContribution, upsertAmountVersion, createInitialSchedule,
   type RecurringContributionSchedule, type ContributionAmountVersion,
@@ -225,13 +225,13 @@ function baseAccountSettings() {
   };
 }
 function seedAccount(id: AccountId): AccountState {
-  return { ...baseAccountSettings(), baseAmount: 0, deposit: DEFAULT_MONTHLY_DEPOSIT[id], rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: makeHistory(SEED_HISTORY[id] ?? []) };
+  return { ...baseAccountSettings(), baseAmount: 0, deposit: DEFAULT_MONTHLY_DEPOSIT[id], rebalanceDate: kstDateString(), holdings: seedHoldings(), history: makeHistory(SEED_HISTORY[id] ?? []) };
 }
 function seedState(): StoreState {
   return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, seedAccount(id)])) as Record<AccountId, AccountState> };
 }
 function emptyState(): StoreState {
-  return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, { ...baseAccountSettings(), baseAmount: 0, deposit: DEFAULT_MONTHLY_DEPOSIT[id], rebalanceDate: new Date().toISOString().slice(0, 10), holdings: seedHoldings(), history: [] as HistoryEntry[] }])) as Record<AccountId, AccountState> };
+  return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, { ...baseAccountSettings(), baseAmount: 0, deposit: DEFAULT_MONTHLY_DEPOSIT[id], rebalanceDate: kstDateString(), holdings: seedHoldings(), history: [] as HistoryEntry[] }])) as Record<AccountId, AccountState> };
 }
 function recalcReturns(history: HistoryEntry[]): HistoryEntry[] {
   return history.map((h, i) => {
@@ -297,7 +297,9 @@ function migrateState(parsed: StoreState, injectSeed = false, out?: MigrationRes
         ...h, baseAmount: (h as HistoryEntry & { baseAmount?: number }).baseAmount ?? 0,
       }));
     }
-    if (!acc.rebalanceDate) acc.rebalanceDate = new Date().toISOString().slice(0, 10);
+    // 기본 리밸런싱 일자는 **한국시간 기준 오늘**이다. UTC 로 계산하면 KST 00:00~08:59 에
+    // 전날 날짜가 들어간다.
+    if (!acc.rebalanceDate) acc.rebalanceDate = kstDateString();
 
     // 월 불입액이 고정된 계좌(IRP 25만원 등)는 값이 없으면 기본값으로 채운다.
     if (!acc.deposit) acc.deposit = DEFAULT_MONTHLY_DEPOSIT[id];

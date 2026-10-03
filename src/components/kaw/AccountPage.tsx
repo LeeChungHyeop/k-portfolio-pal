@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { syncGrowthBacktest, accountUsesSafeAssetMix } from "@/lib/kaw/backtest";
 import { checkSafeAssetMinimum, checkSafeAssetValueLimit, MAX_RISK_ASSET_PCT } from "@/lib/kaw/safeAsset";
+import { kstDateString, lastTradingDayKst } from "@/lib/kaw/snapshot";
 import {
   pendingContributions,
   type PendingContribution,
@@ -237,7 +238,10 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
   // ── 날짜 모드 (SSR hydration mismatch 방지: 마운트 후에만 과거/미래 판별) ──
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
-  const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  // **한국시간 기준 오늘.** UTC 로 자르면 KST 00:00~08:59 에 전날이 되고, 이 값은 날짜 모드뿐
+  // 아니라 정기납입 pending 판정(pendingContributions)에도 들어가므로 하루가 밀리면 그 달
+  // 입금 확인 줄이 안 뜨거나 하루 일찍 뜬다.
+  const today = useMemo(() => kstDateString(), []);
 
   // 리밸런싱 탭에 처음 들어올 때는 항상 오늘 날짜를 기본값으로 — 예전 세션에서 과거/미래로
   // 남겨둔 날짜에 계속 머물러 있지 않도록 마운트 시 한 번만 초기화한다.
@@ -246,14 +250,9 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 주말이면 직전 금요일로 롤백 (토=6→-1일, 일=0→-2일)
-  const lastTradingDay = useMemo(() => {
-    const d = new Date();
-    const day = d.getDay();
-    if (day === 6) d.setDate(d.getDate() - 1);
-    if (day === 0) d.setDate(d.getDate() - 2);
-    return d.toISOString().slice(0, 10);
-  }, []);
+  // 주말이면 직전 금요일로 롤백 — KST 기준 순수 계산(lastTradingDayKst).
+  // 로컬 요일 + UTC 변환을 섞으면 KST 자정 부근에 하루가 더 밀린다.
+  const lastTradingDay = useMemo(() => lastTradingDayKst(), []);
   const todayIsNonTrading = today !== lastTradingDay;
 
   const dateMode = useMemo((): "today" | "past" | "future" => {
