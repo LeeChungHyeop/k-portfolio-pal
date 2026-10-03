@@ -22,7 +22,9 @@ import {
   useEnsureGrowthBacktest, SAFE_MIX_SP500_TICKER, SAFE_MIX_ACCOUNTS, SAFE_MIX_WEIGHT,
   accountUsesSafeAssetMix,
 } from "@/lib/kaw/backtest";
-import { cumulativePrincipal, principalAsOf, type CashflowEntry } from "@/lib/kaw/cashflow";
+import {
+  cumulativePrincipal, investedPrincipalAsOf, principalAsOf, type CashflowEntry,
+} from "@/lib/kaw/cashflow";
 
 const fmtAxis = (v: number) =>
   v >= 100_000_000 ? `${(v / 100_000_000).toFixed(1)}억` : `${Math.round(v / 10_000)}만`;
@@ -284,10 +286,11 @@ function buildLivePoint(
   let 미투자 = 0; // 마지막 리밸런싱 이후 들어와 아직 투자되지 않은 돈
   if (cashflows?.length) {
     cumDeposit = cumulativePrincipal(cashflows);
-    // 비교선(성장형/지수)은 리밸런싱 시점까지의 돈만 투자해 둔 상태다. 마지막 리밸런싱 뒤에
-    // 들어온 입금은 원금에는 들어가므로, 비교선에도 "아직 예수금으로 들고 있는 돈"으로 더해
-    // 실제 쪽(예수금 포함)과 같은 기준으로 비교한다.
-    미투자 = cumDeposit - principalAsOf(cashflows, last.date);
+    // 비교선(성장형/지수)은 **마지막 리밸런싱 시점에 투자 가능했던 돈까지만** 투자해 둔 상태다.
+    // 그 뒤에 들어온 입금과, 같은 날짜의 장마감 후 입금(after_close — 그 날 장중에 못 산다)은
+    // 원금에는 들어가므로 비교선에도 "아직 예수금으로 들고 있는 돈"으로 더해, 실제 쪽
+    // (예수금 포함)과 같은 기준으로 비교한다.
+    미투자 = cumDeposit - investedPrincipalAsOf(cashflows, last.date);
   } else {
     cumDeposit = sorted.reduce((sum, h, i) => sum + (i === 0 ? h.baseAmount : Math.max(0, h.deposit ?? 0)), 0);
   }

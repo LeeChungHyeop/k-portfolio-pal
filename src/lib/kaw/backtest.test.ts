@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import {
   computeGrowthBacktest,
   depositScheduleFor,
+  uninvestedCashFor,
   cashflowFingerprint,
   needsBacktestRecompute,
   BACKTEST_SCHEMA_VERSION,
@@ -29,6 +32,12 @@ const flow = (date: string, amount: number): CashflowEntry => ({
   date,
   amount,
   type: amount >= 0 ? "deposit" : "withdrawal",
+});
+
+/** 장마감 후 입금 (퇴직연금 25일) — 그 날 장중에는 쓸 수 없다 */
+const afterClose = (date: string, amount: number): CashflowEntry => ({
+  ...flow(date, amount),
+  timing: "after_close",
 });
 
 /** 모든 자산이 같은 가격인 날짜 행 */
@@ -291,5 +300,92 @@ describe("안전자산 다리 가격이 중간에 한 번 빠지는 경우", () 
     expect(points[1].kospiSafeUnits).toBeCloseTo((1_000_000 * SAFE_MIX_WEIGHT) / 1000, 6);
     expect(points[2].kospiUnits).toBeCloseTo((1_000_000 * (1 - SAFE_MIX_WEIGHT)) / 1000, 6);
     expect(points[2].kospiSafeUnits).toBeCloseTo((1_000_000 * SAFE_MIX_WEIGHT) / 1000, 6);
+  });
+});
+
+describe("투자 가능 시점 (same_day / after_close)", () => {
+  const history = [entry("2026-09-25", { baseAmount: 1_000_000 }), entry("2026-10-25"), entry("2026-11-25")];
+
+  it("same_day 입금이 history 날짜와 같으면 그 시점 투자액에 포함된다", () => {
+    const cashflows = [flow("2026-09-25", 1_000_000), flow("2026-10-25", 688_074)];
+    expect(depositScheduleFor(history, cashflows)).toEqual([1_000_000, 688_074, 0]);
+    expect(uninvestedCashFor(history, cashflows)).toEqual([0, 0, 0]);
+  });
+
+  it("after_close 입금이 history 날짜와 같으면 그 시점 투자액에 들어가지 않는다", () => {
+    const cashflows = [flow("2026-09-25", 1_000_000), afterClose("2026-10-25", 688_074)];
+    const buckets = depositScheduleFor(history, cashflows);
+    expect(buckets[1]).toBe(0); // 10/25 에는 아직 못 산다
+    // 그 대신 그 시점에는 현금으로 들고 있다 (원금에는 이미 들어가 있다)
+    expect(uninvestedCashFor(history, cashflows)[1]).toBe(688_074);
+  });
+
+  it("같은 after_close 입금이 다음 history 시점에는 투자액에 포함된다", () => {
+    const cashflows = [flow("2026-09-25", 1_000_000), afterClose("2026-10-25", 688_074)];
+    expect(depositScheduleFor(history, cashflows)).toEqual([1_000_000, 0, 688_074]);
+    expect(uninvestedCashFor(history, cashflows)).toEqual([0, 688_074, 0]);
+  });
+
+  it("첫 history 날짜와 같은 날 after_close 입금도 조기 투자되지 않는다", () => {
+    const cashflows = [afterClose("2026-09-25", 1_000_000), flow("2026-10-25", 688_074)];
+    expect(depositScheduleFor(history, cashflows)).toEqual([0, 1_688_074, 0]);
+    expect(uninvestedCashFor(history, cashflows)[0]).toBe(1_000_000);
+  });
+
+  it("투자 당일 비교선 수익률이 꺼지지 않는다 — 미투자분은 현금으로 평가·원금 양쪽에 들어간다", () => {
+    const cashflows = [flow("2026-09-25", 1_000_000), afterClose("2026-10-25", 688_074)];
+    const prices = {
+      "2026-09-25": flatPrices(1000),
+      "2026-10-25": flatPrices(1000),
+      "2026-11-25": flatPrices(1000),
+    };
+    const points = computeGrowthBacktest(history, prices, undefined, cashflows);
+    // 가격이 그대로니 세 시점 모두 0% 여야 한다 (10/25 에 -40% 로 꺼지지 않는다)
+    expect(points[1].returnPct).toBe(0);
+    expect(points[1].kospi200Pct).toBe(0);
+    expect(points[1].sp500Pct).toBe(0);
+    // 10/25 평가액에는 미투자 현금이 포함되고, 보유 유닛은 투자된 100만원분 그대로다
+    expect(points[1].totalValue).toBe(1_688_074);
+    expect(points[1].kospiUnits).toBeCloseTo(1_000_000 / 1000, 6);
+    // 11/25 에는 실제로 매수된다
+    expect(points[2].totalValue).toBe(1_688_074);
+    expect(points[2].kospiUnits).toBeCloseTo(1_688_074 / 1000, 6);
+    expect(points[2].returnPct).toBe(0);
+  });
+
+  it("timing 을 바꾸면 지문이 달라지고 계산 결과도 실제로 달라진다", () => {
+    const sameDay = [flow("2026-09-25", 1_000_000), flow("2026-10-25", 688_074)];
+    const afterCloseFlows = [flow("2026-09-25", 1_000_000), afterClose("2026-10-25", 688_074)];
+    expect(cashflowFingerprint(sameDay)).not.toBe(cashflowFingerprint(afterCloseFlows));
+
+    // 10/25 에 주가가 10% 오른 경우: same_day 면 오른 가격에 전액 매수, after_close 면 현금 보유
+    const prices = {
+      "2026-09-25": flatPrices(1000),
+      "2026-10-25": flatPrices(1100),
+      "2026-11-25": flatPrices(1100),
+    };
+    const a = computeGrowthBacktest(history, prices, undefined, sameDay);
+    const b = computeGrowthBacktest(history, prices, undefined, afterCloseFlows);
+    expect(a[1].kospiUnits).not.toBeCloseTo(b[1].kospiUnits, 6);
+    expect(a[1].kospiUnits).toBeCloseTo((1_100_000 + 688_074) / 1100, 6);
+    expect(b[1].kospiUnits).toBeCloseTo(1_100_000 / 1100, 6); // 현금 688,074 는 아직 미투자
+    // 평가액(현금 포함)은 같은 날 같지만, 다음 시점부터 투자 시점 차이가 남는다
+    expect(a[1].totalValue).toBeCloseTo(b[1].totalValue, 6);
+    expect(needsBacktestRecompute(a[1], cashflowFingerprint(afterCloseFlows))).toBe(true);
+  });
+});
+
+describe("IndexComparison: 미투자 현금 판정 근거", () => {
+  const src = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "components", "kaw", "IndexComparison.tsx"),
+    "utf8",
+  );
+
+  it('"현재" 포인트의 미투자 현금은 투자 가능액 기준이다 (같은 날 after_close 입금 포함)', () => {
+    expect(src).toContain("미투자 = cumDeposit - investedPrincipalAsOf(cashflows, last.date)");
+  });
+
+  it("실제수익률의 분모는 장부 누적원금(principalAsOf) 그대로다", () => {
+    expect(src).toContain("cumDepositByDate.set(h.date, principalAsOf(cashflows, h.date))");
   });
 });

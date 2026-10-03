@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ASSET_ORDER, PROFILE_PRESETS, type AccountId, type AssetKey } from "./constants";
 import { BUILTIN_TICKERS, type HistoryEntry } from "./store";
-import { principalAsOf, type CashflowEntry } from "./cashflow";
+import { investedPrincipalAsOf, principalAsOf, type CashflowEntry } from "./cashflow";
 
 // 계산 로직이 바뀔 때마다 올려서, 이전 버전 로직으로 저장된 backtestGrowth를 자동으로 재계산 대상으로 표시한다.
 // v2: 가격 데이터가 없는 자산(상장 전 등)의 비중이 재배분 없이 그냥 증발하던 버그 수정
@@ -57,9 +57,13 @@ interface DatedBacktestPoint extends BacktestGrowth {
 // 누적 납입원금의 유일한 근거는 **cashflow 장부**다 (cashflow.ts §1). history.deposit 은
 // 리밸런싱 기록의 메모일 뿐이고, 리밸런싱 사이에 들어온 입금이나 출금은 담지 못한다.
 //
-// 각 리밸런싱 시점에 "그때 새로 들어온 돈"은 (직전 시점, 이 시점] 구간의 순입금이며,
-// 첫 시점은 그 날짜까지의 전부(= 시작 보유자산 포함)다. 마지막 시점 이후의 입금은
-// 아직 투자되지 않은 돈이므로 여기에 넣지 않는다 — 화면의 "현재" 포인트에서 예수금으로 더한다.
+// 각 리밸런싱 시점에 "그때 새로 **살 수 있게 된** 돈"은 (직전 시점, 이 시점] 구간의 순입금이다.
+// 첫 시점은 그 날짜까지의 전부(= 시작 보유자산 포함)다. 마지막 시점 이후의 입금은 아직
+// 투자되지 않은 돈이므로 여기에 넣지 않는다 — 화면의 "현재" 포인트에서 현금으로 더한다.
+//
+// 기준은 입금일이 아니라 **투자 가능 시점**(`investedPrincipalAsOf`)이다. 장마감 후 입금
+// (`after_close`, 퇴직연금 25일)은 그 날 장중에 못 사므로 같은 날짜의 시점에는 들어가지 않고
+// 다음 시점 버킷에 들어간다. 그 사이에는 `uninvestedCashFor` 가 현금으로 들고 있는다.
 //
 // 장부가 없으면(옛 데이터·단위테스트) 기존 조각으로 폴백한다.
 export function depositScheduleFor(
@@ -71,11 +75,29 @@ export function depositScheduleFor(
   }
   let prev = 0;
   return sorted.map((h) => {
-    const upTo = principalAsOf(cashflows, h.date);
+    const upTo = investedPrincipalAsOf(cashflows, h.date);
     const amt = upTo - prev;
     prev = upTo;
     return amt;
   });
+}
+
+/**
+ * 각 시점에 비교선이 **현금으로 들고 있는** 금액 = 그 시점 누적 납입원금 - 투자 가능했던 누적액.
+ * (같은 날짜의 `after_close` 입금이 여기 들어온다.)
+ *
+ * 원금에는 이미 들어간 돈이므로, 비교선 평가액에도 현금으로 더해야 분모·분자가 맞는다.
+ * 안 더하면 입금 당일 비교선만 원금이 늘고 자산은 안 늘어 수익률이 꺼진다.
+ * 실제 계좌 쪽에서 예수금(cashBalance)을 총자산에 더하는 것과 같은 취급이다.
+ */
+export function uninvestedCashFor(
+  sorted: readonly HistoryEntry[],
+  cashflows: readonly CashflowEntry[] | undefined,
+): number[] {
+  if (!cashflows?.length) return sorted.map(() => 0);
+  return sorted.map(
+    (h) => principalAsOf(cashflows, h.date) - investedPrincipalAsOf(cashflows, h.date),
+  );
 }
 
 /** 장부가 없어 history 조각으로 폴백한 상태를 가리키는 지문. 폴백 의미를 지문 쪽에서도 유지한다. */
@@ -107,6 +129,7 @@ export function cashflowFingerprint(cashflows: readonly CashflowEntry[] | undefi
 function computeWeightedBacktest(
   sorted: HistoryEntry[],
   depositAmts: number[],
+  uninvested: number[],
   legs: { weight: number; priceOf: (date: string) => number | undefined }[],
 ): { pct: number | null; units: number[] }[] {
   const units = legs.map(() => 0);
@@ -142,7 +165,13 @@ function computeWeightedBacktest(
       }
     });
     lastValue = totalValue;
-    const pct = cumDeposit > 0 ? Math.round(((totalValue - cumDeposit) / cumDeposit) * 10000) / 100 : null;
+    // 아직 투자 못 한 돈은 현금으로 들고 있는다 — 평가액·원금 양쪽에 같이 들어간다.
+    const cash = uninvested[i] ?? 0;
+    const principal = cumDeposit + cash;
+    const pct =
+      principal > 0
+        ? Math.round(((totalValue + cash - principal) / principal) * 10000) / 100
+        : null;
     return { pct, units: [...units] };
   });
 }
@@ -159,6 +188,7 @@ export function computeGrowthBacktest(
   const weights = PROFILE_PRESETS.growth;
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const depositAmts = depositScheduleFor(sorted, cashflows);
+  const uninvested = uninvestedCashFor(sorted, cashflows);
   const cashflowKey = cashflowFingerprint(cashflows);
   const units: Partial<Record<AssetKey, number>> = {};
   // 특정 날짜에 시세 조회가 안 될 때(신규 상장 전 등) 드리프트 평가에 쓸 직전 알려진 가격
@@ -178,8 +208,8 @@ export function computeGrowthBacktest(
         { weight: SAFE_MIX_WEIGHT, priceOf: (d: string) => safeAssetMixPrices?.[d] },
       ]
     : [{ weight: 1, priceOf: (d: string) => pricesByDate[d]?.us }];
-  const kospiPoints = computeWeightedBacktest(sorted, depositAmts, kospiLegs);
-  const sp500Points = computeWeightedBacktest(sorted, depositAmts, sp500Legs);
+  const kospiPoints = computeWeightedBacktest(sorted, depositAmts, uninvested, kospiLegs);
+  const sp500Points = computeWeightedBacktest(sorted, depositAmts, uninvested, sp500Legs);
 
   return sorted.map((h, i) => {
     const prices = pricesByDate[h.date] ?? {};
@@ -210,12 +240,16 @@ export function computeGrowthBacktest(
       units[key] = targetValue / p;
     });
 
+    // 성장형 비교선도 같은 규칙 — 아직 투자 못 한 돈은 현금으로 들고 원금에도 그대로 둔다.
+    const cash = uninvested[i] ?? 0;
+    const principal = cumDeposit + cash;
+    const reportedValue = totalValue + cash;
     const returnPct =
-      cumDeposit > 0 ? Math.round(((totalValue - cumDeposit) / cumDeposit) * 10000) / 100 : null;
+      principal > 0 ? Math.round(((reportedValue - principal) / principal) * 10000) / 100 : null;
 
     return {
       date: h.date,
-      totalValue,
+      totalValue: reportedValue,
       returnPct,
       units: { ...units },
       kospi200Pct: kospiPoints[i].pct,
