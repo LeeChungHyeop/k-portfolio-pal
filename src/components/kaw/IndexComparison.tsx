@@ -20,7 +20,7 @@ import {
 import { RefreshCw } from "lucide-react";
 import {
   useEnsureGrowthBacktest, SAFE_MIX_SP500_TICKER, SAFE_MIX_ACCOUNTS, SAFE_MIX_WEIGHT,
-  accountUsesSafeAssetMix,
+  accountUsesSafeAssetMix, cashflowFingerprint, currentBacktestOf, hasStaleBacktest,
 } from "@/lib/kaw/backtest";
 import {
   cumulativePrincipal, investedPrincipalAsOf, principalAsOf, type CashflowEntry,
@@ -183,6 +183,7 @@ function applyAxisBreak(rows: ComparePoint[], brk: AxisBreak | null): ComparePoi
 function buildComparePoints(
   history: HistoryEntry[],
   cashflows: readonly CashflowEntry[] | undefined,
+  cashflowKey: string,
 ): ComparePoint[] {
   if (!history.length) return [];
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
@@ -216,7 +217,9 @@ function buildComparePoints(
       // 사라져 실제 수익률이 원금 대비 과소 표시된다(예수금이 없던 옛 기록은 0으로 계산).
       const 실제자산 = h.totalValue + (h.cashBalance ?? 0);
       const 실제수익률 = cd > 0 ? Math.round(((실제자산 - cd) / cd) * 10000) / 100 : null;
-      const bt = h.backtestGrowth;
+      // **stale(옛 schemaVersion / 옛 장부 지문) 저장값은 쓰지 않는다** — 오염된 v4 값이
+      // 차트에 그려지면 실제와 전혀 다른 수치가 사실처럼 보인다. 재계산되면 채워진다.
+      const bt = currentBacktestOf(h.backtestGrowth, cashflowKey);
       return {
         label: month.replace("-", "."),
         date,
@@ -241,11 +244,14 @@ function buildLivePoint(
   safeAssetMix: boolean,
   cashBalance: number | undefined,
   cashflows: readonly CashflowEntry[] | undefined,
+  cashflowKey: string,
 ): ComparePoint | null {
   if (!history.length) return null;
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const last = sorted[sorted.length - 1];
-  if (!last.backtestGrowth) return null;
+  // stale 저장값으로는 "현재" 포인트도 만들지 않는다 (보유 유닛이 오염돼 있다).
+  const lastBt = currentBacktestOf(last.backtestGrowth, cashflowKey);
+  if (!lastBt) return null;
 
   const qtySnap = last.rowQuantitiesSnap;
   const etfSnap = last.rowEtfSnap;
@@ -261,7 +267,7 @@ function buildLivePoint(
   // 아직 매수하지 않은 돈이 손실로 보인다.
   const 실제자산 = etf실제 + (cashBalance ?? 0);
 
-  const units = last.backtestGrowth.units;
+  const units = lastBt.units;
   const 성장형자산 = ASSET_ORDER.reduce((sum, key) => {
     const ticker = BUILTIN_TICKERS[key];
     const price = ticker ? (livePrices[ticker] ?? 0) : 0;
@@ -271,12 +277,12 @@ function buildLivePoint(
   const krTicker = BUILTIN_TICKERS.kr;
   const usTicker = BUILTIN_TICKERS.us;
   const ktb30Ticker = BUILTIN_TICKERS.ktb30;
-  let 코스피자산 = (last.backtestGrowth.kospiUnits ?? 0) * (krTicker ? (livePrices[krTicker] ?? 0) : 0);
-  let 에스피자산 = (last.backtestGrowth.sp500Units ?? 0) * (usTicker ? (livePrices[usTicker] ?? 0) : 0);
+  let 코스피자산 = (lastBt.kospiUnits ?? 0) * (krTicker ? (livePrices[krTicker] ?? 0) : 0);
+  let 에스피자산 = (lastBt.sp500Units ?? 0) * (usTicker ? (livePrices[usTicker] ?? 0) : 0);
   // 퇴직연금/IRP — 안전자산 30% 다리(국고채30년 / ACE 미국S&P500미국채혼합50액티브)도 실시간가로 더한다
   if (safeAssetMix) {
-    코스피자산 += (last.backtestGrowth.kospiSafeUnits ?? 0) * (ktb30Ticker ? (livePrices[ktb30Ticker] ?? 0) : 0);
-    에스피자산 += (last.backtestGrowth.sp500SafeUnits ?? 0) * (livePrices[SAFE_MIX_SP500_TICKER] ?? 0);
+    코스피자산 += (lastBt.kospiSafeUnits ?? 0) * (ktb30Ticker ? (livePrices[ktb30Ticker] ?? 0) : 0);
+    에스피자산 += (lastBt.sp500SafeUnits ?? 0) * (livePrices[SAFE_MIX_SP500_TICKER] ?? 0);
   }
 
   if (etf실제 <= 0 || 성장형자산 <= 0) return null;
@@ -317,21 +323,44 @@ export function IndexComparison() {
 
   // 계좌별로 backtestGrowth가 없는 히스토리가 있으면 (신규 계좌 또는 최초 1회) 조용히 계산해서 저장.
   // 퇴직연금/IRP는 safeAssetMix=true로 코스피200/S&P500 비교선에 안전자산 30%를 섞어 계산한다.
+  // **보고 있는 탭만 계산한다.** hook 은 React 규칙대로 4개 모두 항상 호출하되, enabled 로
+  // 네트워크 요청을 막는다 — mount 하자마자 4계좌 × history 날짜 전부를 동시에 조회하면
+  // 네이버 과거 종가 호출이 폭주해 실패하고(그 결과가 fail-closed 로 전부 버려진다) 느리다.
   const retirementSync = useEnsureGrowthBacktest(
     state.accounts.retirement.history, (r) => setHistoryBacktest("retirement", r),
-    { cashflows: state.accounts.retirement.cashflows, safeAssetMix: accountUsesSafeAssetMix("retirement") },
+    {
+      cashflows: state.accounts.retirement.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix("retirement"),
+      label: ACCOUNT_LABELS_SHORT.retirement,
+      enabled: tab === "retirement",
+    },
   );
   const isaSync = useEnsureGrowthBacktest(
     state.accounts.isa.history, (r) => setHistoryBacktest("isa", r),
-    { cashflows: state.accounts.isa.cashflows, safeAssetMix: accountUsesSafeAssetMix("isa") },
+    {
+      cashflows: state.accounts.isa.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix("isa"),
+      label: ACCOUNT_LABELS_SHORT.isa,
+      enabled: tab === "isa",
+    },
   );
   const pensionSync = useEnsureGrowthBacktest(
     state.accounts.pension.history, (r) => setHistoryBacktest("pension", r),
-    { cashflows: state.accounts.pension.cashflows, safeAssetMix: accountUsesSafeAssetMix("pension") },
+    {
+      cashflows: state.accounts.pension.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix("pension"),
+      label: ACCOUNT_LABELS_SHORT.pension,
+      enabled: tab === "pension",
+    },
   );
   const irpSync = useEnsureGrowthBacktest(
     state.accounts.irp.history, (r) => setHistoryBacktest("irp", r),
-    { cashflows: state.accounts.irp.cashflows, safeAssetMix: accountUsesSafeAssetMix("irp") },
+    {
+      cashflows: state.accounts.irp.cashflows,
+      safeAssetMix: accountUsesSafeAssetMix("irp"),
+      label: ACCOUNT_LABELS_SHORT.irp,
+      enabled: tab === "irp",
+    },
   );
   const syncByAccount: Record<AccountId, { syncing: boolean; error: boolean }> = {
     retirement: retirementSync,
@@ -340,15 +369,28 @@ export function IndexComparison() {
     irp: irpSync,
   };
 
+  // 계좌별 "지금 그려도 되는 데이터인가" — syncing 같은 비동기 상태가 아니라 저장값 자체를
+  // 동기적으로 판정하므로, 첫 render 에서도 오염된 v4 값이 한 프레임 보이지 않는다.
+  const staleByAccount = useMemo(() => {
+    const out = {} as Record<AccountId, boolean>;
+    ACCOUNT_IDS.forEach((id) => {
+      const acc = state.accounts[id];
+      out[id] = acc.history.length > 0
+        && hasStaleBacktest(acc.history, cashflowFingerprint(acc.cashflows));
+    });
+    return out;
+  }, [state]);
+
   const dataByAccount = useMemo(() => {
     const out = {} as Record<AccountId, ComparePoint[]>;
     ACCOUNT_IDS.forEach((id) => {
       const account = state.accounts[id];
-      const points = buildComparePoints(account.history, account.cashflows);
+      const cashflowKey = cashflowFingerprint(account.cashflows);
+      const points = buildComparePoints(account.history, account.cashflows, cashflowKey);
       const livePoint = configured
         ? buildLivePoint(
             account.history, library, livePrices, accountUsesSafeAssetMix(id),
-            account.cashBalance, account.cashflows,
+            account.cashBalance, account.cashflows, cashflowKey,
           )
         : null;
       out[id] = livePoint ? [...points, livePoint] : points;
@@ -395,9 +437,13 @@ export function IndexComparison() {
             : undefined;
           const breakMarkY = brk ? brk.breakLow + brk.gap / 2 : null;
 
+          // 저장값이 stale 이면 차트를 아예 그리지 않는다 — 계산 중이면 spinner, 실패면 에러 문구.
+          const stale = staleByAccount[id];
+          const showCharts = !stale && dataByAccount[id].length >= 1;
+
           return (
             <TabsContent key={id} value={id} className="space-y-6 mt-4">
-              {syncByAccount[id].syncing && (
+              {stale && !syncByAccount[id].error && (
                 <p className="text-sm text-muted-foreground flex items-center gap-1.5">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 성장형 백테스트 처음 계산 중...
                   (한 번만 계산되고 저장돼)
@@ -412,7 +458,7 @@ export function IndexComparison() {
                 <p className="text-sm text-muted-foreground">리밸런싱 기록이 아직 없어.</p>
               )}
 
-              {dataByAccount[id].length >= 1 && (
+              {showCharts && (
                 <>
                   <Card className="p-5">
                     <h3 className="font-semibold mb-4">자산총액 비교 (vs K-All Weather)</h3>

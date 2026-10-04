@@ -5,15 +5,28 @@ import {
   computeGrowthBacktest,
   depositScheduleFor,
   uninvestedCashFor,
+  parseHistoryPriceResults,
+  isUsablePrice,
+  validateHistoricalPricesForBacktest,
+  findBacktestResultProblems,
+  syncGrowthBacktest,
+  isCurrentBacktest,
+  currentBacktestOf,
+  hasStaleBacktest,
+  staleBacktestIds,
+  backtestSyncKey,
+  BacktestDataError,
+  PRICE_CACHE_KEY,
   cashflowFingerprint,
   needsBacktestRecompute,
   BACKTEST_SCHEMA_VERSION,
   LEGACY_CASHFLOW_KEY,
   SAFE_MIX_ACCOUNTS,
+  SAFE_MIX_SP500_TICKER,
   SAFE_MIX_WEIGHT,
   accountUsesSafeAssetMix,
 } from "./backtest";
-import { BUILTIN_TICKERS, ASSET_ORDER, type AssetKey } from "./constants";
+import { BUILTIN_TICKERS, ASSET_ORDER, ACCOUNT_IDS, type AccountId, type AssetKey } from "./constants";
 import type { CashflowEntry } from "./cashflow";
 import type { HistoryEntry } from "./store";
 
@@ -387,5 +400,449 @@ describe("IndexComparison: 미투자 현금 판정 근거", () => {
 
   it("실제수익률의 분모는 장부 누적원금(principalAsOf) 그대로다", () => {
     expect(src).toContain("cumDepositByDate.set(h.date, principalAsOf(cashflows, h.date))");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 과거 시세 조회 실패(0원)가 "정상 가격"으로 굳던 버그 (v5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("parseHistoryPriceResults — 실패 가격은 가격이 아니다", () => {
+  it("성공한 종목만 돌려준다 (price 0 / source failed 는 제외)", () => {
+    const out = parseHistoryPriceResults({
+      "360750": { price: 10_000, source: "naver" },
+      "294400": { price: 0, source: "failed" },
+    });
+    expect(out).toEqual({ "360750": 10_000 });
+    expect("294400" in out).toBe(false);
+  });
+
+  it("source 가 failed 면 price 가 양수라도 믿지 않는다", () => {
+    expect(parseHistoryPriceResults({ "294400": { price: 123, source: "failed" } })).toEqual({});
+  });
+
+  it("비정상 값(음수·NaN·null·문자열·누락)은 모두 제외한다", () => {
+    expect(
+      parseHistoryPriceResults({
+        a: { price: -1, source: "naver" },
+        b: { price: Number.NaN, source: "naver" },
+        c: { price: null, source: "naver" },
+        d: { price: "10000", source: "naver" },
+        e: { source: "naver" },
+      }),
+    ).toEqual({});
+  });
+
+  it("results 가 없으면 빈 map", () => {
+    expect(parseHistoryPriceResults(undefined)).toEqual({});
+  });
+});
+
+describe("isUsablePrice — 캐시 missing 판정 기준", () => {
+  it("0 이하·비정상은 '아직 가격 없음'이다 (재조회 대상)", () => {
+    for (const v of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, undefined, null, "10000", {}]) {
+      expect(isUsablePrice(v)).toBe(false);
+    }
+  });
+
+  it("양수만 쓸 수 있는 가격이다 (재조회하지 않음)", () => {
+    expect(isUsablePrice(1)).toBe(true);
+    expect(isUsablePrice(10_000)).toBe(true);
+  });
+});
+
+describe("PRICE_CACHE_KEY", () => {
+  it("v4 로 올라가 기존 0 캐시가 폐기된다", () => {
+    expect(PRICE_CACHE_KEY).toBe("kaw.backtest.prices.v4");
+  });
+});
+
+describe("validateHistoricalPricesForBacktest — fail-closed 기준", () => {
+  const dates = ["2026-01-02", "2026-02-02"];
+  const ok = { "2026-01-02": flatPrices(1000), "2026-02-02": flatPrices(1000) };
+
+  it("가격이 충분하면 문제 없음", () => {
+    expect(validateHistoricalPricesForBacktest(dates, ok)).toEqual([]);
+  });
+
+  it("첫 시점에 성장형 가격이 전부 없으면 실패한다", () => {
+    const byAsset = { "2026-01-02": {}, "2026-02-02": flatPrices(1000) };
+    const problems = validateHistoricalPricesForBacktest(dates, byAsset);
+    expect(problems.some((m) => m.includes("첫 시점") && m.includes("성장형"))).toBe(true);
+  });
+
+  it("첫 시점에 kr(코스피200 주 leg)이 없으면 실패한다", () => {
+    const byAsset = {
+      "2026-01-02": flatPrices(1000, { kr: undefined }),
+      "2026-02-02": flatPrices(1000),
+    };
+    expect(validateHistoricalPricesForBacktest(dates, byAsset).some((m) => m.includes("kr"))).toBe(true);
+  });
+
+  it("첫 시점에 us(S&P500 주 leg)이 없으면 실패한다", () => {
+    const byAsset = {
+      "2026-01-02": flatPrices(1000, { us: undefined }),
+      "2026-02-02": flatPrices(1000),
+    };
+    expect(validateHistoricalPricesForBacktest(dates, byAsset).some((m) => m.includes("us"))).toBe(true);
+  });
+
+  it("안전자산 다리(ktb30)만 없는 건 허용한다 — 상장 전이면 비중 재배분이 정답이다", () => {
+    const byAsset = {
+      "2026-01-02": flatPrices(1000, { ktb30: undefined }),
+      "2026-02-02": flatPrices(1000, { ktb30: undefined }),
+    };
+    expect(validateHistoricalPricesForBacktest(dates, byAsset)).toEqual([]);
+  });
+
+  it("0 은 가격으로 보지 않는다 (서버 실패 응답이 흘러들어온 경우)", () => {
+    const byAsset = { "2026-01-02": flatPrices(0), "2026-02-02": flatPrices(0) };
+    expect(validateHistoricalPricesForBacktest(dates, byAsset).length).toBeGreaterThan(0);
+  });
+});
+
+describe("findBacktestResultProblems — 결과 sanity check", () => {
+  const history = [entry("2026-01-02", { baseAmount: 1_000_000 }), entry("2026-02-02")];
+  const cashflows = [flow("2026-01-02", 1_000_000), flow("2026-02-02", 500_000)];
+  const prices = { "2026-01-02": flatPrices(1000), "2026-02-02": flatPrices(1000) };
+
+  it("정상 계산 결과는 통과한다", () => {
+    const points = computeGrowthBacktest(history, prices, undefined, cashflows);
+    expect(findBacktestResultProblems(points, prices)).toEqual([]);
+  });
+
+  it("production 오염 모양(units 비었고 totalValue 가 납입액만)은 걸러낸다", () => {
+    // 가격이 하나도 없는 상태에서 계산하면 실제로 이 모양이 나온다
+    const noPrices = { "2026-01-02": {}, "2026-02-02": {} };
+    const points = computeGrowthBacktest(history, noPrices, undefined, cashflows);
+    expect(points[1].units).toEqual({});
+    // 아무것도 못 샀으니 드리프트가 0 이고 그 시점 납입액만 남는다 — production 증상과 같은 모양
+    // (retirement 688,074 / pension 500,000 / irp 250,000 = 각 계좌의 최신 월 납입액)
+    expect(points[1].totalValue).toBe(500_000);
+    expect(findBacktestResultProblems(points, noPrices).length).toBeGreaterThan(0);
+  });
+
+  it("kr 가격이 있는데 코스피 유닛이 전 구간 0 이면 걸러낸다", () => {
+    const points = computeGrowthBacktest(history, prices, undefined, cashflows);
+    const broken = points.map((p) => ({ ...p, kospiUnits: 0 }));
+    expect(findBacktestResultProblems(broken, prices).some((m) => m.includes("코스피200"))).toBe(true);
+  });
+
+  it("돈이 들어간 적 없는 계좌는 0 이어도 정상이다", () => {
+    const empty = computeGrowthBacktest([entry("2026-01-02")], prices, undefined, []);
+    expect(findBacktestResultProblems(empty, prices)).toEqual([]);
+  });
+
+  it("빈 결과는 문제 없음", () => {
+    expect(findBacktestResultProblems([], prices)).toEqual([]);
+  });
+});
+
+describe("syncGrowthBacktest — 실패하면 아무것도 저장하지 않는다", () => {
+  const history = [entry("2026-01-02", { baseAmount: 1_000_000 }), entry("2026-02-02")];
+  const cashflows = [flow("2026-01-02", 1_000_000), flow("2026-02-02", 500_000)];
+
+  /** /api/naver/history-price 와 localStorage 를 가짜로 세운다 */
+  const withFakeEnv = async (
+    respond: (tickers: string[], date: string) => Record<string, { price: number; source: string }>,
+    run: () => Promise<void>,
+  ) => {
+    const store = new Map<string, string>();
+    const calls: { date: string; tickers: string[] }[] = [];
+    const g = globalThis as unknown as Record<string, unknown>;
+    const prevFetch = g.fetch;
+    const prevLs = g.localStorage;
+    g.localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+    g.fetch = async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { tickers: string[]; date: string };
+      calls.push({ date: body.date, tickers: body.tickers });
+      return { json: async () => ({ results: respond(body.tickers, body.date) }) };
+    };
+    try {
+      await run();
+    } finally {
+      g.fetch = prevFetch;
+      g.localStorage = prevLs;
+    }
+    return { calls, store };
+  };
+
+  const allOk = (tickers: string[]) =>
+    Object.fromEntries(tickers.map((t) => [t, { price: 1000, source: "naver" }]));
+  const allFailed = (tickers: string[]) =>
+    Object.fromEntries(tickers.map((t) => [t, { price: 0, source: "failed" }]));
+
+  it("모든 시세 조회가 실패하면 throw 하고 결과를 만들지 않는다 (v5 로 덮어쓰지 않음)", async () => {
+    let saved: unknown = "not-called";
+    await withFakeEnv(allFailed, async () => {
+      await expect(
+        syncGrowthBacktest(history, { cashflows, label: "퇴직연금" }),
+      ).rejects.toBeInstanceOf(BacktestDataError);
+      // onResult 로 넘길 결과가 아예 없다 → setHistoryBacktest 호출 대상이 되지 않는다
+      saved = await syncGrowthBacktest(history, { cashflows }).catch(() => null);
+    });
+    expect(saved).toBeNull();
+  });
+
+  it("실패 가격(0)은 캐시에 저장되지 않아 다음에 다시 조회된다", async () => {
+    const { calls, store } = await withFakeEnv(allFailed, async () => {
+      await syncGrowthBacktest(history, { cashflows }).catch(() => null);
+      await syncGrowthBacktest(history, { cashflows }).catch(() => null);
+    });
+    // 같은 날짜를 두 번째 호출에서도 다시 조회했다 (0 이 "조회 완료"로 굳지 않았다)
+    expect(calls.filter((c) => c.date === "20260102").length).toBe(2);
+    const cached = JSON.parse(store.get(PRICE_CACHE_KEY) ?? "{}") as Record<string, Record<string, number>>;
+    expect(Object.values(cached["2026-01-02"] ?? {}).some((v) => v === 0)).toBe(false);
+  });
+
+  it("정상 가격이면 schemaVersion 5 + cashflowKey 로 저장되고, 두 번째엔 재조회하지 않는다", async () => {
+    let result: Record<string, { schemaVersion: number; cashflowKey?: string }> = {};
+    const { calls } = await withFakeEnv(allOk, async () => {
+      result = await syncGrowthBacktest(history, { cashflows });
+      await syncGrowthBacktest(history, { cashflows }); // 캐시 히트 → 추가 조회 없음
+    });
+    const key = cashflowFingerprint(cashflows);
+    for (const h of history) {
+      expect(result[h.id].schemaVersion).toBe(5);
+      expect(result[h.id].cashflowKey).toBe(key);
+    }
+    expect(calls.length).toBe(history.length); // 두 번째 호출에서는 조회가 없었다
+  });
+
+  it("kr(코스피 주 leg)만 전 구간 실패해도 저장하지 않는다", async () => {
+    const krTicker = BUILTIN_TICKERS.kr!;
+    await withFakeEnv(
+      (tickers) =>
+        Object.fromEntries(
+          tickers.map((t) => [
+            t,
+            t === krTicker ? { price: 0, source: "failed" } : { price: 1000, source: "naver" },
+          ]),
+        ),
+      async () => {
+        await expect(syncGrowthBacktest(history, { cashflows })).rejects.toBeInstanceOf(BacktestDataError);
+      },
+    );
+  });
+
+  it("us(S&P500 주 leg)만 전 구간 실패해도 저장하지 않는다", async () => {
+    const usTicker = BUILTIN_TICKERS.us!;
+    await withFakeEnv(
+      (tickers) =>
+        Object.fromEntries(
+          tickers.map((t) => [
+            t,
+            t === usTicker ? { price: 0, source: "failed" } : { price: 1000, source: "naver" },
+          ]),
+        ),
+      async () => {
+        await expect(syncGrowthBacktest(history, { cashflows })).rejects.toBeInstanceOf(BacktestDataError);
+      },
+    );
+  });
+
+  it("안전자산 leg(438080)만 실패하면 계산은 성공한다 — 남은 다리로 재배분", async () => {
+    let result: Record<string, { schemaVersion: number }> = {};
+    await withFakeEnv(
+      (tickers) =>
+        Object.fromEntries(
+          tickers.map((t) => [
+            t,
+            t === SAFE_MIX_SP500_TICKER ? { price: 0, source: "failed" } : { price: 1000, source: "naver" },
+          ]),
+        ),
+      async () => {
+        result = await syncGrowthBacktest(history, { cashflows, safeAssetMix: true });
+      },
+    );
+    expect(Object.keys(result)).toHaveLength(history.length);
+    expect(result[history[0].id].schemaVersion).toBe(5);
+  });
+
+  it("중간 날짜만 조회 실패하면 직전 종가로 계산을 이어간다 (저장됨)", async () => {
+    let result: Record<string, { totalValue: number }> = {};
+    await withFakeEnv(
+      (tickers, date) => (date === "20260202" ? allFailed(tickers) : allOk(tickers)),
+      async () => {
+        result = await syncGrowthBacktest(history, { cashflows });
+      },
+    );
+    // 2월 가격이 없어도 1월 종가 carry-forward 로 평가된다 — 자산가치가 유지된다
+    expect(result[history[1].id].totalValue).toBe(1_500_000);
+  });
+});
+
+describe("오염된 v4 결과는 다시 계산된다", () => {
+  it("schemaVersion 4 + 같은 fingerprint 도 재계산 대상이다", () => {
+    const cashflows = [flow("2026-01-02", 1_000_000)];
+    const key = cashflowFingerprint(cashflows);
+    // production 에 저장된 오염 모양: units 비었고 totalValue 가 납입액만, 그런데 key 는 정상
+    const polluted = {
+      totalValue: 688_074,
+      returnPct: 0,
+      units: {},
+      kospi200Pct: 0,
+      sp500Pct: 0,
+      kospiUnits: 0,
+      sp500Units: 0,
+      kospiSafeUnits: 0,
+      sp500SafeUnits: 0,
+      schemaVersion: 4,
+      cashflowKey: key,
+    };
+    expect(needsBacktestRecompute(polluted, key)).toBe(true);
+    expect(BACKTEST_SCHEMA_VERSION).toBe(5);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// stale backtestGrowth 화면 차단 + 보고 있는 탭만 계산
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** production 에 저장된 오염 모양 (units 비었고 totalValue 가 월 납입액, 수익률 -99%대) */
+const pollutedV4 = (cashflowKey: string) => ({
+  totalValue: 688_074,
+  returnPct: -99.07,
+  units: {},
+  kospi200Pct: -99.07,
+  sp500Pct: -99.07,
+  kospiUnits: 0,
+  sp500Units: 0,
+  kospiSafeUnits: 0,
+  sp500SafeUnits: 0,
+  schemaVersion: 4,
+  cashflowKey,
+});
+
+describe("stale 판정 — schemaVersion 과 장부 지문이 둘 다 맞아야 current", () => {
+  const cashflows = [flow("2026-01-02", 1_000_000)];
+  const key = cashflowFingerprint(cashflows);
+  const otherKey = cashflowFingerprint([flow("2026-01-02", 999)]);
+
+  it("v4 + 현재 fingerprint → stale", () => {
+    const e = pollutedV4(key);
+    expect(isCurrentBacktest(e, key)).toBe(false);
+    expect(needsBacktestRecompute(e, key)).toBe(true);
+    expect(currentBacktestOf(e, key)).toBeUndefined();
+  });
+
+  it("v5 + fingerprint mismatch → stale", () => {
+    const e = { ...pollutedV4(otherKey), schemaVersion: 5 };
+    expect(isCurrentBacktest(e, key)).toBe(false);
+    expect(currentBacktestOf(e, key)).toBeUndefined();
+  });
+
+  it("v5 + fingerprint match → current", () => {
+    const e = { ...pollutedV4(key), schemaVersion: 5 };
+    expect(isCurrentBacktest(e, key)).toBe(true);
+    expect(currentBacktestOf(e, key)).toBe(e);
+  });
+
+  it("저장값이 없으면 stale", () => {
+    expect(isCurrentBacktest(undefined, key)).toBe(false);
+    expect(currentBacktestOf(undefined, key)).toBeUndefined();
+  });
+
+  it("오염된 v4 의 688,074 / -99.07 은 화면 데이터로 쓰이지 않는다", () => {
+    const e = pollutedV4(key);
+    const usable = currentBacktestOf(e, key);
+    // 차트는 이 게이트를 통과한 값만 읽는다 → totalValue/수익률 모두 접근 불가
+    expect(usable).toBeUndefined();
+    expect(usable?.totalValue).toBeUndefined();
+    expect(usable?.returnPct).toBeUndefined();
+    expect(usable?.kospi200Pct).toBeUndefined();
+  });
+
+  it("history 중 하나라도 stale 이면 그 계좌는 차트를 그리지 않는다", () => {
+    const current = { ...pollutedV4(key), schemaVersion: 5 };
+    const mixed = [
+      { ...entry("2026-01-02"), backtestGrowth: current },
+      { ...entry("2026-02-02"), backtestGrowth: pollutedV4(key) }, // v4 하나 섞임
+    ];
+    expect(hasStaleBacktest(mixed, key)).toBe(true);
+    expect(staleBacktestIds(mixed, key)).toEqual(["h-2026-02-02"]);
+
+    const allCurrent = mixed.map((h) => ({ ...h, backtestGrowth: current }));
+    expect(hasStaleBacktest(allCurrent, key)).toBe(false);
+    expect(staleBacktestIds(allCurrent, key)).toEqual([]);
+  });
+});
+
+describe("backtestSyncKey — 보고 있는 탭만 계산한다", () => {
+  const cashflows = [flow("2026-01-02", 1_000_000)];
+  const key = cashflowFingerprint(cashflows);
+  const staleHistory = [{ ...entry("2026-01-02"), backtestGrowth: pollutedV4(key) }];
+  const currentHistory = [
+    { ...entry("2026-01-02"), backtestGrowth: { ...pollutedV4(key), schemaVersion: 5 } },
+  ];
+
+  it("enabled=false 면 stale 이어도 트리거가 비어 있다 (요청/계산 없음)", () => {
+    expect(backtestSyncKey(staleHistory, key, false)).toBe("");
+  });
+
+  it("enabled=true + stale → 트리거가 생긴다", () => {
+    expect(backtestSyncKey(staleHistory, key, true)).toBe(`${key}|h-2026-01-02`);
+  });
+
+  it("enabled=true + current → 트리거 없음 (재계산하지 않음)", () => {
+    expect(backtestSyncKey(currentHistory, key, true)).toBe("");
+  });
+
+  it("장부가 또 바뀌면 대상 목록이 같아도 트리거가 달라진다", () => {
+    const otherKey = cashflowFingerprint([flow("2026-01-02", 999)]);
+    expect(backtestSyncKey(staleHistory, otherKey, true)).not.toBe(
+      backtestSyncKey(staleHistory, key, true),
+    );
+  });
+
+  it("4계좌 중 선택된 탭만 트리거가 생긴다", () => {
+    const byAccount = { retirement: staleHistory, isa: staleHistory, pension: staleHistory, irp: staleHistory };
+    const active = (tab: AccountId) =>
+      ACCOUNT_IDS.filter((id) => backtestSyncKey(byAccount[id], key, tab === id) !== "");
+    expect(active("retirement")).toEqual(["retirement"]);
+    expect(active("isa")).toEqual(["isa"]);
+    // 탭을 바꾸면 새 계좌만 돈다
+    expect(active("pension")).toEqual(["pension"]);
+    expect(active("irp")).toEqual(["irp"]);
+  });
+
+  it("실패한 계좌는 stale 상태로 남고, 기존 v4 를 current 로 취급하지 않는다", () => {
+    // syncGrowthBacktest 가 실패하면 저장이 없으므로 history 는 그대로 v4 다
+    expect(hasStaleBacktest(staleHistory, key)).toBe(true);
+    expect(currentBacktestOf(staleHistory[0].backtestGrowth, key)).toBeUndefined();
+    // 다시 그 탭을 보면 또 시도된다
+    expect(backtestSyncKey(staleHistory, key, true)).not.toBe("");
+  });
+});
+
+describe("IndexComparison: stale 차단 / 탭 게이팅 근거 (구조 검증)", () => {
+  const src = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "components", "kaw", "IndexComparison.tsx"),
+    "utf8",
+  );
+
+  it("차트 데이터는 currentBacktestOf 게이트를 통과한 값만 쓴다", () => {
+    expect(src).toContain("const bt = currentBacktestOf(h.backtestGrowth, cashflowKey)");
+    expect(src).toContain("const lastBt = currentBacktestOf(last.backtestGrowth, cashflowKey)");
+    // 저장값을 직접 읽는 경로가 남아 있지 않다
+    expect(src).not.toContain("last.backtestGrowth.units");
+    expect(src).not.toContain("const bt = h.backtestGrowth;");
+  });
+
+  it("stale 이면 차트를 렌더하지 않는다 (동기 판정)", () => {
+    expect(src).toContain("const stale = staleByAccount[id]");
+    expect(src).toContain("const showCharts = !stale && dataByAccount[id].length >= 1");
+    expect(src).toContain("hasStaleBacktest(acc.history, cashflowFingerprint(acc.cashflows))");
+  });
+
+  it("계좌 4개 hook 을 모두 호출하되 보고 있는 탭만 enabled 다", () => {
+    for (const id of ["retirement", "isa", "pension", "irp"]) {
+      expect(src).toContain(`enabled: tab === "${id}"`);
+    }
+    expect((src.match(/useEnsureGrowthBacktest\(/g) ?? []).length).toBe(4);
   });
 });

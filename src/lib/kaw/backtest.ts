@@ -10,7 +10,13 @@ import { investedPrincipalAsOf, principalAsOf, type CashflowEntry } from "./cash
 // v4: (1) 현금성자산 종목코드 오류(429000 → 449170) 정정 전에 계산된 값 무효화,
 //     (2) 누적 납입원금을 history.deposit 조각이 아니라 **cashflow 장부**에서 가져오도록 변경,
 //     (3) 안전자산 다리에 가격이 없을 때 그 30%가 증발하던 문제 수정(남은 다리로 비중 재배분)
-export const BACKTEST_SCHEMA_VERSION = 4;
+// v5: 과거 시세 조회 실패(서버가 돌려주는 `{ price: 0, source: "failed" }`)를 정상 가격으로
+//     캐시에 넣어버려서, 가격이 하나도 없는 상태로 계산이 "성공"해 버린 결과를 무효화한다.
+//     그 결과물은 units 가 비고(`{}`) totalValue 가 그 시점 납입액만 남았는데 schemaVersion 과
+//     cashflowKey 가 정상으로 박혀서 자동 재계산도 막혀 있었다(production 4계좌 전부 오염).
+//     함께 fail-closed 로 바꿨다 — 필요한 과거 가격이 없으면 **아무것도 저장하지 않고** 실패시킨다.
+//     지문이 같아도 v4 결과는 이 버전 번호 때문에 반드시 한 번 다시 계산된다.
+export const BACKTEST_SCHEMA_VERSION = 5;
 
 // 퇴직연금/IRP는 법상 안전자산(위험자산 아닌 자산) 30% 이상 편입 의무가 있어, 지수 비교선도
 // "지수 70% + 안전자산 30%"로 계산한다. ISA/연금저축펀드는 규제 대상이 아니라 지수 100% 그대로다.
@@ -48,7 +54,7 @@ export interface BacktestGrowth {
   cashflowKey?: string;
 }
 
-interface DatedBacktestPoint extends BacktestGrowth {
+export interface DatedBacktestPoint extends BacktestGrowth {
   date: string;
 }
 
@@ -268,7 +274,19 @@ export function computeGrowthBacktest(
 // v2: 과거 종가 페이지 추정 버그 수정 이전에 브라우저에 저장된 실패(0원) 캐시를 무효화하기 위해 버전업
 // v3: 현금성자산 종목코드가 429000(없는 코드) → 449170 으로 정정됐다. 429000 으로 받아둔 0원 캐시가
 //     남아 있으면 현금성자산이 영구히 0원으로 계산되므로 키를 올려 전부 다시 받는다.
-const PRICE_CACHE_KEY = "kaw.backtest.prices.v3";
+// v4: 조회 실패(0원)를 "조회 완료된 가격"으로 저장해버린 캐시를 폐기한다. 이제 0 이하·비정상 값은
+//     아예 저장하지 않고, 읽을 때도 missing 으로 보지만(아래 isUsablePrice), 이미 사용자
+//     브라우저에 남아 있는 0 캐시를 확실히 버리려면 키를 올려야 한다.
+export const PRICE_CACHE_KEY = "kaw.backtest.prices.v4";
+
+/**
+ * 쓸 수 있는 가격인가. **0 은 "조회 완료된 가격"이 아니라 "아직 쓸 수 있는 가격 없음"이다** —
+ * 서버는 과거 시세 조회 실패를 `{ price: 0, source: "failed" }` 로 돌려준다. 그 0 을 가격으로
+ * 취급하면 보유 유닛이 0 으로 계산되고, 캐시에 들어가면 다시 조회조차 하지 않는다.
+ */
+export function isUsablePrice(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
 
 function loadPriceCache(): Record<string, Record<string, number>> {
   try {
@@ -287,16 +305,35 @@ function savePriceCache(cache: Record<string, Record<string, number>>) {
 
 const GROWTH_TICKERS = ASSET_ORDER.map((k) => BUILTIN_TICKERS[k]).filter((t): t is string => !!t);
 
+/**
+ * 그 날짜의 종목별 종가. **성공한 가격만** 돌려준다.
+ *
+ * 서버는 실패를 `{ price: 0, source: "failed", error }` 로 돌려준다(kis-server.ts
+ * fetchNaverHistoryPrices). 그걸 그대로 숫자로 받으면 0 이 "조회된 가격"으로 캐시에 박혀
+ * 재조회가 막히고, 백테스트는 가격 없는 상태로 계산을 완주해 버린다.
+ */
+export function parseHistoryPriceResults(
+  results: Record<string, { price?: unknown; source?: unknown }> | undefined,
+): Record<string, number> {
+  const byTicker: Record<string, number> = {};
+  for (const [ticker, r] of Object.entries(results ?? {})) {
+    if (r?.source === "failed") continue;
+    if (!isUsablePrice(r?.price)) continue;
+    byTicker[ticker] = r.price;
+  }
+  return byTicker;
+}
+
 async function fetchPricesForDate(date: string, tickers: string[]): Promise<Record<string, number>> {
   const res = await fetch("/api/naver/history-price", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ tickers, date: date.replace(/-/g, "") }),
   });
-  const data = (await res.json()) as { results?: Record<string, { price: number }> };
-  const byTicker: Record<string, number> = {};
-  for (const [ticker, r] of Object.entries(data.results ?? {})) byTicker[ticker] = r.price;
-  return byTicker;
+  const data = (await res.json()) as {
+    results?: Record<string, { price?: unknown; source?: unknown }>;
+  };
+  return parseHistoryPriceResults(data.results);
 }
 
 // 주어진 날짜들에 대해 자산별 과거 종가를 가져온다 (캐시 우선, 결측치는 직전 값으로 보정).
@@ -318,10 +355,17 @@ async function fetchHistoricalPrices(
   let fetchedAny = false;
   for (const date of sortedDates) {
     const row = cache[date] ?? {};
-    const needed = allTickers.filter((t) => row[t] === undefined);
+    // undefined / null / 0 이하 / NaN 은 모두 missing 이다 — 예전 버전이 저장해둔 0 때문에
+    // 재조회가 막히지 않게 한다(캐시 키도 v4 로 올렸지만, 읽기 쪽에서도 막는다).
+    const needed = allTickers.filter((t) => !isUsablePrice(row[t]));
     if (!needed.length) continue;
     const fetched = await fetchPricesForDate(date, needed);
-    cache[date] = { ...row, ...fetched };
+    // fetched 에는 성공한 가격만 들어 있다. 기존 행의 비정상 값(옛 0 캐시)은 여기서 떨어낸다.
+    const merged: Record<string, number> = {};
+    for (const [t, v] of Object.entries({ ...row, ...fetched })) {
+      if (isUsablePrice(v)) merged[t] = v;
+    }
+    cache[date] = merged;
     fetchedAny = true;
   }
   if (fetchedAny) savePriceCache(cache);
@@ -336,8 +380,8 @@ async function fetchHistoricalPrices(
     for (const key of ASSET_ORDER) {
       const ticker = BUILTIN_TICKERS[key];
       const p = ticker ? cachedRow[ticker] : undefined;
-      const value = p && p > 0 ? p : lastKnown[key];
-      if (value) {
+      const value = isUsablePrice(p) ? p : lastKnown[key];
+      if (isUsablePrice(value)) {
         assetRow[key] = value;
         lastKnown[key] = value;
       }
@@ -347,8 +391,8 @@ async function fetchHistoricalPrices(
     const tickerRow: Record<string, number> = {};
     for (const t of extraTickers) {
       const p = cachedRow[t];
-      const value = p && p > 0 ? p : lastKnownExtra[t];
-      if (value) {
+      const value = isUsablePrice(p) ? p : lastKnownExtra[t];
+      if (isUsablePrice(value)) {
         tickerRow[t] = value;
         lastKnownExtra[t] = value;
       }
@@ -356,6 +400,81 @@ async function fetchHistoricalPrices(
     byTicker[date] = tickerRow;
   }
   return { byAsset, byTicker };
+}
+
+// ── fail-closed 검증 ───────────────────────────────────────────────────────
+//
+// 과거 시세가 없는데도 계산을 완주하면 "units 가 빈 정상 결과"가 저장되고, schemaVersion 과
+// cashflowKey 가 박혀서 자동 재계산도 막힌다(v5 로 올린 이유). 그래서 계산 **전**에 가격이
+// 쓸 만한지, 계산 **후**에 결과가 말이 되는지 양쪽을 본다. 하나라도 걸리면 저장하지 않는다.
+
+/** 과거 가격이 모자라 백테스트를 저장할 수 없을 때. problems 는 진단 로그용이다. */
+export class BacktestDataError extends Error {
+  readonly problems: string[];
+  constructor(problems: string[]) {
+    super(`과거 시세가 부족해 백테스트를 계산할 수 없음: ${problems.slice(0, 5).join(" / ")}`);
+    this.name = "BacktestDataError";
+    this.problems = problems;
+  }
+}
+
+/**
+ * 각 history 시점에 benchmark 를 계산할 **대표 가격**이 있는지 검사한다(순수 함수).
+ *
+ * `byAsset` 은 이미 직전 종가를 carry-forward 한 값이므로, 중간 한 날짜의 일시적 조회 실패는
+ * 여기서 통과한다(그게 설계다). 걸리는 건 "그 시점 기준으로 쓸 수 있는 가격이 아예 없는" 경우다.
+ * 특히 **첫 시점**은 carry-forward 할 과거가 없어서 여기서 막지 않으면 전 구간이 오염된다.
+ *
+ * 안전자산 다리(퇴직연금/IRP 30%)는 요구하지 않는다 — 상장 전이면 남은 다리로 비중을
+ * 재배분하는 기존 설계가 맞다. 지수 **주** leg(kr / us)이 없으면 그 비교선 자체가 성립하지 않는다.
+ */
+export function validateHistoricalPricesForBacktest(
+  dates: readonly string[],
+  byAsset: Record<string, Partial<Record<AssetKey, number>>>,
+): string[] {
+  const problems: string[] = [];
+  const sorted = [...new Set(dates)].sort();
+  sorted.forEach((date, i) => {
+    const row = byAsset[date] ?? {};
+    const where = i === 0 ? `${date}(첫 시점)` : date;
+    if (!ASSET_ORDER.some((k) => isUsablePrice(row[k]))) {
+      problems.push(`${where}: 성장형 계산에 쓸 수 있는 가격이 하나도 없음`);
+    }
+    if (!isUsablePrice(row.kr)) problems.push(`${where}: 코스피200 주 leg(kr) 가격 없음`);
+    if (!isUsablePrice(row.us)) problems.push(`${where}: S&P500 주 leg(us) 가격 없음`);
+  });
+  return problems;
+}
+
+/**
+ * 계산 결과가 "가격 조회 실패를 정상 계산으로 굳힌" 모양인지 본다(순수 함수).
+ * 공격적인 휴리스틱은 넣지 않는다 — 돈이 들어갔는데 보유분이 전혀 없는 경우만 잡는다.
+ */
+export function findBacktestResultProblems(
+  points: readonly DatedBacktestPoint[],
+  byAsset: Record<string, Partial<Record<AssetKey, number>>>,
+): string[] {
+  if (!points.length) return [];
+  const problems: string[] = [];
+  const hadMoney = points.some((p) => p.totalValue > 0);
+  if (!hadMoney) return problems; // 돈이 들어간 적 없는 계좌는 0 이 정상이다
+
+  const noUnits = (p: DatedBacktestPoint) =>
+    ASSET_ORDER.every((k) => !((p.units[k] ?? 0) > 0));
+  if (points.every(noUnits)) {
+    problems.push("모든 시점의 성장형 보유 유닛이 비어 있음 (가격 없이 계산된 결과)");
+  }
+  const last = points[points.length - 1];
+  if (last.totalValue <= 0) problems.push(`${last.date}: 최신 시점 평가액이 0 이하`);
+
+  const hadPrice = (key: AssetKey) => points.some((p) => isUsablePrice(byAsset[p.date]?.[key]));
+  if (hadPrice("kr") && points.every((p) => !(p.kospiUnits > 0))) {
+    problems.push("코스피200 보유 유닛이 전 구간 0 (kr 가격은 있었음)");
+  }
+  if (hadPrice("us") && points.every((p) => !(p.sp500Units > 0))) {
+    problems.push("S&P500 보유 유닛이 전 구간 0 (us 가격은 있었음)");
+  }
+  return problems;
 }
 
 /**
@@ -367,6 +486,13 @@ async function fetchHistoricalPrices(
 export interface BacktestContext {
   cashflows?: readonly CashflowEntry[];
   safeAssetMix?: boolean;
+  /** 진단 로그용 계좌 이름 (계산에는 쓰지 않는다) */
+  label?: string;
+  /**
+   * false 면 계산도 네트워크 요청도 하지 않는다(기본 true). 지수비교 화면이 계좌 4개를
+   * 한꺼번에 조회하지 않도록, 보고 있는 탭만 true 로 둔다.
+   */
+  enabled?: boolean;
 }
 
 // 계좌 히스토리 전체에 대해 성장형 백테스트를 계산해 entryId → 결과 맵으로 반환.
@@ -374,15 +500,29 @@ export interface BacktestContext {
 // safeAssetMix=true면 퇴직연금/IRP 규정(안전자산 30% 이상)에 맞춰 코스피200/S&P500 비교선을 지수 70%+안전자산 30%로 계산한다.
 export async function syncGrowthBacktest(
   history: HistoryEntry[],
-  { cashflows, safeAssetMix = false }: BacktestContext = {},
+  { cashflows, safeAssetMix = false, label }: BacktestContext = {},
 ): Promise<Record<string, BacktestGrowth>> {
   if (!history.length) return {};
   const extraTickers = safeAssetMix ? [SAFE_MIX_SP500_TICKER] : [];
-  const { byAsset, byTicker } = await fetchHistoricalPrices(history.map((h) => h.date), extraTickers);
+  const dates = history.map((h) => h.date);
+  const { byAsset, byTicker } = await fetchHistoricalPrices(dates, extraTickers);
   const safeAssetMixPrices = safeAssetMix
     ? Object.fromEntries(Object.entries(byTicker).map(([date, row]) => [date, row[SAFE_MIX_SP500_TICKER]]))
     : undefined;
+
+  // 계산 전: 가격이 모자라면 아무것도 저장하지 않는다(기존 결과를 덮어쓰지 않는다).
+  const priceProblems = validateHistoricalPricesForBacktest(dates, byAsset);
+  if (priceProblems.length) {
+    throw new BacktestDataError(label ? priceProblems.map((m) => `[${label}] ${m}`) : priceProblems);
+  }
+
   const points = computeGrowthBacktest(history, byAsset, safeAssetMixPrices, cashflows);
+
+  // 계산 후: 결과가 "가격 없이 완주한" 모양이면 저장하지 않는다.
+  const resultProblems = findBacktestResultProblems(points, byAsset);
+  if (resultProblems.length) {
+    throw new BacktestDataError(label ? resultProblems.map((m) => `[${label}] ${m}`) : resultProblems);
+  }
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
   const result: Record<string, BacktestGrowth> = {};
   sorted.forEach((h, i) => {
@@ -413,45 +553,107 @@ export function needsBacktestRecompute(
   return entry.cashflowKey !== cashflowKey;
 }
 
+/**
+ * 지금 기준으로 **그릴 수 있는** 저장값인가. `needsBacktestRecompute` 의 반대다.
+ * 현재 schemaVersion 과 현재 장부 지문이 **둘 다** 맞아야 current 다.
+ */
+export function isCurrentBacktest(
+  entry: HistoryEntry["backtestGrowth"],
+  cashflowKey: string,
+): boolean {
+  return !needsBacktestRecompute(entry, cashflowKey);
+}
+
+/**
+ * 화면에 쓸 수 있는 저장값만 통과시킨다. stale 이면 `undefined` —
+ * **오염된 v4 값(units={} / totalValue=납입액 / -99% 수익률)이 차트로 새지 않게 하는 게이트다.**
+ * syncing 같은 비동기 상태가 아니라 이 동기 판정을 쓰므로 첫 render 에서도 한 프레임 안 보인다.
+ */
+export function currentBacktestOf(
+  entry: HistoryEntry["backtestGrowth"],
+  cashflowKey: string,
+): HistoryEntry["backtestGrowth"] | undefined {
+  return isCurrentBacktest(entry, cashflowKey) ? entry : undefined;
+}
+
+/** 다시 계산해야 하는 history 항목 id 들 */
+export function staleBacktestIds(
+  history: readonly HistoryEntry[],
+  cashflowKey: string,
+): string[] {
+  return history.filter((h) => needsBacktestRecompute(h.backtestGrowth, cashflowKey)).map((h) => h.id);
+}
+
+/** 하나라도 stale 이면 그 계좌의 비교 차트를 그리지 않는다(계산 중/실패 안내만 띄운다). */
+export function hasStaleBacktest(
+  history: readonly HistoryEntry[],
+  cashflowKey: string,
+): boolean {
+  return history.some((h) => needsBacktestRecompute(h.backtestGrowth, cashflowKey));
+}
+
+/**
+ * 재계산 트리거 키(순수 함수).
+ *
+ * - `enabled` 가 false 면 빈 문자열 — **네트워크 요청도 계산도 하지 않는다.**
+ *   (지수비교는 계좌 4개의 hook 을 항상 호출하되 보고 있는 탭만 enabled 로 둔다.)
+ * - 대상이 없으면(모두 current) 빈 문자열 — 계산하지 않는다.
+ * - **대상 목록만으로 트리거하면 안 된다** — 장부가 또 바뀌어 대상 목록이 그대로일 때
+ *   (예: 전 구간이 이미 대상) 새 장부로 다시 돌지 않기 때문이다. 그래서 지문을 같이 넣는다.
+ */
+export function backtestSyncKey(
+  history: readonly HistoryEntry[],
+  cashflowKey: string,
+  enabled = true,
+): string {
+  if (!enabled) return "";
+  const ids = staleBacktestIds(history, cashflowKey);
+  return ids.length ? `${cashflowKey}|${ids.join(",")}` : "";
+}
+
 // 히스토리 중 다시 계산해야 할 항목이 있으면 한 번만 조용히 계산해서 onResult로 넘겨준다.
 export function useEnsureGrowthBacktest(
   history: HistoryEntry[],
   onResult: (updates: Record<string, BacktestGrowth>) => void,
-  { cashflows, safeAssetMix = false }: BacktestContext = {},
+  { cashflows, safeAssetMix = false, label, enabled = true }: BacktestContext = {},
 ) {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState(false);
 
   const cashflowKey = useMemo(() => cashflowFingerprint(cashflows), [cashflows]);
-  const staleIds = useMemo(
-    () =>
-      history
-        .filter((h) => needsBacktestRecompute(h.backtestGrowth, cashflowKey))
-        .map((h) => h.id)
-        .join(","),
-    [history, cashflowKey],
+  // 계산 결과에는 지금 지문이 박혀 저장되므로 다음 render 에서 대상이 비고,
+  // setHistoryBacktest → 재계산 loop 는 생기지 않는다.
+  const syncKey = useMemo(
+    () => backtestSyncKey(history, cashflowKey, enabled),
+    [history, cashflowKey, enabled],
   );
 
-  // 재계산 트리거. **대상 목록만으로 트리거하면 안 된다** — 장부가 또 바뀌어 대상 목록이 그대로일
-  // 때(예: 전 구간이 이미 대상) 새 장부로 다시 돌지 않기 때문이다. 그래서 지문을 같이 넣는다.
-  // 대상이 없으면 빈 문자열이라 effect 는 즉시 반환한다. 계산 결과에는 지금 지문이 박혀 저장되므로
-  // 다음 render 에서 staleIds 가 비고, setHistoryBacktest → 재계산 loop 는 생기지 않는다.
-  const syncKey = staleIds ? `${cashflowKey}|${staleIds}` : "";
-
   useEffect(() => {
-    if (!syncKey) return;
+    // 비활성 탭이거나 모두 최신이면 아무 요청도 하지 않는다.
+    if (!syncKey) {
+      setSyncing(false);
+      return;
+    }
     let cancelled = false;
     setSyncing(true);
     setError(false);
-    syncGrowthBacktest(history, { cashflows, safeAssetMix })
+    syncGrowthBacktest(history, { cashflows, safeAssetMix, label })
       .then((result) => {
         if (!cancelled) onResult(result);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        // 사용자 화면 문구는 그대로(재시도 안내). 개발자용 진단만 콘솔에 남긴다.
+        const problems = err instanceof BacktestDataError ? err.problems : [String(err)];
+        console.error("[kaw] 성장형 백테스트 계산 실패 — 저장하지 않음:", {
+          label,
+          dates: history.map((h) => h.date),
+          problems,
+        });
         if (!cancelled) setError(true);
       })
       .finally(() => {
-        if (!cancelled) setSyncing(false);
+        // cancelled(탭 전환·장부 변경으로 교체됨) 여도 spinner 는 내린다. 저장/에러만 막는다.
+        setSyncing(false);
       });
     return () => {
       cancelled = true;
@@ -459,5 +661,5 @@ export function useEnsureGrowthBacktest(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncKey, safeAssetMix]);
 
-  return { syncing, error };
+  return { syncing, error, cashflowKey };
 }
