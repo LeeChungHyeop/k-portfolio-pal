@@ -42,6 +42,9 @@ export interface HistoryEntry {
   backtestGrowth?: {
     totalValue: number; returnPct: number | null; units: Partial<Record<AssetKey, number>>;
     kospi200Pct: number | null; sp500Pct: number | null;
+    // 위 수익률과 같은 계산에서 나온 정확한 평가액(현금 포함). 금액 비교 차트는 이 값을 쓴다 —
+    // 반올림된 Pct 에서 역산하지 않는다 (backtest.ts v6). v5 이전 저장값에는 없다.
+    kospi200Value?: number | null; sp500Value?: number | null;
     kospiUnits: number; sp500Units: number;
     kospiSafeUnits: number; sp500SafeUnits: number;
     schemaVersion: number;

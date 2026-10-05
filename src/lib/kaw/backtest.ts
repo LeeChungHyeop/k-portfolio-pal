@@ -16,7 +16,11 @@ import { investedPrincipalAsOf, principalAsOf, type CashflowEntry } from "./cash
 //     cashflowKey 가 정상으로 박혀서 자동 재계산도 막혀 있었다(production 4계좌 전부 오염).
 //     함께 fail-closed 로 바꿨다 — 필요한 과거 가격이 없으면 **아무것도 저장하지 않고** 실패시킨다.
 //     지문이 같아도 v4 결과는 이 버전 번호 때문에 반드시 한 번 다시 계산된다.
-export const BACKTEST_SCHEMA_VERSION = 5;
+// v6: 통합 금액 비교 차트에서 benchmark 총액을 반올림된 수익률에서 역산하지 않고 정확한 값으로 저장한다.
+//     (kospi200Pct/sp500Pct 는 소수 둘째자리로 반올림된 값이라, 거기서 금액을 되돌리면 차트에
+//     수십만원 단위 오차가 "사실"처럼 찍힌다.) v5 의 수익률/units 계산 의미는 그대로이고,
+//     kospi200Value / sp500Value 필드만 추가됐다 — v5 저장값은 이 번호 때문에 한 번 재계산된다.
+export const BACKTEST_SCHEMA_VERSION = 6;
 
 // 퇴직연금/IRP는 법상 안전자산(위험자산 아닌 자산) 30% 이상 편입 의무가 있어, 지수 비교선도
 // "지수 70% + 안전자산 30%"로 계산한다. ISA/연금저축펀드는 규제 대상이 아니라 지수 100% 그대로다.
@@ -40,6 +44,13 @@ export interface BacktestGrowth {
   units: Partial<Record<AssetKey, number>>; // 다음 시점 드리프트 계산을 위한 보유 유닛 스냅샷
   kospi200Pct: number | null; // 실제와 같은 시점·같은 금액을 코스피200(KIWOOM 200TR)에 매번 넣었다면의 누적수익률
   sp500Pct: number | null; // 실제와 같은 시점·같은 금액을 S&P500(TIGER 미국S&P500, KRW 환산)에 매번 넣었다면의 누적수익률
+  /**
+   * 위 수익률과 **같은 계산에서 나온 평가액 그대로**(현금 포함, 반올림 없음) — v6에서 추가.
+   * 금액 비교 차트는 이 값을 쓴다. `kospi200Pct` 에서 역산하면 안 된다(반올림 오차가 금액으로 증폭된다).
+   * v5 이전 저장값에는 없다(undefined → 재계산되면 채워진다).
+   */
+  kospi200Value?: number | null;
+  sp500Value?: number | null;
   kospiUnits: number; // 다음 시점 드리프트 및 실시간 "현재" 포인트 계산용 보유 유닛 스냅샷 (지수 쪽 비중)
   sp500Units: number;
   kospiSafeUnits: number; // 퇴직연금/IRP 전용 — 코스피200 비교선의 안전자산(30%, 국고채30년) 보유 유닛
@@ -137,7 +148,7 @@ function computeWeightedBacktest(
   depositAmts: number[],
   uninvested: number[],
   legs: { weight: number; priceOf: (date: string) => number | undefined }[],
-): { pct: number | null; units: number[] }[] {
+): { pct: number | null; value: number | null; units: number[] }[] {
   const units = legs.map(() => 0);
   const lastKnownPrice = legs.map(() => 0);
   let cumDeposit = 0;
@@ -174,11 +185,14 @@ function computeWeightedBacktest(
     // 아직 투자 못 한 돈은 현금으로 들고 있는다 — 평가액·원금 양쪽에 같이 들어간다.
     const cash = uninvested[i] ?? 0;
     const principal = cumDeposit + cash;
+    // 보고용 평가액 = 지수 다리 평가액 + 아직 투자 못 한 현금. pct 와 **같은 분자**다 —
+    // 차트는 이 값을 그대로 쓰고, 반올림된 pct 에서 금액을 역산하지 않는다(v6).
+    const reportedValue = totalValue + cash;
     const pct =
       principal > 0
-        ? Math.round(((totalValue + cash - principal) / principal) * 10000) / 100
+        ? Math.round(((reportedValue - principal) / principal) * 10000) / 100
         : null;
-    return { pct, units: [...units] };
+    return { pct, value: principal > 0 ? reportedValue : null, units: [...units] };
   });
 }
 
@@ -260,6 +274,8 @@ export function computeGrowthBacktest(
       units: { ...units },
       kospi200Pct: kospiPoints[i].pct,
       sp500Pct: sp500Points[i].pct,
+      kospi200Value: kospiPoints[i].value,
+      sp500Value: sp500Points[i].value,
       kospiUnits: kospiPoints[i].units[0],
       sp500Units: sp500Points[i].units[0],
       kospiSafeUnits: kospiPoints[i].units[1] ?? 0,
@@ -527,11 +543,11 @@ export async function syncGrowthBacktest(
   const result: Record<string, BacktestGrowth> = {};
   sorted.forEach((h, i) => {
     const {
-      totalValue, returnPct, units, kospi200Pct, sp500Pct,
+      totalValue, returnPct, units, kospi200Pct, sp500Pct, kospi200Value, sp500Value,
       kospiUnits, sp500Units, kospiSafeUnits, sp500SafeUnits, schemaVersion, cashflowKey,
     } = points[i];
     result[h.id] = {
-      totalValue, returnPct, units, kospi200Pct, sp500Pct,
+      totalValue, returnPct, units, kospi200Pct, sp500Pct, kospi200Value, sp500Value,
       kospiUnits, sp500Units, kospiSafeUnits, sp500SafeUnits, schemaVersion, cashflowKey,
     };
   });

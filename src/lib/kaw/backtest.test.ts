@@ -152,6 +152,64 @@ describe("computeGrowthBacktest", () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v6 — benchmark 총액을 반올림된 수익률에서 역산하지 않고 정확한 값으로 저장
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("v6: kospi200Value / sp500Value (정확한 benchmark 총액)", () => {
+  const history = [entry("2026-01-02", { baseAmount: 1_000_000 }), entry("2026-02-02", { deposit: 111 })];
+  const cashflows = [flow("2026-01-02", 1_000_000), flow("2026-02-02", 500_000)];
+  // 역산했다면 오차가 보이도록 "안 떨어지는" 가격 변화를 쓴다
+  const prices = { "2026-01-02": flatPrices(1013), "2026-02-02": flatPrices(1097) };
+
+  it("schemaVersion 이 6 이다", () => {
+    expect(BACKTEST_SCHEMA_VERSION).toBe(6);
+  });
+
+  it("weighted backtest 의 totalValue 가 직접 저장된다 (수익률에서 역산하지 않는다)", () => {
+    const points = computeGrowthBacktest(history, prices, undefined, cashflows);
+    for (const p of points) {
+      expect(typeof p.kospi200Value).toBe("number");
+      expect(typeof p.sp500Value).toBe("number");
+    }
+    // 코스피200 비교선은 지수 100% 라 "유닛 × 그 시점 가격" 과 정확히 같다.
+    // 첫 시점: 1,000,000 / 1013 유닛
+    expect(points[0].kospi200Value).toBeCloseTo((1_000_000 / 1013) * 1013, 6);
+    // 두 번째 시점: 1,000,000 이 1097/1013 로 드리프트 + 500,000 입금
+    const expected2 = (1_000_000 / 1013) * 1097 + 500_000;
+    expect(points[1].kospi200Value).toBeCloseTo(expected2, 6);
+    expect(points[1].sp500Value).toBeCloseTo(expected2, 6);
+    // 반올림된 pct 에서 역산한 값과는 실제로 다르다 → 역산 금지가 의미 있는 차이다
+    const principal = 1_500_000;
+    const backCalculated = principal * (1 + points[1].kospi200Pct! / 100);
+    expect(Math.abs(backCalculated - points[1].kospi200Value!)).toBeGreaterThan(1);
+  });
+
+  it("kospi200Value / sp500Value 와 pct 가 같은 원금 기준으로 수학적으로 일치한다", () => {
+    const safePrices = { "2026-01-02": 2003, "2026-02-02": 2111 };
+    const points = computeGrowthBacktest(history, prices, safePrices, cashflows);
+    const principals = [1_000_000, 1_500_000]; // 장부 누적 순입금 (미투자 현금 없음)
+    const pctOf = (value: number, principal: number) =>
+      Math.round(((value - principal) / principal) * 10000) / 100;
+
+    points.forEach((p, i) => {
+      expect(pctOf(p.kospi200Value!, principals[i])).toBe(p.kospi200Pct);
+      expect(pctOf(p.sp500Value!, principals[i])).toBe(p.sp500Pct);
+      // 성장형도 같은 원금 기준이다 — 세 선이 한 차트에서 비교 가능하다는 근거
+      expect(pctOf(p.totalValue, principals[i])).toBe(p.returnPct);
+    });
+  });
+
+  it("안전자산 30% 다리 평가액까지 포함된 금액이다 (퇴직연금/IRP)", () => {
+    const safePrices = { "2026-01-02": 2000, "2026-02-02": 2000 };
+    const points = computeGrowthBacktest(history, prices, safePrices, cashflows);
+    const p0 = points[0];
+    const byUnits = p0.kospiUnits * 1013 + p0.kospiSafeUnits * 1013;
+    expect(p0.kospi200Value).toBeCloseTo(byUnits, 6);
+    expect(p0.sp500Value).toBeCloseTo(p0.sp500Units * 1013 + p0.sp500SafeUnits * 2000, 6);
+  });
+});
+
 describe("안전자산 혼합 대상 계좌", () => {
   it("퇴직연금/IRP 만 해당한다", () => {
     expect([...SAFE_MIX_ACCOUNTS]).toEqual(["retirement", "irp"]);
@@ -388,11 +446,14 @@ describe("투자 가능 시점 (same_day / after_close)", () => {
   });
 });
 
-describe("IndexComparison: 미투자 현금 판정 근거", () => {
-  const src = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "..", "components", "kaw", "IndexComparison.tsx"),
-    "utf8",
-  );
+// 지수비교/대시보드 공용 컴포넌트 — 계산 로직이 여기 한 곳에만 있다
+const BENCHMARK_CHART_SRC = fs.readFileSync(
+  path.join(import.meta.dirname, "..", "..", "components", "kaw", "PortfolioBenchmarkChart.tsx"),
+  "utf8",
+);
+
+describe("PortfolioBenchmarkChart: 미투자 현금 판정 근거", () => {
+  const src = BENCHMARK_CHART_SRC;
 
   it('"현재" 포인트의 미투자 현금은 투자 가능액 기준이다 (같은 날 after_close 입금 포함)', () => {
     expect(src).toContain("미투자 = cumDeposit - investedPrincipalAsOf(cashflows, last.date)");
@@ -576,7 +637,7 @@ describe("syncGrowthBacktest — 실패하면 아무것도 저장하지 않는�
   const allFailed = (tickers: string[]) =>
     Object.fromEntries(tickers.map((t) => [t, { price: 0, source: "failed" }]));
 
-  it("모든 시세 조회가 실패하면 throw 하고 결과를 만들지 않는다 (v5 로 덮어쓰지 않음)", async () => {
+  it("모든 시세 조회가 실패하면 throw 하고 결과를 만들지 않는다 (현재 버전으로 덮어쓰지 않음)", async () => {
     let saved: unknown = "not-called";
     await withFakeEnv(allFailed, async () => {
       await expect(
@@ -599,7 +660,7 @@ describe("syncGrowthBacktest — 실패하면 아무것도 저장하지 않는�
     expect(Object.values(cached["2026-01-02"] ?? {}).some((v) => v === 0)).toBe(false);
   });
 
-  it("정상 가격이면 schemaVersion 5 + cashflowKey 로 저장되고, 두 번째엔 재조회하지 않는다", async () => {
+  it("정상 가격이면 현재 schemaVersion + cashflowKey 로 저장되고, 두 번째엔 재조회하지 않는다", async () => {
     let result: Record<string, { schemaVersion: number; cashflowKey?: string }> = {};
     const { calls } = await withFakeEnv(allOk, async () => {
       result = await syncGrowthBacktest(history, { cashflows });
@@ -607,10 +668,21 @@ describe("syncGrowthBacktest — 실패하면 아무것도 저장하지 않는�
     });
     const key = cashflowFingerprint(cashflows);
     for (const h of history) {
-      expect(result[h.id].schemaVersion).toBe(5);
+      expect(result[h.id].schemaVersion).toBe(BACKTEST_SCHEMA_VERSION);
       expect(result[h.id].cashflowKey).toBe(key);
     }
     expect(calls.length).toBe(history.length); // 두 번째 호출에서는 조회가 없었다
+  });
+
+  it("저장값에 정확한 benchmark 총액(kospi200Value / sp500Value)이 들어 있다 (v6)", async () => {
+    let result: Record<string, { kospi200Value?: number | null; sp500Value?: number | null }> = {};
+    await withFakeEnv(allOk, async () => {
+      result = await syncGrowthBacktest(history, { cashflows });
+    });
+    for (const h of history) {
+      expect(result[h.id].kospi200Value).toBeGreaterThan(0);
+      expect(result[h.id].sp500Value).toBeGreaterThan(0);
+    }
   });
 
   it("kr(코스피 주 leg)만 전 구간 실패해도 저장하지 않는다", async () => {
@@ -660,7 +732,7 @@ describe("syncGrowthBacktest — 실패하면 아무것도 저장하지 않는�
       },
     );
     expect(Object.keys(result)).toHaveLength(history.length);
-    expect(result[history[0].id].schemaVersion).toBe(5);
+    expect(result[history[0].id].schemaVersion).toBe(BACKTEST_SCHEMA_VERSION);
   });
 
   it("중간 날짜만 조회 실패하면 직전 종가로 계산을 이어간다 (저장됨)", async () => {
@@ -695,7 +767,7 @@ describe("오염된 v4 결과는 다시 계산된다", () => {
       cashflowKey: key,
     };
     expect(needsBacktestRecompute(polluted, key)).toBe(true);
-    expect(BACKTEST_SCHEMA_VERSION).toBe(5);
+    expect(BACKTEST_SCHEMA_VERSION).toBe(6);
   });
 });
 
@@ -730,14 +802,14 @@ describe("stale 판정 — schemaVersion 과 장부 지문이 둘 다 맞아야 
     expect(currentBacktestOf(e, key)).toBeUndefined();
   });
 
-  it("v5 + fingerprint mismatch → stale", () => {
-    const e = { ...pollutedV4(otherKey), schemaVersion: 5 };
+  it("현재 버전 + fingerprint mismatch → stale", () => {
+    const e = { ...pollutedV4(otherKey), schemaVersion: BACKTEST_SCHEMA_VERSION };
     expect(isCurrentBacktest(e, key)).toBe(false);
     expect(currentBacktestOf(e, key)).toBeUndefined();
   });
 
-  it("v5 + fingerprint match → current", () => {
-    const e = { ...pollutedV4(key), schemaVersion: 5 };
+  it("현재 버전 + fingerprint match → current", () => {
+    const e = { ...pollutedV4(key), schemaVersion: BACKTEST_SCHEMA_VERSION };
     expect(isCurrentBacktest(e, key)).toBe(true);
     expect(currentBacktestOf(e, key)).toBe(e);
   });
@@ -758,7 +830,7 @@ describe("stale 판정 — schemaVersion 과 장부 지문이 둘 다 맞아야 
   });
 
   it("history 중 하나라도 stale 이면 그 계좌는 차트를 그리지 않는다", () => {
-    const current = { ...pollutedV4(key), schemaVersion: 5 };
+    const current = { ...pollutedV4(key), schemaVersion: BACKTEST_SCHEMA_VERSION };
     const mixed = [
       { ...entry("2026-01-02"), backtestGrowth: current },
       { ...entry("2026-02-02"), backtestGrowth: pollutedV4(key) }, // v4 하나 섞임
@@ -777,7 +849,7 @@ describe("backtestSyncKey — 보고 있는 탭만 계산한다", () => {
   const key = cashflowFingerprint(cashflows);
   const staleHistory = [{ ...entry("2026-01-02"), backtestGrowth: pollutedV4(key) }];
   const currentHistory = [
-    { ...entry("2026-01-02"), backtestGrowth: { ...pollutedV4(key), schemaVersion: 5 } },
+    { ...entry("2026-01-02"), backtestGrowth: { ...pollutedV4(key), schemaVersion: BACKTEST_SCHEMA_VERSION } },
   ];
 
   it("enabled=false 면 stale 이어도 트리거가 비어 있다 (요청/계산 없음)", () => {
@@ -819,11 +891,8 @@ describe("backtestSyncKey — 보고 있는 탭만 계산한다", () => {
   });
 });
 
-describe("IndexComparison: stale 차단 / 탭 게이팅 근거 (구조 검증)", () => {
-  const src = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "..", "components", "kaw", "IndexComparison.tsx"),
-    "utf8",
-  );
+describe("PortfolioBenchmarkChart: stale 차단 / 탭 게이팅 근거 (구조 검증)", () => {
+  const src = BENCHMARK_CHART_SRC;
 
   it("차트 데이터는 currentBacktestOf 게이트를 통과한 값만 쓴다", () => {
     expect(src).toContain("const bt = currentBacktestOf(h.backtestGrowth, cashflowKey)");

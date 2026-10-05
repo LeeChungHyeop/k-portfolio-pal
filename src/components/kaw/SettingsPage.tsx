@@ -25,7 +25,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   RotateCcw, Download, Upload, FileSpreadsheet, Trash2,
   KeyRound, Shield, CheckCircle2, AlertCircle, RefreshCw,
-  Plus, X, Save, Settings, MessageSquare, Users, ChevronUp, ChevronDown,
+  Plus, X, Save, Settings, MessageSquare, Users, ChevronUp, ChevronDown, Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -36,6 +36,7 @@ import {
 import {
   SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, type SQIndex,
 } from "@/lib/kaw/secretQuestions";
+import type { Page } from "@/components/kaw/Sidebar";
 
 // ── Main tab types ─────────────────────────────────────────────────────────
 type MainTab = "investment" | "data" | "security" | "users";
@@ -44,6 +45,49 @@ type MainTab = "investment" | "data" | "security" | "users";
 interface SettingsProps {
   familyData: FamilyData;
   onFamilyUpdate: (fd: FamilyData) => void;
+  /** 내부 도구 카드에서 숨겨진 페이지로 이동할 때 쓴다 (App.navigate). */
+  onNavigate?: (p: Page) => void;
+  /**
+   * 내부 도구 노출 여부. **판정은 App 이 한다**(hyeobi + 데모가 아닌 실제 로그인 세션) —
+   * 여기서 다시 추측하지 않고 받은 값을 그대로 쓴다. App.navigate 쪽에도 같은 게이트가 있어
+   * 이 prop 이 잘못 와도 내부 페이지는 열리지 않는다.
+   */
+  canAccessInternalTools?: boolean;
+}
+
+/**
+ * 내부 도구 — 사이드바에서 뺀 숨겨진 페이지들로 가는 유일한 UI 경로.
+ * hyeobi 실제 로그인 세션에서만 렌더된다.
+ */
+function InternalToolsCard({ onNavigate }: { onNavigate: (p: Page) => void }) {
+  const TOOLS: { page: Page; label: string; desc: string }[] = [
+    { page: "dashboard-old", label: "구형 대시보드 열기", desc: "개편 전 대시보드 (기록 비교용)" },
+    { page: "compare", label: "지수비교 전체화면 열기", desc: "대시보드 비교 섹션의 전체화면 버전" },
+  ];
+  return (
+    <Card className="p-6 space-y-4">
+      <div>
+        <h3 className="font-semibold flex items-center gap-2">
+          <Wrench className="w-4 h-4 text-muted-foreground" /> 내부 도구
+        </h3>
+        <p className="text-xs text-muted-foreground mt-1">
+          사이드바에서 숨긴 페이지입니다. 본인 계정에서만 보입니다.
+        </p>
+      </div>
+      <div className="space-y-2">
+        {TOOLS.map(({ page, label, desc }) => (
+          <button
+            key={page}
+            onClick={() => onNavigate(page)}
+            className="w-full text-left px-4 py-3 rounded-xl border bg-muted/30 hover:bg-muted transition-colors"
+          >
+            <p className="text-sm font-medium">{label}</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{desc}</p>
+          </button>
+        ))}
+      </div>
+    </Card>
+  );
 }
 
 // ── Excel helpers (unchanged) ──────────────────────────────────────────────
@@ -262,7 +306,9 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
 }
 
 
-export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
+export function SettingsPage({
+  familyData, onFamilyUpdate, onNavigate, canAccessInternalTools = false,
+}: SettingsProps) {
   const { currentUser } = usePortfolioStore();
   const isMaster = currentUser === "hyeobi";
 
@@ -335,6 +381,9 @@ export function SettingsPage({ familyData, onFamilyUpdate }: SettingsProps) {
         <div className="max-w-4xl mx-auto space-y-6">
           {mainTab === "investment" && <InvestmentTab ref={investTabRef} />}
           {mainTab === "data"       && <DataTab />}
+          {mainTab === "data" && canAccessInternalTools && onNavigate && (
+            <InternalToolsCard onNavigate={onNavigate} />
+          )}
           {mainTab === "security"   && <SecurityTab familyData={familyData} onFamilyUpdate={onFamilyUpdate} />}
           {mainTab === "users" && isMaster && <UserManagementTab familyData={familyData} onFamilyUpdate={onFamilyUpdate} />}
         </div>
