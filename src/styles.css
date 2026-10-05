@@ -168,3 +168,12 @@
 .dark .sidebar-scroll::-webkit-scrollbar-thumb:hover {
   background: oklch(0.65 0.22 293 / 0.6);
 }
+
+/* 가로 스크롤은 살리되 스크롤바만 숨긴다 (모바일 설정 탭 바 등) */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

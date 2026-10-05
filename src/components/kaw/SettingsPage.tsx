@@ -65,7 +65,7 @@ function InternalToolsCard({ onNavigate }: { onNavigate: (p: Page) => void }) {
     { page: "compare", label: "지수비교 전체화면 열기", desc: "대시보드 비교 섹션의 전체화면 버전" },
   ];
   return (
-    <Card className="p-6 space-y-4">
+    <Card className="p-4 md:p-6 space-y-4">
       <div>
         <h3 className="font-semibold flex items-center gap-2">
           <Wrench className="w-4 h-4 text-muted-foreground" /> 내부 도구
@@ -197,7 +197,7 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
   const versions = [...schedule.amountVersions].sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
 
   return (
-    <Card className="p-5 space-y-4">
+    <Card className="p-4 md:p-5 space-y-3 md:space-y-4">
       <div className="flex items-center justify-between gap-3">
         <h3 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">정기납입</h3>
         <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -210,8 +210,8 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
         </label>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div>
+      <div className="grid grid-cols-2 gap-2 md:gap-3">
+        <div className="min-w-0">
           <label className="text-xs text-muted-foreground">매월 납입일</label>
           <Input
             type="number" min={1} max={31}
@@ -223,16 +223,19 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
             className="mt-1"
           />
         </div>
-        <div>
+        <div className="min-w-0">
           <label className="text-xs text-muted-foreground">입금 시점</label>
+          {/* 모바일에서는 괄호 안 부연을 숨겨 trigger 가 잘리지 않게 한다 — 저장되는 값
+              (same_day / after_close)과 의미는 그대로이고, 상세 설명은 바로 아래
+              "현재 적용금액" 블록이 두 경우 모두 문장으로 보여준다. */}
           <Select
             value={schedule.timing}
             onValueChange={(v) => updateContributionSchedule(accountId, { timing: v as "same_day" | "after_close" })}
           >
             <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="same_day">당일 입금 (바로 사용)</SelectItem>
-              <SelectItem value="after_close">장마감 후 입금 (다음 거래일부터)</SelectItem>
+              <SelectItem value="same_day">당일 입금<span className="hidden md:inline"> (바로 사용)</span></SelectItem>
+              <SelectItem value="after_close">장마감 후 입금<span className="hidden md:inline"> (다음 거래일부터)</span></SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -245,7 +248,9 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
         </p>
         <p className="text-muted-foreground">
           적용 시작월 {current ? current.effectiveFrom.replace("-", ".") : "—"}
-          {schedule.timing === "after_close" && " · 납입일 저녁 입금, 다음 거래일부터 매수 가능"}
+          {schedule.timing === "after_close"
+            ? " · 납입일 저녁 입금, 다음 거래일부터 매수 가능"
+            : " · 납입일 당일 입금, 그 날 바로 매수 가능"}
         </p>
       </div>
 
@@ -273,21 +278,25 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
         ))}
       </div>
 
-      <div className="flex items-end gap-2 pt-1 border-t">
-        <div className="w-28">
+      {/* 모바일: 1행 = 시작월 / 금액 2열, 2행 = 추가 버튼 full width.
+          한 줄(flex items-end)로 두면 390px 에서 month input 이 압축돼 조작이 안 된다.
+          sm 이상은 기존 한 줄 배치 그대로. */}
+      <div className="grid grid-cols-2 gap-2 pt-1 border-t sm:flex sm:items-end">
+        <div className="min-w-0 sm:w-28">
           <label className="text-[11px] text-muted-foreground">적용 시작월</label>
-          <Input type="month" value={newFrom} onChange={(e) => setNewFrom(e.target.value)} className="mt-1 h-9" />
+          <Input type="month" value={newFrom} onChange={(e) => setNewFrom(e.target.value)} className="mt-1 h-9 w-full min-w-0" />
         </div>
-        <div className="flex-1">
+        <div className="min-w-0 sm:flex-1">
           <label className="text-[11px] text-muted-foreground">금액 (원)</label>
           <Input
             inputMode="numeric" value={newAmount} placeholder="688074"
             onChange={(e) => setNewAmount(e.target.value.replace(/[^0-9]/g, ""))}
-            className="mt-1 h-9"
+            className="mt-1 h-9 w-full min-w-0"
           />
         </div>
         <Button
           size="sm"
+          className="col-span-2 h-9 w-full sm:w-auto"
           disabled={!/^\d{4}-\d{2}$/.test(newFrom) || !(Number(newAmount) > 0)}
           onClick={() => {
             setContributionAmount(accountId, newFrom, Number(newAmount));
@@ -335,13 +344,18 @@ export function SettingsPage({
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    // 모바일(md 미만)에서는 세로 스크롤을 main 하나에만 맡긴다 — 여기서 h-full 을 잡으면
+    // main 안의 sticky 헤더 높이만큼 넘쳐서 main 과 아래 콘텐츠 영역이 **둘 다** 스크롤되는
+    // 중첩 스크롤이 된다. md 이상은 기존 sidebar + 고정 높이 레이아웃 그대로.
+    <div className="flex flex-col md:h-full md:min-h-0">
       {/* 상단 탭 바 */}
       <div className="shrink-0 px-4 md:px-6 pt-4 md:pt-6">
-        <h2 className="text-xl md:text-2xl font-bold mb-4">설정</h2>
-        <div className="flex items-end">
-          <div className="flex-1 border-b border-border" />
-          <div className="flex items-end">
+        <h2 className="text-xl md:text-2xl font-bold mb-3 md:mb-4">설정</h2>
+        {/* 모바일: 탭 4개를 한 줄로 유지하고(줄바꿈 금지) 넘치면 가로 스크롤.
+            스크롤바는 숨긴다(.no-scrollbar) — 탭 아래 테두리와 겹쳐 지저분해진다. */}
+        <div className="flex items-end overflow-x-auto md:overflow-x-visible no-scrollbar">
+          <div className="hidden md:block flex-1 border-b border-border" />
+          <div className="flex items-end shrink-0">
             {MAIN_TABS.map(({ id, label }) => {
               const isActive = mainTab === id;
               return (
@@ -349,7 +363,7 @@ export function SettingsPage({
                   key={id}
                   onClick={() => handleTabChange(id)}
                   className={[
-                    "px-5 py-2.5 text-sm font-semibold rounded-t-lg border-x border-t transition-all select-none",
+                    "px-3 md:px-5 py-2.5 text-[13px] md:text-sm font-semibold rounded-t-lg border-x border-t transition-all select-none whitespace-nowrap shrink-0",
                     isActive
                       ? "bg-background text-foreground border-border relative -mb-px pb-3.5 shadow-sm z-10"
                       : "bg-muted/50 text-muted-foreground border-border/50 hover:bg-muted hover:text-foreground ml-0.5",
@@ -360,7 +374,7 @@ export function SettingsPage({
               );
             })}
           </div>
-          <div className="flex-1 border-b border-border" />
+          <div className="flex-1 min-w-4 border-b border-border" />
         </div>
       </div>
 
@@ -377,8 +391,8 @@ export function SettingsPage({
       )}
 
       {/* 탭 콘텐츠 */}
-      <div className="flex-1 overflow-y-auto px-4 md:px-6 py-6">
-        <div className="max-w-4xl mx-auto space-y-6">
+      <div className="flex-1 md:overflow-y-auto px-4 md:px-6 py-4 md:py-6">
+        <div className="max-w-4xl mx-auto space-y-4 md:space-y-6">
           {mainTab === "investment" && <InvestmentTab ref={investTabRef} />}
           {mainTab === "data"       && <DataTab />}
           {mainTab === "data" && canAccessInternalTools && onNavigate && (
@@ -1129,9 +1143,9 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
       />
 
       {/* 계좌 선택 */}
-      <Card className="p-5 space-y-4">
+      <Card className="p-4 md:p-5 space-y-3 md:space-y-4">
         <h3 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">계좌 선택</h3>
-        <div className="flex gap-2 flex-wrap">
+        <div className="flex gap-1.5 md:gap-2 flex-wrap">
           {ACCOUNT_IDS.map((id) => {
             const acc = state.accounts[id];
             const isActive = acc.active !== false;
@@ -1143,7 +1157,7 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
                 key={id}
                 onClick={() => selectAccount(id)}
                 className={[
-                  "px-4 py-2 rounded-xl text-sm font-semibold border transition-all",
+                  "px-3 md:px-4 py-2 rounded-xl text-[13px] md:text-sm font-semibold border transition-all whitespace-nowrap",
                   isSelected
                     ? "bg-gradient-to-r from-violet-500 to-blue-500 text-white border-transparent shadow-md"
                     : isActive
@@ -1178,16 +1192,16 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
       {draft.active && (
         <>
           {/* 투자성향 프리셋 */}
-          <Card className="p-5 space-y-3">
+          <Card className="p-4 md:p-5 space-y-3">
             <h3 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">투자성향</h3>
-            <div className="flex items-center gap-6 flex-wrap">
-              <div className="flex gap-1.5 bg-muted p-1 rounded-xl w-fit">
+            <div className="flex items-center gap-3 md:gap-6 flex-wrap">
+              <div className="flex gap-1 md:gap-1.5 bg-muted p-1 rounded-xl w-fit max-w-full">
                 {(Object.keys(PROFILE_LABELS) as ProfileKey[]).map((p) => (
                   <button
                     key={p}
                     onClick={() => setDraft((d) => ({ ...d, profile: p }))}
                     className={[
-                      "px-4 py-1.5 text-sm rounded-lg transition-all font-medium",
+                      "px-2.5 md:px-4 py-2 md:py-1.5 text-[13px] md:text-sm rounded-lg transition-all font-medium whitespace-nowrap",
                       currentProfile === p
                         ? "bg-background shadow-sm text-foreground"
                         : "text-muted-foreground hover:text-foreground",
@@ -1207,7 +1221,7 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
 
           {/* 자산별 설정 테이블 */}
           <Card className="overflow-hidden">
-            <div className="px-5 py-4 border-b flex items-center justify-between gap-3 flex-wrap">
+            <div className="px-4 md:px-5 py-3 md:py-4 border-b flex items-center justify-between gap-3 flex-wrap">
               <div className="shrink-0">
                 <h3 className="font-semibold">자산별 ETF 및 비중 설정</h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
@@ -1408,7 +1422,7 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
 
             {/* 자산 추가 폼 */}
             {showAddForm && (
-              <div className="px-5 py-4 border-t bg-muted/20 space-y-3">
+              <div className="px-4 md:px-5 py-3 md:py-4 border-t bg-muted/20 space-y-3">
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
                   자산 추가
                   <span className="ml-2 normal-case font-normal text-muted-foreground/70">
@@ -1524,7 +1538,7 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
       )}
 
       {!draft.active && (
-        <Card className="p-8 text-center text-muted-foreground">
+        <Card className="p-6 md:p-8 text-center text-muted-foreground">
           <p className="text-sm">이 계좌를 사용하려면 위에서 체크박스를 선택하세요.</p>
         </Card>
       )}
@@ -1669,7 +1683,7 @@ function DataTab() {
   return (
     <div className="space-y-6">
       {/* 계좌별 요약 */}
-      <Card className="p-6 space-y-4">
+      <Card className="p-4 md:p-6 space-y-4">
         <h3 className="font-semibold">계좌별 데이터 현황</h3>
         <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {ACCOUNT_IDS.map((id) => {
@@ -1691,7 +1705,7 @@ function DataTab() {
       </Card>
 
       {/* JSON */}
-      <Card className="p-6 space-y-4">
+      <Card className="p-4 md:p-6 space-y-4">
         <h3 className="font-semibold">JSON (전체 데이터 백업/복원)</h3>
         <div className="flex gap-2 flex-wrap">
           <input ref={jsonFileRef} type="file" accept="application/json" hidden onChange={onImportJson} />
@@ -1705,7 +1719,7 @@ function DataTab() {
       </Card>
 
       {/* Excel */}
-      <Card className="p-6 space-y-4">
+      <Card className="p-4 md:p-6 space-y-4">
         <h3 className="font-semibold">엑셀 (계좌별 시트 형식)</h3>
         <p className="text-xs text-muted-foreground">가져오기: 퇴직연금·ISA·연금저축·IRP 시트명이 있는 파일만 가능</p>
         <div className="flex gap-2 flex-wrap">
@@ -1721,7 +1735,7 @@ function DataTab() {
       </Card>
 
       {/* 초기화 */}
-      <Card className="p-6">
+      <Card className="p-4 md:p-6">
         <h3 className="font-semibold mb-3">데이터 초기화</h3>
         <Button variant="destructive" size="sm" onClick={() => setShowResetConfirm(true)}>
           <Trash2 className="w-4 h-4 mr-1.5" /> 전체 초기화
@@ -1856,7 +1870,7 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
   return (
     <div className="space-y-6">
       {/* 비밀번호 변경 */}
-      <Card className="p-6 space-y-4">
+      <Card className="p-4 md:p-6 space-y-4">
         <div className="flex items-center gap-2">
           <KeyRound className="w-5 h-5 text-violet-500" />
           <h3 className="font-semibold">프로필 비밀번호 변경</h3>
@@ -1890,7 +1904,7 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
 
       {/* 마스터 코드 변경 (혀비 전용) */}
       {canChangeMasterCode && (
-        <Card className="p-6 space-y-4">
+        <Card className="p-4 md:p-6 space-y-4">
           <div className="flex items-center gap-2">
             <Shield className="w-5 h-5 text-amber-500" />
             <div>
@@ -2087,7 +2101,7 @@ function UserManagementTab({ familyData, onFamilyUpdate }: UserManagementTabProp
 
   return (
     <div className="space-y-6">
-      <Card className="p-6 space-y-4">
+      <Card className="p-4 md:p-6 space-y-4">
         <div className="flex items-center gap-2">
           <Users className="w-5 h-5 text-violet-500" />
           <div>
