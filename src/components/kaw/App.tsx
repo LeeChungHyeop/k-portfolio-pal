@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Menu, Wallet, RefreshCw } from "lucide-react";
-import { Sidebar, type Page, DEPLOY_DATE } from "@/components/kaw/Sidebar";
+import { Sidebar, type Page, DEPLOY_DATE_SHORT } from "@/components/kaw/Sidebar";
 import { Dashboard } from "@/components/kaw/Dashboard";
 import { LegacyDashboard } from "@/components/kaw/LegacyDashboard";
 import { IndexComparison } from "@/components/kaw/IndexComparison";
@@ -183,7 +183,7 @@ export function App({ forcedDemoProfileId }: { forcedDemoProfileId?: string } = 
             </div>
             <span className="font-bold text-sm">K-올웨더</span>
           </div>
-          <span className="text-[10px] text-muted-foreground/50 shrink-0">{DEPLOY_DATE}</span>
+          <span className="text-[10px] text-muted-foreground/50 shrink-0 tabular-nums" title="최근배포일">{DEPLOY_DATE_SHORT}</span>
         </div>
 
         {allowedPage === "dashboard"     && <Dashboard onNavigate={navigate} />}

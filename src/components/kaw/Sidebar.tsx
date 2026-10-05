@@ -12,6 +12,13 @@ export type Page = "dashboard" | "dashboard-old" | "compare" | "retirement" | "i
 const BUILD_TIME = (import.meta.env.VITE_BUILD_TIME as string | undefined) ?? "";
 const COMMIT_HASH = (import.meta.env.VITE_COMMIT_HASH as string | undefined) ?? "";
 export const DEPLOY_DATE = [BUILD_TIME, COMMIT_HASH].filter(Boolean).join(" · ");
+/**
+ * 모바일 헤더용 축약형 — 연도와 커밋 해시를 뺀 `MM.DD HH:mm`.
+ * 390px 폭에서 전체 문자열(`YYYY.MM.DD HH:mm · abc1234`)은 우측 공간을 다 먹어
+ * 타이틀을 밀어낸다. 배포 추적 자체는 유지하고(사이드바는 전체 문자열 그대로),
+ * 좁은 화면에서만 날짜·시각으로 줄인다.
+ */
+export const DEPLOY_DATE_SHORT = BUILD_TIME.slice(5) || COMMIT_HASH;
 
 /**
  * 일반 메뉴. `dashboard-old`(대시보드 구) / `compare`(지수비교 전체화면)는 **일부러 없다** —
