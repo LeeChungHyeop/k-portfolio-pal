@@ -201,8 +201,11 @@ describe("DB 유지 가정선", () => {
   });
 
   it("툴팁에 DC 대비 ± 금액이 있다", () => {
-    expect(CHART).toContain("row.actualValue - row.dbValue");
+    // 기준은 DB 쪽이다: (+) DB 유지가 실제 DC 보다 크다
+    expect(CHART).toContain("row.dbValue - row.actualValue");
+    expect(CHART).not.toContain("row.actualValue - row.dbValue");
     expect(CHART).toContain("DC 대비");
+    expect(CHART).toContain('dbDiff >= 0 ? "text-emerald-600" : "text-rose-600"');
   });
 });
 

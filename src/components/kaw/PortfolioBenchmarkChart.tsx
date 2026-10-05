@@ -77,7 +77,9 @@ function BenchmarkTooltip({ active, payload }: any) {
     pct: row[s.pctKey] as number | null,
   })).filter((r) => r.value !== null);
 
-  const dbDiff = row.dbValue !== null && row.actualValue !== null ? row.actualValue - row.dbValue : null;
+  // "DC 대비" 는 DB 유지 가정 항목 아래에 붙는 줄이다 — 기준은 DB 쪽이다.
+  // (+) DB 유지가 실제 DC 보다 크다 / (−) DB 유지가 더 작다.
+  const dbDiff = row.dbValue !== null && row.actualValue !== null ? row.dbValue - row.actualValue : null;
 
   if (!rows.length && row.dbValue === null) return null;
 
