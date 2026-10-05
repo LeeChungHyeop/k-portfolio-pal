@@ -24,6 +24,7 @@ import {
   AlertTriangle, CheckCircle2, Wallet, CalendarClock, BarChart3, Database,
 } from "lucide-react";
 import type { Page } from "@/components/kaw/Sidebar";
+import { PortfolioBenchmarkSection } from "@/components/kaw/PortfolioBenchmarkChart";
 
 // ── 종목별 비중 도넛 색상 ─────────────────────────────────────────────────
 // 대시보드(구)와 같은 팔레트/배정 원칙을 쓴다: 전체 합산 기준 상위 8개 종목에 색을 고정
@@ -485,6 +486,10 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
           </Card>
         </div>
       </div>
+
+      {/* ── Section B: 내 포트폴리오 vs 시장 ──────────────────────────── */}
+      {/* 지수비교 전체화면과 같은 공용 컴포넌트를 compact 표현으로 쓴다 */}
+      <PortfolioBenchmarkSection />
 
       {/* ── Section C: 자산 구성 ──────────────────────────────────────── */}
       <Card className="p-4 md:p-5 space-y-4">

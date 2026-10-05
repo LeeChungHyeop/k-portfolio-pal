@@ -18,6 +18,9 @@ import {
 } from "@/lib/kaw/auth";
 import { useIdleTimer } from "@/lib/kaw/useIdleTimer";
 
+/** 사이드바에서 빠진 내부 전용 페이지 — hyeobi 실제 로그인 세션에서만 열 수 있다. */
+const INTERNAL_PAGES: readonly Page[] = ["dashboard-old", "compare"];
+
 function LoadingScreen() {
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center gap-4">
@@ -139,8 +142,17 @@ export function App({ forcedDemoProfileId }: { forcedDemoProfileId?: string } = 
   }
 
   // Phase 3: Fully authenticated
+
+  // ── owner-only 내부 도구 게이트 ─────────────────────────────────────────
+  // 대시보드(구)·지수비교 전체화면은 사이드바에서 빠지고 설정 → 내부 도구로 옮겼다.
+  // **UI 에서 숨기는 것만으로는 부족하다** — navigate 자체를 막아, 다른 프로필이나 데모
+  // 사용자가 정상 UI 경로로 내부 페이지에 들어갈 수 없게 한다.
+  // (새 인증 체계가 아니라, 기존 프로필 인증 위에 얹은 앱 수준 게이트다.)
+  const canAccessInternalTools = currentUser === "hyeobi" && !demoProfileId;
+  const allowedPage = INTERNAL_PAGES.includes(page) && !canAccessInternalTools ? "dashboard" : page;
+
   function navigate(p: Page) {
-    setPage(p);
+    setPage(INTERNAL_PAGES.includes(p) && !canAccessInternalTools ? "dashboard" : p);
     setSidebarOpen(false);
   }
 
@@ -152,7 +164,7 @@ export function App({ forcedDemoProfileId }: { forcedDemoProfileId?: string } = 
       )}
 
       <Sidebar
-        active={page}
+        active={allowedPage}
         onNavigate={navigate}
         mobileOpen={sidebarOpen}
         onMobileClose={() => setSidebarOpen(false)}
@@ -174,17 +186,19 @@ export function App({ forcedDemoProfileId }: { forcedDemoProfileId?: string } = 
           <span className="text-[10px] text-muted-foreground/50 shrink-0">{DEPLOY_DATE}</span>
         </div>
 
-        {page === "dashboard"     && <Dashboard onNavigate={navigate} />}
-        {page === "dashboard-old" && <LegacyDashboard onNavigate={navigate} />}
-        {page === "compare"    && <IndexComparison />}
-        {page === "retirement" && <AccountPage accountId="retirement" />}
-        {page === "isa"        && <AccountPage accountId="isa" />}
-        {page === "pension"    && <AccountPage accountId="pension" />}
-        {page === "irp"        && <AccountPage accountId="irp" />}
-        {page === "settings"   && (
+        {allowedPage === "dashboard"     && <Dashboard onNavigate={navigate} />}
+        {allowedPage === "dashboard-old" && <LegacyDashboard onNavigate={navigate} />}
+        {allowedPage === "compare"    && <IndexComparison />}
+        {allowedPage === "retirement" && <AccountPage accountId="retirement" />}
+        {allowedPage === "isa"        && <AccountPage accountId="isa" />}
+        {allowedPage === "pension"    && <AccountPage accountId="pension" />}
+        {allowedPage === "irp"        && <AccountPage accountId="irp" />}
+        {allowedPage === "settings"   && (
           <SettingsPage
             familyData={familyData ?? defaultFamilyData()}
             onFamilyUpdate={setFamilyData}
+            onNavigate={navigate}
+            canAccessInternalTools={canAccessInternalTools}
           />
         )}
 
