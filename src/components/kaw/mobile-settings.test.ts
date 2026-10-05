@@ -125,6 +125,11 @@ describe("모바일 카드 여백", () => {
     expect(SETTINGS).toContain("py-4 md:py-6");
     expect(SETTINGS).toContain("space-y-4 md:space-y-6");
   });
+
+  it("자산 테이블 헤더의 안내 문구는 모바일에서 줄어들 수 있다 (Card 밖으로 잘리지 않게)", () => {
+    // Card 가 overflow-hidden 이라 shrink-0 이면 긴 경고 문구가 통째로 잘린다
+    expect(SETTINGS).toContain('<div className="min-w-0 md:shrink-0">');
+  });
 });
 
 describe("모바일 헤더 빌드 정보", () => {

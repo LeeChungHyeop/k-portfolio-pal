@@ -1222,7 +1222,9 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
           {/* 자산별 설정 테이블 */}
           <Card className="overflow-hidden">
             <div className="px-4 md:px-5 py-3 md:py-4 border-b flex items-center justify-between gap-3 flex-wrap">
-              <div className="shrink-0">
+              {/* min-w-0: 모바일에서 shrink-0 이면 안내 문구가 Card(overflow-hidden) 밖으로
+                  나가 글자가 잘린다. md 이상은 기존대로 줄어들지 않게 둔다. */}
+              <div className="min-w-0 md:shrink-0">
                 <h3 className="font-semibold">자산별 ETF 및 비중 설정</h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   <span className={atLimit ? "text-amber-500 font-semibold" : ""}>
