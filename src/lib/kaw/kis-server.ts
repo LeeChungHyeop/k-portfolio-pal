@@ -9,7 +9,7 @@ export interface TickerResult {
 
 interface KisToken { access_token: string; expires_at: number; }
 
-interface KVLike {
+export interface KVLike {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void>;
 }
@@ -25,7 +25,10 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Cloudflare Workers는 요청마다 다른(콜드) isolate에 배정될 수 있어, 메모리 캐시(_token)만 믿으면
 // isolate마다 각자 새 토큰을 발급받으려다 이 제한에 걸려 "새로고침해도 전부 실패"하는 경우가 생긴다.
 // KV에 토큰을 공유 저장해서 isolate가 바뀌어도 같은 토큰을 재사용하도록 한다.
-async function getToken(appKey: string, appSecret: string, kv?: KVLike): Promise<string> {
+// 계좌 조회(server-only PoC)에서도 같은 토큰 로직을 쓰기 위해 export 한다.
+// 주의: 아래 `_token` 메모리 캐시는 credential 별로 분리돼 있지 않다.
+// 한 프로세스/isolate 안에서는 **한 세트의 appKey/appSecret만** 사용해야 한다.
+export async function getKisAccessToken(appKey: string, appSecret: string, kv?: KVLike): Promise<string> {
   const now = Date.now();
   if (_token && _token.expires_at > now + 60_000) return _token.access_token;
 
@@ -403,7 +406,7 @@ export async function fetchKisPrices(
   appSecret: string,
   kv?: KVLike,
 ): Promise<{ results: Record<string, TickerResult>; timestamp: string }> {
-  const token = await getToken(appKey, appSecret, kv);
+  const token = await getKisAccessToken(appKey, appSecret, kv);
   const results: Record<string, TickerResult> = {};
   const timestamp = new Date().toISOString();
 
