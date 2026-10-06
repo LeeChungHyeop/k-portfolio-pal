@@ -5,6 +5,7 @@ import {
   buildMigratedCashflows, periodOf,
   type CashflowEntry,
 } from "./cashflow";
+import { verifiedCashflowsFor } from "./verified-cashflows";
 import { kstDateString, kstMonthString } from "./snapshot";
 import {
   confirmContribution, upsertAmountVersion, createInitialSchedule,
@@ -228,9 +229,22 @@ function baseAccountSettings() {
   };
 }
 function seedAccount(id: AccountId): AccountState {
-  return { ...baseAccountSettings(), baseAmount: 0, deposit: DEFAULT_MONTHLY_DEPOSIT[id], rebalanceDate: kstDateString(), holdings: seedHoldings(), history: makeHistory(SEED_HISTORY[id] ?? []) };
+  return {
+    ...baseAccountSettings(),
+    baseAmount: 0,
+    deposit: DEFAULT_MONTHLY_DEPOSIT[id],
+    rebalanceDate: kstDateString(),
+    holdings: seedHoldings(),
+    history: makeHistory(SEED_HISTORY[id] ?? []),
+    // 실제 증권사 자료로 확정된 과거 장부(verified-cashflows.ts). seed 에 직접 넣어두는
+    // 이유는 `resetAll()` 이 migrateState 를 거치지 않고 seedState() 를 그대로 저장하기
+    // 때문이다 — 여기에 없으면 Reset All 뒤 history 에서 복원된 **잘못된 날짜의** 과거
+    // cashflow 가 다시 생긴다.
+    cashflows: verifiedCashflowsFor(id),
+  };
 }
-function seedState(): StoreState {
+/** hyeobi 초기 상태. `resetAll()` 이 그대로 저장하므로 검증된 과거 장부를 포함한다. (테스트용 export) */
+export function seedState(): StoreState {
   return { profile: "growth", allocations: structuredClone(PROFILE_PRESETS), accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, seedAccount(id)])) as Record<AccountId, AccountState> };
 }
 function emptyState(): StoreState {
@@ -252,13 +266,16 @@ interface MigrationResult {
   createdContributionSchedule: boolean;
 }
 
-function migrateState(parsed: StoreState, injectSeed = false, out?: MigrationResult): StoreState {
+/** 저장된 상태를 현재 스키마로 올린다. `injectSeed` 는 hyeobi profile 여부다. (테스트용 export) */
+export function migrateState(parsed: StoreState, injectSeed = false, out?: MigrationResult): StoreState {
   const seed = seedState();
   // Migrate global MP → growth if leftover
   if ((parsed.profile as string) === "MP") parsed.profile = "growth";
 
   for (const id of ACCOUNT_IDS) {
-    if (!parsed.accounts[id]) { parsed.accounts[id] = injectSeed ? seed.accounts[id] : { ...seed.accounts[id], history: [] }; continue; }
+    // 계좌가 통째로 없는 경우. hyeobi 가 아니면 seed 의 history 도 검증 장부도 빌려주지
+    // 않는다 — 남의 계좌 기록이 섞이면 안 된다. 빈 배열은 "복원 완료(흐름 없음)"를 뜻한다.
+    if (!parsed.accounts[id]) { parsed.accounts[id] = injectSeed ? seed.accounts[id] : { ...seed.accounts[id], history: [], cashflows: [] }; continue; }
     const acc = parsed.accounts[id];
 
     // Inject per-account settings defaults if missing
@@ -324,7 +341,12 @@ function migrateState(parsed: StoreState, injectSeed = false, out?: MigrationRes
     // 날짜가 붙은 흐름으로 **무손실 재표현**하므로 누적 납입원금은 1원도 달라지지 않는다.
     // 추정은 하지 않는다 — cashBalance 나 baseAmount - totalValue 역산은 넣지 않는다.
     // 빈 배열([])도 "이미 복원됨"으로 보기 때문에 다시 migration 하지 않는다.
-    if (!Array.isArray(acc.cashflows)) acc.cashflows = buildMigratedCashflows(acc.history);
+    // hyeobi 는 실제 증권사 자료로 확정된 장부(verified-cashflows.ts)를 쓴다. history 에서
+    // 복원하면 리밸런싱을 저장한 날이 입금일로 들어가고 빠지는 달도 생긴다.
+    // 다른 profile 은 기존 generic 복원을 그대로 유지한다 — 거기엔 검증 자료가 없다.
+    if (!Array.isArray(acc.cashflows)) {
+      acc.cashflows = injectSeed ? verifiedCashflowsFor(id) : buildMigratedCashflows(acc.history);
+    }
 
     // 정기납입 스케줄 최초 생성 (1회). 금액은 코드에 박지 않고 **이 계좌에 이미 저장된
     // deposit**(사용자가 입력해둔 월 납입액)을 첫 금액 버전으로 옮긴다. 적용 시작월은
