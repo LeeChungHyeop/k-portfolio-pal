@@ -26,6 +26,7 @@ import {
   RotateCcw, Download, Upload, FileSpreadsheet, Trash2,
   KeyRound, Shield, CheckCircle2, AlertCircle, RefreshCw,
   Plus, X, Save, Settings, MessageSquare, Users, ChevronUp, ChevronDown, Wrench,
+  CalendarDays,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -182,6 +183,89 @@ function parseExcelWorkbook(wb: XLSX.WorkBook): Record<AccountId, AccountState> 
 // ══════════════════════════════════════════════════════════════════════════════
 // Main Component
 // ══════════════════════════════════════════════════════════════════════════════
+/**
+ * 월(YYYY-MM) 선택 필드.
+ *
+ * **왜 그냥 `<Input type="month">` 를 쓰지 않나**
+ * date/time 계열 input 은 브라우저가 그리는 네이티브 컨트롤이라 **고유폭(intrinsic width)** 을
+ * 갖는다. 포맷된 날짜 텍스트 + 피커 아이콘이 들어갈 만큼이 min-content 폭이 되고,
+ * `width:100%` 나 `min-width:0` 으로도 그 아래로는 줄어들지 않는다(교체 요소에 가까운 취급).
+ * 375px 아이폰에서 2열 한 칸은 약 150px 인데 `2026년 10월` + 아이콘의 고유폭이 그보다 커서,
+ * 칸을 넘어 오른쪽(금액) 칸을 침범했다. 클래스를 더 붙여도 해결되지 않는 종류의 문제다.
+ *
+ * **해결**: 실제 `input[type=month]` 를 `position:absolute` 로 띄워 **레이아웃 흐름에서 뺀다.**
+ * 흐름 밖 요소의 고유폭은 grid 열 폭 계산에 참여하지 못하므로, 아무리 커도 열을 밀 수 없다.
+ * 눈에 보이는 것은 우리가 그린 껍데기(폭 100% 통제, truncate)이고, 투명한 실제 input 이
+ * 그 위를 정확히 덮어 탭하면 기존처럼 네이티브 월 피커가 열린다.
+ * `opacity:0` 이라 접근성 트리와 포인터 이벤트는 그대로 살아 있다
+ * (`display:none`/`visibility:hidden` 은 피커가 열리지 않아 쓸 수 없다).
+ *
+ * **폴백**: WebKit 처럼 `type="month"` 를 지원하지 않는 엔진에서는 투명 input 이 그냥
+ * 텍스트 입력으로 떨어져 "보이지 않는 칸에 타이핑"이 되어버린다. 그래서 지원 여부를
+ * 마운트 후 실측해서, 미지원이면 보이는 텍스트 입력(YYYY-MM)으로 바꾼다.
+ * 어느 경로든 바깥으로 나가는 값은 `YYYY-MM` 문자열 하나로 똑같다.
+ */
+function monthInputSupported(): boolean {
+  if (typeof document === "undefined") return true;
+  const el = document.createElement("input");
+  el.setAttribute("type", "month");
+  return el.type === "month";
+}
+
+function MonthPickerField({
+  value, onChange, label, inputId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  label: string;
+  inputId: string;
+}) {
+  // SSR/첫 렌더는 지원한다고 보고(대부분의 브라우저가 그렇다) 마운트 후 실측값으로 교정한다.
+  // 모듈 로드 시점에 재면 서버/클라이언트 결과가 달라져 hydration 이 깨진다.
+  const [supported, setSupported] = useState(true);
+  useEffect(() => { setSupported(monthInputSupported()); }, []);
+
+  const m = /^(\d{4})-(\d{2})$/.exec(value);
+  const display = m ? `${m[1]}년 ${Number(m[2])}월` : "월 선택";
+
+  if (!supported) {
+    return (
+      <Input
+        id={inputId}
+        type="text"
+        inputMode="numeric"
+        placeholder="2026-10"
+        aria-label={label}
+        value={value}
+        onChange={(e) => onChange(e.target.value.replace(/[^0-9-]/g, "").slice(0, 7))}
+        className="mt-1 h-9 w-full min-w-0 tabular-nums"
+      />
+    );
+  }
+
+  return (
+    <div className="relative mt-1 h-9 w-full min-w-0">
+      {/* 보이는 껍데기 — 폭은 전적으로 이쪽이 결정한다 */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 flex items-center justify-between gap-1 overflow-hidden rounded-md border border-input bg-transparent px-3 text-sm shadow-sm"
+      >
+        <span className="truncate tabular-nums">{display}</span>
+        <CalendarDays className="w-3.5 h-3.5 shrink-0 opacity-50" />
+      </div>
+      {/* 실제 피커 — absolute 라 흐름 밖이고, 고유폭이 열 폭에 영향을 주지 못한다 */}
+      <input
+        id={inputId}
+        type="month"
+        aria-label={label}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="absolute inset-0 h-full w-full min-w-0 cursor-pointer appearance-none border-0 bg-transparent p-0 opacity-0"
+      />
+    </div>
+  );
+}
+
 // ── 정기납입 설정 (간단 확인/수정) ──────────────────────────────────────────
 // draft 저장 흐름을 타지 않고 store 에 바로 쓴다 — 스케줄은 목표비중처럼 묶어서 저장할
 // 값이 아니고, 금액 버전은 덮어쓰기가 아니라 추가이기 때문이다.
@@ -210,6 +294,8 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
         </label>
       </div>
 
+      {/* 설정에 필요한 네 필드를 **하나의 grid** 로 묶는다 — row 를 따로 두면 두 행의
+          열 경계가 어긋난다. 모든 자식은 min-w-0 이어야 내용이 열을 밀지 못한다. */}
       <div className="grid grid-cols-2 gap-2 md:gap-3">
         <div className="min-w-0">
           <label className="text-xs text-muted-foreground">매월 납입일</label>
@@ -220,7 +306,7 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
               const v = Number(e.target.value);
               if (v >= 1 && v <= 31) updateContributionSchedule(accountId, { dayOfMonth: v });
             }}
-            className="mt-1"
+            className="mt-1 w-full min-w-0"
           />
         </div>
         <div className="min-w-0">
@@ -239,6 +325,37 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
             </SelectContent>
           </Select>
         </div>
+
+        <div className="min-w-0">
+          <label className="text-xs text-muted-foreground">적용 시작월</label>
+          <MonthPickerField
+            inputId={`contrib-from-${accountId}`}
+            label="적용 시작월"
+            value={newFrom}
+            onChange={setNewFrom}
+          />
+        </div>
+        <div className="min-w-0">
+          <label className="text-xs text-muted-foreground">금액 (원)</label>
+          <Input
+            inputMode="numeric" value={newAmount} placeholder="688074"
+            aria-label="금액 (원)"
+            onChange={(e) => setNewAmount(e.target.value.replace(/[^0-9]/g, ""))}
+            className="mt-1 h-9 w-full min-w-0"
+          />
+        </div>
+
+        <Button
+          size="sm"
+          className="col-span-2 h-9 w-full"
+          disabled={!/^\d{4}-\d{2}$/.test(newFrom) || !(Number(newAmount) > 0)}
+          onClick={() => {
+            setContributionAmount(accountId, newFrom, Number(newAmount));
+            setNewAmount("");
+          }}
+        >
+          추가
+        </Button>
       </div>
 
       <div className="rounded-lg bg-muted/40 px-3 py-2.5 text-xs space-y-0.5">
@@ -254,12 +371,18 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
         </p>
       </div>
 
+      <p className="text-[11px] text-muted-foreground">
+        실제 입금은 계좌 화면의 <span className="font-medium">입금 확인</span>을 눌렀을 때만 장부에 들어갑니다.
+        여기 설정은 예정 금액입니다.
+      </p>
+
       {/* 금액 이력 — 기존 버전을 덮어쓰지 않고 "언제부터 얼마"를 한 줄씩 쌓는다.
-          퇴직연금처럼 매년 금액이 바뀌어도 과거 월의 계산은 변하지 않는다. */}
-      <div className="space-y-1.5">
+          퇴직연금처럼 매년 금액이 바뀌어도 과거 월의 계산은 변하지 않는다.
+          입력 필드 사이에 끼면 흐름이 끊겨서 카드 맨 아래로 내렸다. */}
+      <div className="space-y-1.5 pt-3 border-t">
         <p className="text-xs font-medium text-muted-foreground">금액 이력</p>
         {versions.length === 0 ? (
-          <p className="text-xs text-muted-foreground">아직 없습니다. 아래에서 추가하세요.</p>
+          <p className="text-xs text-muted-foreground">아직 없습니다. 위에서 추가하세요.</p>
         ) : versions.map((v) => (
           <div key={v.effectiveFrom} className="flex items-center gap-2 text-xs">
             <span className="tabular-nums w-20 shrink-0">{v.effectiveFrom.replace("-", ".")}부터</span>
@@ -277,39 +400,6 @@ function ContributionScheduleCard({ accountId }: { accountId: AccountId }) {
           </div>
         ))}
       </div>
-
-      {/* 모바일: 1행 = 시작월 / 금액 2열, 2행 = 추가 버튼 full width.
-          한 줄(flex items-end)로 두면 390px 에서 month input 이 압축돼 조작이 안 된다.
-          sm 이상은 기존 한 줄 배치 그대로. */}
-      <div className="grid grid-cols-2 gap-2 pt-1 border-t sm:flex sm:items-end">
-        <div className="min-w-0 sm:w-28">
-          <label className="text-[11px] text-muted-foreground">적용 시작월</label>
-          <Input type="month" value={newFrom} onChange={(e) => setNewFrom(e.target.value)} className="mt-1 h-9 w-full min-w-0" />
-        </div>
-        <div className="min-w-0 sm:flex-1">
-          <label className="text-[11px] text-muted-foreground">금액 (원)</label>
-          <Input
-            inputMode="numeric" value={newAmount} placeholder="688074"
-            onChange={(e) => setNewAmount(e.target.value.replace(/[^0-9]/g, ""))}
-            className="mt-1 h-9 w-full min-w-0"
-          />
-        </div>
-        <Button
-          size="sm"
-          className="col-span-2 h-9 w-full sm:w-auto"
-          disabled={!/^\d{4}-\d{2}$/.test(newFrom) || !(Number(newAmount) > 0)}
-          onClick={() => {
-            setContributionAmount(accountId, newFrom, Number(newAmount));
-            setNewAmount("");
-          }}
-        >
-          추가
-        </Button>
-      </div>
-      <p className="text-[11px] text-muted-foreground">
-        실제 입금은 계좌 화면의 <span className="font-medium">입금 확인</span>을 눌렀을 때만 장부에 들어갑니다.
-        여기 설정은 예정 금액입니다.
-      </p>
     </Card>
   );
 }

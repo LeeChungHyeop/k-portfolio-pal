@@ -38,6 +38,48 @@ function contributionCard(): string {
   return SETTINGS.slice(start, end);
 }
 
+/** `function MonthPickerField(` 본문 */
+function monthPickerField(): string {
+  const start = SETTINGS.indexOf("function MonthPickerField(");
+  expect(start).toBeGreaterThan(-1);
+  const end = SETTINGS.indexOf("function ContributionScheduleCard(", start);
+  expect(end).toBeGreaterThan(start);
+  return SETTINGS.slice(start, end);
+}
+
+describe("월 선택 필드: 네이티브 컨트롤의 고유폭이 열을 밀지 못하게 한다", () => {
+  const field = monthPickerField();
+
+  it("실제 input[type=month] 는 absolute 라 레이아웃 흐름 밖에 있다", () => {
+    expect(field).toContain('type="month"');
+    expect(field).toMatch(/absolute inset-0[^"]*opacity-0/);
+  });
+
+  it("보이는 껍데기가 폭을 결정하고 넘치면 자른다", () => {
+    expect(field).toContain("pointer-events-none absolute inset-0");
+    expect(field).toContain("truncate tabular-nums");
+    expect(field).toContain("relative mt-1 h-9 w-full min-w-0");
+  });
+
+  it("피커가 열려야 하므로 display:none / visibility:hidden 으로 숨기지 않는다", () => {
+    // overflow-hidden 은 껍데기 자르기용이라 괜찮다. 숨기는 유틸리티만 금지.
+    expect(field).not.toMatch(/className="[^"]*(?:^|\s)hidden(?:\s|")/);
+    expect(field).not.toContain("invisible");
+    expect(field).not.toContain("sr-only");
+  });
+
+  it("month 미지원 엔진(WebKit 등)에는 보이는 텍스트 입력 폴백이 있다", () => {
+    expect(SETTINGS).toContain("function monthInputSupported()");
+    expect(field).toContain("if (!supported)");
+    expect(field).toContain('placeholder="2026-10"');
+  });
+
+  it("바깥으로 나가는 값은 어느 경로든 YYYY-MM 문자열 하나다", () => {
+    expect(field).toContain("onChange: (v: string) => void");
+    expect(field).toContain("onChange(e.target.value)");
+  });
+});
+
 describe("설정 상단 탭: 모바일에서 한 줄을 유지한다", () => {
   const shell = settingsShell();
 
@@ -82,16 +124,48 @@ describe("중첩 스크롤: 모바일에서는 main 하나만 세로 스크롤�
 describe("정기납입 카드: 모바일에서 input 이 겹치지 않는다", () => {
   const card = contributionCard();
 
-  it("금액 추가 행은 모바일 2열 grid, sm 이상에서 한 줄로 돌아간다", () => {
-    expect(card).toContain("grid grid-cols-2 gap-2 pt-1 border-t sm:flex sm:items-end");
+  it("설정 네 필드는 하나의 2열 grid 안에 있다 (두 행의 열 경계가 어긋나지 않게)", () => {
+    const grids = card.match(/className="grid grid-cols-2 gap-2 md:gap-3"/g) ?? [];
+    expect(grids).toHaveLength(1);
+    // 그 grid 하나 안에 네 라벨이 이 순서로 들어 있다
+    const start = card.indexOf('className="grid grid-cols-2 gap-2 md:gap-3"');
+    const block = card.slice(start);
+    const order = ["매월 납입일", "입금 시점", "적용 시작월", "금액 (원)"]
+      .map((l) => block.indexOf(l));
+    expect(order.every((i) => i > -1)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 
-  it("추가 버튼은 모바일에서 full width 로 두 열을 차지한다", () => {
-    expect(card).toContain('className="col-span-2 h-9 w-full sm:w-auto"');
+  it("적용 시작월을 1열 전체폭으로 내리지 않는다 (col-span 은 추가 버튼만)", () => {
+    expect(card.match(/col-span-2/g)).toHaveLength(1);
+    expect(card).toContain('className="col-span-2 h-9 w-full"');
   });
 
-  it("두 input 모두 min-w-0 이라 grid 셀 밖으로 넘치지 않는다", () => {
-    expect(card.match(/mt-1 h-9 w-full min-w-0/g)).toHaveLength(2);
+  it("grid 자식은 전부 min-w-0 이다", () => {
+    // 네 필드 래퍼 + MonthPickerField/금액 input
+    expect(card.match(/className="min-w-0"/g)).toHaveLength(4);
+    expect(card).toContain("mt-1 h-9 w-full min-w-0");
+  });
+
+  it("카드 순서: 입력 grid → 현재 적용금액 → 안내문 → 금액 이력(최하단)", () => {
+    const idx = [
+      'className="grid grid-cols-2 gap-2 md:gap-3"',
+      "현재 적용금액",
+      "실제 입금은 계좌 화면의",
+      "금액 이력",
+    ].map((s) => card.indexOf(s));
+    expect(idx.every((i) => i > -1)).toBe(true);
+    expect([...idx].sort((a, b) => a - b)).toEqual(idx);
+  });
+
+  it("금액 이력 블록은 divider 뒤에 온다", () => {
+    expect(card).toContain('className="space-y-1.5 pt-3 border-t"');
+  });
+
+  it("삭제/버전 로직은 그대로다", () => {
+    expect(card).toContain("removeContributionAmountVersion(accountId, v.effectiveFrom)");
+    expect(card).toContain("setContributionAmount(accountId, newFrom, Number(newAmount))");
+    expect(card).toContain("!/^\\d{4}-\\d{2}$/.test(newFrom)");
   });
 
   it("입금 시점 select 의 저장값과 의미는 그대로다 (표시 문구만 모바일에서 축약)", () => {
