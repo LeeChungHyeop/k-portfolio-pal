@@ -3,12 +3,15 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleWebhookRequest } from "./lib/telegram";
-import { fetchKisPrices, fetchNaverHistoryPrices } from "./lib/kaw/kis-server";
+import {
+  fetchKisPrices, fetchNaverHistoryPrices, fetchNaverHistorySeries,
+  historySeriesRangeError, HISTORY_SERIES_MAX_TICKERS,
+} from "./lib/kaw/kis-server";
 import {
   handleAuthFamily, handleVerifyPin, handleVerifyMaster, handleVerifySecretQuestion,
   handleSetPin, handleSetMaster, handleAddProfile, handleRestoreProfile, handleDeleteProfile,
   handleDataGet, handleDataPost, upsertLivePrices, listLivePriceTickers,
-  handleSnapshotsGet, writeDailySnapshots, kstTimeString,
+  handleSnapshotsGet, writeDailySnapshots, kstTimeString, requireSession,
 } from "./lib/kaw/data-server";
 
 // Cloudflare Workers environment bindings
@@ -208,6 +211,36 @@ export default {
         return Response.json({ results, timestamp }, { headers: { "Cache-Control": "no-store" } });
       } catch (err) {
         console.error("Naver history price error:", err);
+        return Response.json({ error: String(err) }, { status: 500 });
+      }
+    }
+
+    // ── Naver 과거 종가 **구간** 조회 (과거 성과 복원용, 세션 토큰 필요) ────
+    //
+    // 날짜 1개용인 /api/naver/history-price 와 달리 종목당 요청 1회로 구간 전체를 받는다.
+    // 거래일마다 호출하는 경로를 만들지 않기 위한 endpoint 다 (kis-server.ts 주석 참고).
+    //
+    // 가격 자체는 public data 지만, 구간 × 종목 수만큼 외부 API 를 부르는 경로라서
+    // 기존 /api/data · /api/snapshots 와 같은 세션 토큰 인증을 요구하고 범위 상한을 둔다.
+    if (pathname === "/api/naver/history-series" && request.method === "POST") {
+      if (!(await requireSession(request, env))) {
+        return Response.json({ error: "인증이 만료됐어요. 다시 로그인해주세요." }, { status: 401 });
+      }
+      try {
+        const body = await request.json() as { tickers?: unknown; from?: unknown; to?: unknown };
+        const tickers = Array.isArray(body?.tickers)
+          ? [...new Set((body.tickers as string[])
+              .filter((t) => typeof t === "string" && /^[A-Z0-9]{6}$/i.test(t)))]
+            .slice(0, HISTORY_SERIES_MAX_TICKERS)
+          : [];
+        const from = typeof body?.from === "string" ? body.from : "";
+        const to = typeof body?.to === "string" ? body.to : "";
+        const rangeError = historySeriesRangeError(tickers, from, to);
+        if (rangeError) return Response.json({ error: rangeError }, { status: 400 });
+        const { series, failed, timestamp } = await fetchNaverHistorySeries(tickers, from, to);
+        return Response.json({ series, failed, timestamp }, { headers: { "Cache-Control": "no-store" } });
+      } catch (err) {
+        console.error("Naver history series error:", err);
         return Response.json({ error: String(err) }, { status: 500 });
       }
     }

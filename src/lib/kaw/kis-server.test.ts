@@ -6,6 +6,11 @@ import {
   fetchNaverHistoryPrices,
   NAVER_MOBILE_PAGE_SIZE,
   NAVER_MAX_PAGE_STEPS,
+  pickSeriesInRange,
+  collectNaverSeriesByPaging,
+  historySeriesRangeError,
+  HISTORY_SERIES_MAX_TICKERS,
+  HISTORY_SERIES_MAX_DAYS,
   type NaverPriceRow,
 } from "./kis-server";
 import { validateHistoricalPricesForBacktest } from "./backtest";
@@ -259,5 +264,141 @@ describe("11) kr/us 가 조회되면 v5 fail-closed validator 를 통과한다",
   it("kr/us 가 빠지면 여전히 fail-closed 로 막힌다 (이번 수정이 validator 를 약화시키지 않았다)", () => {
     const byAsset = { "2025-09-10": { cn: 14_040 } as Partial<Record<AssetKey, number>> };
     expect(validateHistoricalPricesForBacktest(["2025-09-10"], byAsset).length).toBeGreaterThan(0);
+  });
+});
+
+// ── 과거 종가 "날짜 범위" 조회 (과거 성과 복원 전용) ─────────────────────────
+describe("pickSeriesInRange — (15) 가격 range parser", () => {
+  const rows: NaverPriceRow[] = [
+    { localTradedAt: "2026-01-08", closePrice: "12,345" },
+    { localTradedAt: "2026-01-07", closePrice: "12300" },
+    { localTradedAt: "2026-01-06", closePrice: "12,100" },
+    { localTradedAt: "2026-01-02", closePrice: "12000" },
+  ];
+
+  it("구간 안의 거래일만 날짜 오름차순으로 돌려준다", () => {
+    expect(pickSeriesInRange(rows, "2026-01-05", "2026-01-07")).toEqual([
+      { date: "2026-01-06", price: 12_100 },
+      { date: "2026-01-07", price: 12_300 },
+    ]);
+  });
+
+  it("siseJson 응답을 파싱해 구간 series 로 만든다 (종목당 요청 1회 경로)", () => {
+    const text = `[['날짜','시가','고가','저가','종가','거래량','외국인소진율'],`
+      + `["20260102", 11900, 12100, 11800, 12000, 1000, 0.0],`
+      + `["20260106", 12000, 12200, 11950, 12100, 1200, 0.0],`
+      + `["20260107", 12100, 12400, 12050, 12300, 1300, 0.0]]`;
+    expect(pickSeriesInRange(parseNaverSiseJson(text), "2026-01-01", "2026-01-31")).toEqual([
+      { date: "2026-01-02", price: 12_000 },
+      { date: "2026-01-06", price: 12_100 },
+      { date: "2026-01-07", price: 12_300 },
+    ]);
+  });
+
+  it("휴장일을 만들어내지 않는다 — 응답에 있는 날짜만 나온다", () => {
+    const out = pickSeriesInRange(rows, "2026-01-01", "2026-01-31");
+    expect(out.map((p) => p.date)).toEqual(["2026-01-02", "2026-01-06", "2026-01-07", "2026-01-08"]);
+  });
+
+  it("같은 날짜가 두 번 오면 한 번만 남는다", () => {
+    const dup: NaverPriceRow[] = [
+      { localTradedAt: "2026-01-07", closePrice: "12300" },
+      { localTradedAt: "2026-01-07", closePrice: "99999" },
+    ];
+    expect(pickSeriesInRange(dup, "2026-01-01", "2026-01-31")).toEqual([
+      { date: "2026-01-07", price: 12_300 },
+    ]);
+  });
+});
+
+describe("(16) 잘못된 가격 / 빈 series 는 fail closed", () => {
+  it("0 · 음수 · 비숫자 종가는 버린다 (0 을 가격으로 넘기지 않는다)", () => {
+    const bad: NaverPriceRow[] = [
+      { localTradedAt: "2026-01-02", closePrice: "0" },
+      { localTradedAt: "2026-01-05", closePrice: "" },
+      { localTradedAt: "2026-01-06", closePrice: "-100" },
+      { localTradedAt: "2026-01-07", closePrice: "N/A" },
+      { localTradedAt: "2026-01-08", closePrice: "12,300" },
+    ];
+    expect(pickSeriesInRange(bad, "2026-01-01", "2026-01-31")).toEqual([
+      { date: "2026-01-08", price: 12_300 },
+    ]);
+  });
+
+  it("날짜 형식이 깨진 행은 버린다", () => {
+    const bad = [
+      { localTradedAt: "20260108", closePrice: "12300" },
+      { localTradedAt: "", closePrice: "12300" },
+    ] as NaverPriceRow[];
+    expect(pickSeriesInRange(bad, "2026-01-01", "2026-01-31")).toEqual([]);
+  });
+
+  it("빈 응답 / 파싱 불가 텍스트는 빈 series 다", () => {
+    expect(pickSeriesInRange([], "2026-01-01", "2026-01-31")).toEqual([]);
+    expect(pickSeriesInRange(parseNaverSiseJson("<html>error</html>"), "2026-01-01", "2026-01-31")).toEqual([]);
+  });
+});
+
+describe("historySeriesRangeError — 요청 범위 guard", () => {
+  const ok = ["100000", "200000"];
+
+  it("정상 요청은 통과한다", () => {
+    expect(historySeriesRangeError(ok, "2025-01-02", "2026-01-02")).toBeNull();
+  });
+
+  it("종목이 비었거나 상한을 넘으면 거부한다", () => {
+    expect(historySeriesRangeError([], "2026-01-01", "2026-01-02")).toBeTruthy();
+    const many = Array.from({ length: HISTORY_SERIES_MAX_TICKERS + 1 }, (_, i) =>
+      String(100_000 + i));
+    expect(historySeriesRangeError(many, "2026-01-01", "2026-01-02")).toContain("종목 수 상한");
+  });
+
+  it("구간 길이 상한을 넘으면 거부한다", () => {
+    const from = "2000-01-01";
+    expect(historySeriesRangeError(ok, from, "2026-01-01")).toContain("구간 상한");
+    expect(HISTORY_SERIES_MAX_DAYS).toBeGreaterThan(365);
+  });
+
+  it("날짜 형식 오류 / 역순 구간을 거부한다", () => {
+    expect(historySeriesRangeError(ok, "20260101", "2026-01-02")).toBe("날짜 형식 오류");
+    expect(historySeriesRangeError(ok, "2026-01-05", "2026-01-02")).toBeTruthy();
+  });
+});
+
+describe("collectNaverSeriesByPaging — 폴백 요청 수가 묶여 있다", () => {
+  const page = (dates: string[]): NaverPriceRow[] =>
+    dates.map((d) => ({ localTradedAt: d, closePrice: "1000" }));
+
+  it("fromDate 에 닿으면 더 깊이 들어가지 않는다", async () => {
+    const seen: number[] = [];
+    const out = await collectNaverSeriesByPaging("2026-01-06", "2026-01-09", async (p) => {
+      seen.push(p);
+      if (p === 1) return page(["2026-01-09", "2026-01-08", "2026-01-07"]);
+      if (p === 2) return page(["2026-01-06", "2026-01-05"]);
+      return page(["2026-01-02"]);
+    });
+    expect(seen).toEqual([1, 2]);
+    expect(out.map((x) => x.date)).toEqual([
+      "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09",
+    ]);
+  });
+
+  it("구간이 아무리 길어도 NAVER_MAX_PAGE_STEPS 회를 넘지 않는다", async () => {
+    let calls = 0;
+    await collectNaverSeriesByPaging("1990-01-01", "2026-01-09", async () => {
+      calls += 1;
+      return page(["2026-01-09"]);
+    });
+    expect(calls).toBe(NAVER_MAX_PAGE_STEPS);
+  });
+
+  it("응답 실패(null)/빈 페이지면 그 자리에서 멈춘다", async () => {
+    let calls = 0;
+    const out = await collectNaverSeriesByPaging("2026-01-01", "2026-01-09", async (p) => {
+      calls += 1;
+      return p === 1 ? page(["2026-01-09"]) : null;
+    });
+    expect(calls).toBe(2);
+    expect(out).toEqual([{ date: "2026-01-09", price: 1_000 }]);
   });
 });

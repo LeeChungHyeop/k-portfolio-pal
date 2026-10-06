@@ -182,6 +182,25 @@ async function sessionStillValid(client: SupabaseClient, session: SessionPayload
   return (profile?.pin_version ?? 0) === session.v;
 }
 
+/**
+ * 세션 토큰 검증만 하는 공용 helper (`handleDataGet` / `handleSnapshotsGet` 와 같은 경로).
+ *
+ * DB 를 읽지 않는 endpoint 가 기존 인증 패턴을 그대로 쓰기 위해 export 한다 — 예: 과거 종가
+ * 구간 조회. 가격 자체는 public data 지만, 구간 × 종목 수만큼 외부 API 를 부르는 경로를
+ * 무인증으로 열어두지 않는다.
+ */
+export async function requireSession(
+  request: Request,
+  env: DataEnv,
+): Promise<SessionPayload | null> {
+  const client = serviceClient(env);
+  if (!client || !env.SESSION_SECRET) return null;
+  const token = bearerToken(request);
+  const session = token ? await verifySession(token, env.SESSION_SECRET) : null;
+  if (!session || !(await sessionStillValid(client, session))) return null;
+  return session;
+}
+
 async function verifySecretQuestion(env: DataEnv, sqIdx: number, answer: string): Promise<boolean> {
   const rlKey = `rl:sq:${sqIdx}`;
   if (!(await checkRateLimit(env, rlKey, 10, 10 * 60))) return false;

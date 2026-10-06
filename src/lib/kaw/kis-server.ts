@@ -397,6 +397,193 @@ export async function fetchNaverHistoryPrices(
   return { results, timestamp };
 }
 
+// ── Naver 과거 종가 "날짜 범위" 조회 (과거 성과 복원 전용) ──────────────────
+//
+// `fetchNaverHistoryPrices` 는 **한 날짜**용이다. 과거 1년의 매 거래일 평가액을 복원하려면
+// 거래일 × 종목 수만큼 그 함수를 부르게 되는데(수백~수천 요청), Cloudflare subrequest 한도에
+// 걸리고 네이버에도 무례하다. 그래서 여기서는 **종목당 1회 요청으로 구간 전체**를 받는다.
+//
+//   1) api.finance.naver.com/siseJson.naver — `startTime`/`endTime` 로 구간을 직접 준다.
+//      응답에 구간 내 모든 거래일이 들어 있다. **주 경로이며 종목당 요청 1회로 끝난다.**
+//   2) 실패하면 m.stock.naver.com 모바일 JSON pagination 으로 폴백한다. 페이지(60 거래일)를
+//      fromDate 에 닿을 때까지 거슬러 가고, `NAVER_MAX_PAGE_STEPS` 로 상한을 둔다.
+//
+// 휴장일을 만들어내지 않는다 — **응답에 있는 거래일만** 돌려준다. 가격이 0 이하거나 파싱이
+// 안 되는 행은 버린다(fail closed). 받은 값이 비면 빈 배열이고, 호출자는 그 종목이 들어간
+// 날짜의 평가액을 만들지 않는다.
+
+/** 한 종목의 한 거래일 종가 */
+export interface HistoryPricePoint {
+  /** YYYY-MM-DD */
+  date: string;
+  price: number;
+}
+
+/** 한 번에 조회할 수 있는 종목 수 상한 */
+export const HISTORY_SERIES_MAX_TICKERS = 20;
+/** 한 번에 조회할 수 있는 구간 길이 상한(달력 일수) — 약 6년 */
+export const HISTORY_SERIES_MAX_DAYS = 2200;
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * 구간 조회 요청이 받아들일 수 있는 범위인가. 받아들일 수 없으면 사유 문자열, 괜찮으면 null.
+ * 순수 함수라 endpoint 와 테스트가 같은 판정을 쓴다.
+ */
+export function historySeriesRangeError(
+  tickers: readonly string[],
+  fromDate: string,
+  toDate: string,
+): string | null {
+  if (!tickers.length) return "종목이 비어 있습니다";
+  if (tickers.length > HISTORY_SERIES_MAX_TICKERS) {
+    return `종목 수 상한(${HISTORY_SERIES_MAX_TICKERS}) 초과`;
+  }
+  if (!ISO_DATE_RE.test(fromDate) || !ISO_DATE_RE.test(toDate)) return "날짜 형식 오류";
+  if (fromDate > toDate) return "fromDate 가 toDate 보다 늦습니다";
+  const days = Math.round(
+    (Date.parse(`${toDate}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`)) / 86_400_000,
+  );
+  if (!Number.isFinite(days)) return "날짜 형식 오류";
+  if (days > HISTORY_SERIES_MAX_DAYS) return `구간 상한(${HISTORY_SERIES_MAX_DAYS}일) 초과`;
+  return null;
+}
+
+/**
+ * 네이버 응답 행들(날짜 내림차순) → 구간 안의 거래일 종가 series(날짜 오름차순).
+ *
+ * **fail closed**: 가격이 0 이하거나 숫자가 아니면 그 행을 버린다 — 0 을 종가로 넘기면
+ * 그 날 평가액이 0원으로 계산된다. 같은 날짜가 두 번 오면 먼저 온 쪽(최신 응답 순서)을 쓴다.
+ */
+export function pickSeriesInRange(
+  rows: readonly NaverPriceRow[],
+  fromDate: string,
+  toDate: string,
+): HistoryPricePoint[] {
+  const byDate = new Map<string, number>();
+  for (const r of rows) {
+    const date = String(r?.localTradedAt ?? "");
+    if (!ISO_DATE_RE.test(date)) continue;
+    if (date < fromDate || date > toDate) continue;
+    if (byDate.has(date)) continue;
+    // parseKoreanPrice 는 숫자 아닌 문자를 떼어내므로 "-100" 이 100 이 된다. 음수 표기는
+    // 종가로 올 수 없는 값이니 **파싱 전에** 떨어낸다 (공용 파서는 건드리지 않는다).
+    if (typeof r.closePrice === "string" && r.closePrice.includes("-")) continue;
+    const price = parseKoreanPrice(r.closePrice);
+    if (!(price > 0)) continue;
+    byDate.set(date, price);
+  }
+  return [...byDate.entries()]
+    .map(([date, price]) => ({ date, price }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * 모바일 JSON pagination 폴백 — 페이지(최신 먼저, 60 거래일)를 `fromDate` 에 닿을 때까지
+ * 거슬러 간다. `loadPage` 가 null/빈 배열을 주면 거기서 멈춘다. 요청 수는
+ * `NAVER_MAX_PAGE_STEPS` 로 묶여 있다(구간이 길어도 요청이 폭주하지 않는다).
+ *
+ * 로더를 주입받는 순수 로직이라 네트워크 없이 테스트한다.
+ */
+export async function collectNaverSeriesByPaging(
+  fromDate: string,
+  toDate: string,
+  loadPage: (page: number) => Promise<NaverPriceRow[] | null>,
+): Promise<HistoryPricePoint[]> {
+  const collected: NaverPriceRow[] = [];
+  for (let page = 1; page <= NAVER_MAX_PAGE_STEPS; page += 1) {
+    const rows = await loadPage(page);
+    if (rows === null || !rows.length) break;
+    collected.push(...rows);
+    const oldest = rows[rows.length - 1]?.localTradedAt ?? "";
+    // 이 페이지가 이미 fromDate 이전까지 내려갔으면 더 깊이 들어갈 이유가 없다.
+    if (oldest && oldest <= fromDate) break;
+  }
+  return pickSeriesInRange(collected, fromDate, toDate);
+}
+
+const toYmd = (iso: string): string => iso.replaceAll("-", "");
+
+async function fetchNaverSeriesForTicker(
+  ticker: string,
+  fromDate: string,
+  toDate: string,
+): Promise<{ series: HistoryPricePoint[]; error?: string }> {
+  const errors: string[] = [];
+
+  // 1) siseJson 구간 조회 — 요청 1회로 구간 전체를 받는다 (주 경로)
+  try {
+    const res = await fetchJson(
+      `https://api.finance.naver.com/siseJson.naver?symbol=${ticker}&requestType=1`
+        + `&startTime=${toYmd(fromDate)}&endTime=${toYmd(toDate)}&timeframe=day`,
+      { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", Referer: "https://finance.naver.com/" },
+      8000,
+    );
+    if (res.ok) {
+      const series = pickSeriesInRange(parseNaverSiseJson(await res.text()), fromDate, toDate);
+      if (series.length) return { series };
+      errors.push("siseJson: 구간 내 종가 없음");
+    } else {
+      errors.push(`siseJson: HTTP ${res.status}`);
+    }
+  } catch (e) {
+    errors.push(`siseJson: ${String(e).slice(0, 60)}`);
+  }
+
+  // 2) 모바일 JSON pagination 폴백
+  try {
+    const series = await collectNaverSeriesByPaging(fromDate, toDate, async (page) => {
+      const res = await fetchJson(
+        `https://m.stock.naver.com/api/stock/${ticker}/price?pageSize=${NAVER_MOBILE_PAGE_SIZE}&page=${page}`,
+        MOBILE_HEADERS,
+      );
+      if (!res.ok) return null;
+      try {
+        const data = await res.json();
+        return Array.isArray(data) ? (data as NaverPriceRow[]) : null;
+      } catch {
+        return null; // malformed JSON
+      }
+    });
+    if (series.length) return { series };
+    errors.push("모바일 JSON: 구간 내 종가 없음");
+  } catch (e) {
+    errors.push(`모바일 JSON: ${String(e).slice(0, 60)}`);
+  }
+
+  return { series: [], error: errors.slice(0, 2).join(" / ") || "종가 없음" };
+}
+
+/**
+ * 여러 종목의 날짜 구간 종가 series. **종목당 요청 1회(폴백 시 최대
+ * `NAVER_MAX_PAGE_STEPS` 회)** 이고, 거래일 수에는 비례하지 않는다.
+ *
+ * 실패한 종목은 `series` 에 빈 배열로 남고 `failed` 에 사유가 들어간다 — 0원 가격을
+ * 만들어 내지 않는다(호출자가 그 종목이 든 날짜를 건너뛴다).
+ */
+export async function fetchNaverHistorySeries(
+  tickers: readonly string[],
+  fromDate: string,
+  toDate: string,
+): Promise<{
+  series: Record<string, HistoryPricePoint[]>;
+  failed: Record<string, string>;
+  timestamp: string;
+}> {
+  const series: Record<string, HistoryPricePoint[]> = {};
+  const failed: Record<string, string> = {};
+  const timestamp = new Date().toISOString();
+
+  for (const ticker of [...new Set(tickers)]) {
+    const r = await fetchNaverSeriesForTicker(ticker, fromDate, toDate);
+    series[ticker] = r.series;
+    if (r.error) failed[ticker] = r.error;
+    await delay(80);
+  }
+
+  return { series, failed, timestamp };
+}
+
 export async function fetchKisPrices(
   tickers: string[],
   appKey: string,

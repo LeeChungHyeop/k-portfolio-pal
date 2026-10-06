@@ -12,6 +12,12 @@ import {
   type PerformanceCashflow, type ScopeSelector,
 } from "@/lib/kaw/performance";
 import { useDailySnapshots } from "@/lib/kaw/useDailySnapshots";
+import {
+  buildPerformanceTimeline, reconstructionPlan, timelineHasReconstructed,
+  type ReconstructionAccountInput,
+} from "@/lib/kaw/historical-performance";
+import { useHistoricalPriceSeries } from "@/lib/kaw/useHistoricalPrices";
+import { kstDateString } from "@/lib/kaw/snapshot";
 import { checkSafeAssetValueLimit, requiresSafeAssetMinimum } from "@/lib/kaw/safeAsset";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { Card } from "@/components/ui/card";
@@ -302,14 +308,54 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
     return out;
   }, [state.accounts]);
 
+  // ── 과거 구간 복원 ──────────────────────────────────────────────────────
+  // 실제 스냅샷이 쌓이기 전 기간은 DB 에 가짜 행을 넣지 않고, 리밸런싱 history 의 실제
+  // 보유수량 × 그 날 실제 종가로 **조회 시점에** 평가액 행을 만들어 합친다
+  // (historical-performance.ts). 실제 스냅샷은 절대 덮지 않는다.
+  const actualRows = snapshots.data?.rows ?? [];
+  const today = kstDateString();
+  const reconstructionAccounts = useMemo<ReconstructionAccountInput[]>(
+    () => ACCOUNT_IDS.map((id) => ({
+      accountId: id,
+      history: state.accounts[id].history,
+      // 금액이 아니라 **날짜만** 넘긴다 — cashflow 를 복원 평가액에 더하지 않는다.
+      // anchor 이후 입출금이 있으면 그 구간을 approximate 로 표시하는 데만 쓴다.
+      cashflowDates: (state.accounts[id].cashflows ?? []).map((c) => c.date),
+    })),
+    [state.accounts],
+  );
+  // 요청 계획(종목 set + from/to). scope·기간 토글과 무관하므로 토글해도 재요청하지 않는다.
+  const historyPlan = useMemo(
+    () => reconstructionPlan(reconstructionAccounts, library, actualRows, today),
+    [reconstructionAccounts, library, actualRows, today],
+  );
+  const historyPrices = useHistoricalPriceSeries(
+    historyPlan,
+    !!currentUser && !snapshots.isLoading && !snapshots.data?.unavailable,
+  );
+  const timeline = useMemo(
+    () => buildPerformanceTimeline({
+      accounts: reconstructionAccounts,
+      library,
+      actualSnapshots: actualRows,
+      priceSeries: historyPrices.data ?? {},
+    }),
+    [reconstructionAccounts, library, actualRows, historyPrices.data],
+  );
+
   const perf = useMemo(
     () => calculatePerformance(
-      snapshots.data?.rows ?? [],
+      timeline,
       perfCashflows,
       scopeSelector(perfScope),
       period,
     ),
-    [snapshots.data, perfCashflows, perfScope, period],
+    [timeline, perfCashflows, perfScope, period],
+  );
+  // 지금 보이는 구간에 복원 행이 섞여 있는가 — 안내 badge 표시 판정
+  const perfHasReconstructed = useMemo(
+    () => timelineHasReconstructed(timeline, perf, scopeSelector(perfScope)),
+    [timeline, perf, perfScope],
   );
   const perfChartData = useMemo(
     () => perf.map((p) => ({ ...p, bar: metric === "pct" ? (p.returnPct ?? 0) : p.profit })),
@@ -318,8 +364,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
   // 안내 문구용 — 현재 scope 에서 실제로 쓸 수 있는 날짜 수
   // (전체 scope 면 네 계좌가 모두 있는 날만 센다).
   const usableDayCount = useMemo(
-    () => aggregateByDate(snapshots.data?.rows ?? [], scopeSelector(perfScope)).length,
-    [snapshots.data, perfScope],
+    () => aggregateByDate(timeline, scopeSelector(perfScope)).length,
+    [timeline, perfScope],
   );
 
   // ── Section E: 포트폴리오 상태 ──────────────────────────────────────────
@@ -545,7 +591,17 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       {/* ── Section D: 기간 성과 ──────────────────────────────────────── */}
       <Card className="p-4 md:p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold">기간 성과</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold">기간 성과</h3>
+            {perfHasReconstructed && (
+              <span
+                title="실제 일별 스냅샷이 쌓이기 전 기간은 리밸런싱 기록의 보유수량 × 당시 종가로 복원한 추정값입니다. 그 구간의 예수금은 0원으로 봅니다."
+                className="px-1.5 py-0.5 rounded-md text-[10px] border border-amber-300/60 dark:border-amber-800/60 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+              >
+                과거 구간 추정 포함
+              </span>
+            )}
+          </div>
           <div className="flex gap-1">
             {([["daily", "일간"], ["monthly", "월간"], ["yearly", "연간"]] as const).map(([id, label]) => (
               <button
@@ -636,6 +692,7 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
               기간 손익 = 기말 총자산 − 기초 총자산 − 기간 중 외부 입출금.
               수익률은 기간 중 들어온 돈을 남은 기간만큼만 분모에 반영합니다(Modified Dietz).
               {perfChartData.some((p) => p.partial) && " 가장 이른 구간은 그 앞 스냅샷이 없어 구간 내부 첫 스냅샷을 기준으로 계산했습니다."}
+              {perfHasReconstructed && " 일별 스냅샷 이전의 과거 구간은 보유수량 × 당시 종가 기준 추정이며, 그 구간의 예수금은 0원으로 봅니다."}
             </p>
           </>
         )}
