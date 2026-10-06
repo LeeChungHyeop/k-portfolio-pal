@@ -18,6 +18,15 @@ import {
 import {
   RETIREMENT_DB_BENCHMARK, dbBenchmarkLabel, dbBenchmarkSortDate,
 } from "@/lib/kaw/retirement-db-benchmark";
+import {
+  emptyPoint, mergeBenchmarkRows, useCarryForwardBenchmark,
+  type BenchmarkPoint,
+} from "@/lib/kaw/benchmark-series";
+import { kstMonthString } from "@/lib/kaw/snapshot";
+
+// point 타입과 carry-forward 계산은 lib 쪽(benchmark-series.ts)에 있다 — 순수 계산을
+// 단위 테스트로 고정하기 위해서다. 기존 import 경로를 깨지 않도록 여기서 다시 내보낸다.
+export type { BenchmarkPoint, BenchmarkPointSource } from "@/lib/kaw/benchmark-series";
 
 // 안전자산 30% 혼합 대상 계좌와 비중은 backtest.ts 가 유일한 정의다 — 저장된 스냅샷과 화면이
 // 어긋나지 않도록 여기서 따로 정의하지 않고 그대로 가져다 쓴다.
@@ -31,23 +40,6 @@ const COLOR_KOSPI = "oklch(0.62 0.20 20)";
 const COLOR_SP500 = "oklch(0.55 0.16 300)";
 // DB 유지 가정 — 투자 비교선이 아니라 "안 바꿨다면" 기준선이라 중립적인 회색 계열로 둔다.
 const COLOR_DB = "oklch(0.58 0.03 260)";
-
-/** 금액 비교 차트의 한 시점. 같은 시점에 없는 series 는 null 이고, **보간하지 않는다.** */
-export interface BenchmarkPoint {
-  label: string; // x축 표시 (YYYY.MM 또는 "현재")
-  date: string; // 그 포인트의 실제 일자 (YYYY-MM-DD) 또는 "현재"
-  sortDate: string; // 정렬 전용
-  actualValue: number | null;
-  actualPct: number | null;
-  growthValue: number | null;
-  growthPct: number | null;
-  kospiValue: number | null;
-  kospiPct: number | null;
-  sp500Value: number | null;
-  sp500Pct: number | null;
-  /** 퇴직연금 전용 — DB 유지 가정 예상 퇴직급여 (투자 수익률 개념이 없어 % 가 없다) */
-  dbValue: number | null;
-}
 
 const SERIES = [
   { valueKey: "actualValue", pctKey: "actualPct", name: "실제(커스텀)", color: COLOR_ACTUAL },
@@ -107,6 +99,11 @@ function BenchmarkTooltip({ active, payload }: any) {
           )}
         </div>
       ))}
+      {row.source === "carry_forward" && rows.length > 0 && (
+        <p className="text-[10px] leading-tight text-muted-foreground">
+          직전 리밸런싱 보유수량 기준 월말 평가
+        </p>
+      )}
       {row.dbValue !== null && (
         <div className="space-y-0.5 pt-1 border-t">
           <div className="flex justify-between gap-4">
@@ -131,17 +128,6 @@ function BenchmarkTooltip({ active, payload }: any) {
       )}
     </div>
   );
-}
-
-function emptyPoint(label: string, date: string, sortDate: string): BenchmarkPoint {
-  return {
-    label, date, sortDate,
-    actualValue: null, actualPct: null,
-    growthValue: null, growthPct: null,
-    kospiValue: null, kospiPct: null,
-    sp500Value: null, sp500Pct: null,
-    dbValue: null,
-  };
 }
 
 // 기존 대시보드의 "전체자산추이"와 동일한 규칙: 월별 최신 리밸런싱 시점 하나만 채택.
@@ -187,7 +173,7 @@ export function buildBenchmarkPoints(
       // 차트에 그려지면 실제와 전혀 다른 수치가 사실처럼 보인다. 재계산되면 채워진다.
       const bt = currentBacktestOf(h.backtestGrowth, cashflowKey);
       return {
-        ...emptyPoint(month.replace("-", "."), date, date),
+        ...emptyPoint(month.replace("-", "."), date, date, "history"),
         actualValue,
         actualPct,
         growthValue: bt ? bt.totalValue : null,
@@ -273,7 +259,7 @@ export function buildLivePoint(
     cumDeposit > 0 && value > 0 ? Math.round(((value - cumDeposit) / cumDeposit) * 10000) / 100 : null;
 
   return {
-    ...emptyPoint("현재", "현재", "9999-12-31"),
+    ...emptyPoint("현재", "현재", "9999-12-31", "live"),
     actualValue: 실제자산,
     actualPct: pctVs(실제자산),
     growthValue: 성장형자산 + 미투자,
@@ -286,11 +272,16 @@ export function buildLivePoint(
 }
 
 /**
- * DB 유지 가정선을 퇴직연금 행에 합친다.
+ * DB 유지 가정선을 퇴직연금 행에 합친다. **마지막 단계다.**
+ *
+ * 순서가 중요하다: 투자 series 의 월별 행(실제 기록 + carry-forward gap-fill + 현재)을 **먼저**
+ * 다 만든 뒤, 같은 `YYYY.MM` 라벨의 DB 값을 그 행에 얹는다. DB 값이 투자 series 를 만들어내는
+ * 것이 아니다 — DB 는 급여에서 나온 입력 데이터이고, 투자 쪽 값은 시세 계산 결과다.
  *
  * DB 추정치는 2025-03 부터 시작하고 투자 기록은 그보다 늦게 시작할 수 있어, **두 쪽의 월을
- * 합집합**으로 둔다. DB 만 있는 달에는 투자 쪽 값을 만들어 넣지 않는다(보간 금지) —
- * 그 달 행은 dbValue 만 있는 행이고, Line 의 connectNulls 가 각 series 자신의 실제 point 만 잇는다.
+ * 합집합**으로 둔다. 투자 기록이 아예 시작되기 전의 달은 `source: "db_only"` 행으로 남는다 —
+ * 그 달의 투자 평가액을 만들어 넣지 않는다(carry-forward 는 첫 리밸런싱 이후 구간만 채운다).
+ * Line 의 connectNulls 가 각 series 자신의 실제 point 만 잇는다.
  */
 export function withDbBenchmark(rows: BenchmarkPoint[]): BenchmarkPoint[] {
   const byLabel = new Map<string, BenchmarkPoint>();
@@ -301,7 +292,7 @@ export function withDbBenchmark(rows: BenchmarkPoint[]): BenchmarkPoint[] {
     const sortDate = dbBenchmarkSortDate(p);
     const existing = byLabel.get(label);
     if (existing) existing.dbValue = p.value;
-    else byLabel.set(label, { ...emptyPoint(label, sortDate, sortDate), dbValue: p.value });
+    else byLabel.set(label, { ...emptyPoint(label, sortDate, sortDate, "db_only"), dbValue: p.value });
   });
 
   return [...byLabel.values()].sort((a, b) => a.sortDate.localeCompare(b.sortDate));
@@ -363,6 +354,40 @@ export function PortfolioBenchmarkChart({
       enabled: tab === "irp",
     },
   );
+  // 리밸런싱 기록이 없는 "완료된 달"은 직전 확정 보유수량을 그대로 들고 있었다고 보고 월말
+  // 종가로 평가해 채운다(carry-forward). 저장하지 않는 화면 파생값이고, 보고 있는 탭만 조회한다.
+  const nowMonth = kstMonthString();
+  const retirementCarry = useCarryForwardBenchmark(state.accounts.retirement.history, {
+    cashflows: state.accounts.retirement.cashflows,
+    cashflowKey: cashflowFingerprint(state.accounts.retirement.cashflows),
+    library, safeAssetMix: accountUsesSafeAssetMix("retirement"),
+    enabled: tab === "retirement", nowMonth,
+  });
+  const isaCarry = useCarryForwardBenchmark(state.accounts.isa.history, {
+    cashflows: state.accounts.isa.cashflows,
+    cashflowKey: cashflowFingerprint(state.accounts.isa.cashflows),
+    library, safeAssetMix: accountUsesSafeAssetMix("isa"),
+    enabled: tab === "isa", nowMonth,
+  });
+  const pensionCarry = useCarryForwardBenchmark(state.accounts.pension.history, {
+    cashflows: state.accounts.pension.cashflows,
+    cashflowKey: cashflowFingerprint(state.accounts.pension.cashflows),
+    library, safeAssetMix: accountUsesSafeAssetMix("pension"),
+    enabled: tab === "pension", nowMonth,
+  });
+  const irpCarry = useCarryForwardBenchmark(state.accounts.irp.history, {
+    cashflows: state.accounts.irp.cashflows,
+    cashflowKey: cashflowFingerprint(state.accounts.irp.cashflows),
+    library, safeAssetMix: accountUsesSafeAssetMix("irp"),
+    enabled: tab === "irp", nowMonth,
+  });
+  const carryByAccount: Record<AccountId, BenchmarkPoint[]> = {
+    retirement: retirementCarry.points,
+    isa: isaCarry.points,
+    pension: pensionCarry.points,
+    irp: irpCarry.points,
+  };
+
   const syncByAccount: Record<AccountId, { syncing: boolean; error: boolean }> = {
     retirement: retirementSync,
     isa: isaSync,
@@ -394,12 +419,15 @@ export function PortfolioBenchmarkChart({
             account.cashBalance, account.cashflows, cashflowKey,
           )
         : null;
-      const merged = livePoint ? [...points, livePoint] : points;
+      // 실제 기록 → carry-forward gap-fill → 현재. 같은 달이 겹치면 **실제 기록이 이긴다**
+      // (mergeBenchmarkRows 의 출처 우선순위). 투자 series 를 다 만든 뒤에 DB 를 얹는다.
+      const merged = mergeBenchmarkRows(points, carryByAccount[id], livePoint ? [livePoint] : []);
       // DB 유지 가정선은 퇴직연금에만 붙인다 (DB→DC 전환이 있었던 계좌).
       out[id] = id === "retirement" ? withDbBenchmark(merged) : merged;
     });
     return out;
-  }, [state, library, livePrices, configured]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, library, livePrices, configured, carryByAccount[tab], tab]);
 
   return (
     <Tabs value={tab} onValueChange={(v) => setTab(v as AccountId)}>

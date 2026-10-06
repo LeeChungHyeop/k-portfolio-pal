@@ -209,6 +209,60 @@ describe("DB 유지 가정선", () => {
   });
 });
 
+describe("carry-forward: 기록 없는 달의 월말 평가", () => {
+  const SERIES_LIB = fs.readFileSync(
+    path.join(import.meta.dirname, "..", "..", "lib", "kaw", "benchmark-series.ts"),
+    "utf8",
+  );
+
+  it("계산은 lib 쪽 순수 함수에 있고 차트는 hook 으로 받아 쓴다", () => {
+    expect(CHART).toContain('from "@/lib/kaw/benchmark-series"');
+    expect(CHART).toContain("useCarryForwardBenchmark");
+    expect((CHART.match(/useCarryForwardBenchmark\(/g) ?? []).length).toBe(4); // 계좌 4개
+  });
+
+  it("실제 기록이 carry-forward 에 덮이지 않도록 출처 우선순위로 병합한다", () => {
+    expect(CHART).toContain("mergeBenchmarkRows(");
+    expect(SERIES_LIB).toContain("BENCHMARK_SOURCE_PRIORITY");
+  });
+
+  it("DB 는 투자 series 를 만든 뒤에 얹는다 (순서 고정)", () => {
+    const merge = CHART.indexOf("mergeBenchmarkRows(");
+    const db = CHART.indexOf('out[id] = id === "retirement" ? withDbBenchmark(merged) : merged');
+    expect(merge).toBeGreaterThan(-1);
+    expect(db).toBeGreaterThan(merge);
+  });
+
+  it("synthetic point 를 저장하지 않는다 — history/DB 에 쓰는 경로가 없다", () => {
+    // 주석에는 "저장하지 않는다"는 설명이 있으므로 **호출 형태**가 없는 것을 본다.
+    expect(SERIES_LIB).not.toContain("setHistoryBacktest(");
+    expect(SERIES_LIB).not.toContain("addHistory(");
+    expect(SERIES_LIB).not.toContain("supabase");
+    expect(SERIES_LIB).not.toContain("retirement-db-benchmark");
+  });
+
+  it("툴팁에 조용한 한 줄 설명만 붙인다 (badge 를 추가하지 않는다)", () => {
+    expect(CHART).toContain("직전 리밸런싱 보유수량 기준 월말 평가");
+    expect(CHART).toContain('row.source === "carry_forward"');
+  });
+
+  it("과거 종가 조회는 backtest.ts 의 공용 helper 를 쓴다 (캐시·0 처리 규칙 단일화)", () => {
+    expect(SERIES_LIB).toContain("fetchTickerPricesForDates");
+    const backtest = fs.readFileSync(
+      path.join(import.meta.dirname, "..", "..", "lib", "kaw", "backtest.ts"),
+      "utf8",
+    );
+    expect(backtest).toContain("export async function fetchTickerPricesForDates");
+    expect(SERIES_LIB).not.toContain("PRICE_CACHE_KEY");
+  });
+
+  it("safe mix 규칙은 backtest.ts 의 단일 정의를 그대로 쓴다", () => {
+    expect(SERIES_LIB).toContain('SAFE_MIX_SP500_TICKER');
+    expect(SERIES_LIB).toContain('from "./backtest"');
+    expect(SERIES_LIB).not.toContain("SAFE_MIX_WEIGHT =");
+  });
+});
+
 describe("툴팁: 금액 + 누적수익률이 함께 있다", () => {
   it("series 별로 총액과 누적수익률을 같이 보여준다", () => {
     expect(CHART).toContain("{fmtWon(r.value!)}");

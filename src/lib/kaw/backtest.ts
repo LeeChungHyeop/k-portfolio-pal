@@ -354,26 +354,39 @@ async function fetchPricesForDate(date: string, tickers: string[]): Promise<Reco
 
 // 주어진 날짜들에 대해 자산별 과거 종가를 가져온다 (캐시 우선, 결측치는 직전 값으로 보정).
 // extraTickers(퇴직연금/IRP 안전자산 혼합용)는 기본 9종목 캐시에 없으면 그 날짜만 추가로 다시 조회한다.
-async function fetchHistoricalPrices(
-  dates: string[],
-  extraTickers: string[] = [],
-): Promise<{ byAsset: Record<string, Partial<Record<AssetKey, number>>>; byTicker: Record<string, Record<string, number>> }> {
+/**
+ * 날짜 × 종목 **과거 종가 조회의 공용 입구**(캐시 우선, fail-closed).
+ *
+ * 돌려주는 행에는 **그 날짜에 서버가 실제로 준 종가만** 들어 있다 — 실패·0 은 키 자체가 없고,
+ * 날짜 간 carry-forward 도 하지 않는다. 그래서 호출측이 "이 날짜에 이 종목 가격이 없다"를
+ * 정확히 판정해 fail-closed 할 수 있다(월말 carry-forward 평가가 이 성질을 쓴다).
+ *
+ * `/api/naver/history-price` 는 요청일 **이하 최신 거래일** 종가를 돌려주므로, 주말·휴장일
+ * 월말 날짜를 그대로 요청해도 0 이 아니라 직전 거래일 종가가 온다.
+ *
+ * 성장형 백테스트의 자산별 조회(`fetchHistoricalPrices`)도 이 함수 위에 올라간다 —
+ * 캐시 키·0 처리 규칙이 두 곳으로 갈라지지 않게 한다.
+ */
+export async function fetchTickerPricesForDates(
+  dates: readonly string[],
+  tickers: readonly string[],
+): Promise<Record<string, Record<string, number>>> {
   const sortedDates = [...new Set(dates)].sort();
+  const wanted = [...new Set(tickers)].filter((t) => !!t);
+  if (!sortedDates.length || !wanted.length) return {};
   const cache = loadPriceCache();
-  const allTickers = [...new Set([...GROWTH_TICKERS, ...extraTickers])];
 
   // **날짜 행이 있다는 이유로 건너뛰지 않는다.** 그 날짜 캐시가 만들어진 뒤에 추가되거나 정정된
   // 종목(예: 현금성자산 449170, 퇴직연금 안전자산 438080)은 행 안에 비어 있으므로, 날짜별로
   // "아직 없는 종목만" 모아서 그것만 다시 조회한다.
   // 응답에 없던 종목(상장 전·휴장)은 0 으로 박아두지 않는다 — 네트워크 실패와 구분할 수 없어
-  // 잘못된 0 이 영구히 남기 때문이다. 그런 날짜는 다음 방문에도 한 번 더 조회되지만,
-  // 읽을 때 직전 종가로 보정되므로 계산 결과는 달라지지 않는다.
+  // 잘못된 0 이 영구히 남기 때문이다.
   let fetchedAny = false;
   for (const date of sortedDates) {
     const row = cache[date] ?? {};
     // undefined / null / 0 이하 / NaN 은 모두 missing 이다 — 예전 버전이 저장해둔 0 때문에
     // 재조회가 막히지 않게 한다(캐시 키도 v4 로 올렸지만, 읽기 쪽에서도 막는다).
-    const needed = allTickers.filter((t) => !isUsablePrice(row[t]));
+    const needed = wanted.filter((t) => !isUsablePrice(row[t]));
     if (!needed.length) continue;
     const fetched = await fetchPricesForDate(date, needed);
     // fetched 에는 성공한 가격만 들어 있다. 기존 행의 비정상 값(옛 0 캐시)은 여기서 떨어낸다.
@@ -386,12 +399,35 @@ async function fetchHistoricalPrices(
   }
   if (fetchedAny) savePriceCache(cache);
 
+  const out: Record<string, Record<string, number>> = {};
+  for (const date of sortedDates) {
+    const row = cache[date] ?? {};
+    const picked: Record<string, number> = {};
+    for (const t of wanted) {
+      const p = row[t];
+      if (isUsablePrice(p)) picked[t] = p;
+    }
+    out[date] = picked;
+  }
+  return out;
+}
+
+async function fetchHistoricalPrices(
+  dates: string[],
+  extraTickers: string[] = [],
+): Promise<{ byAsset: Record<string, Partial<Record<AssetKey, number>>>; byTicker: Record<string, Record<string, number>> }> {
+  const sortedDates = [...new Set(dates)].sort();
+  const allTickers = [...new Set([...GROWTH_TICKERS, ...extraTickers])];
+  // 조회·캐시는 공용 helper 가 한다. 여기서는 그 위에 **직전 종가 carry-forward** 를 얹는다 —
+  // 성장형 백테스트는 중간 한 날짜의 일시적 결측으로 보유자산이 0원이 되면 안 되기 때문이다.
+  const raw = await fetchTickerPricesForDates(sortedDates, allTickers);
+
   const lastKnown: Partial<Record<AssetKey, number>> = {};
   const lastKnownExtra: Record<string, number> = {};
   const byAsset: Record<string, Partial<Record<AssetKey, number>>> = {};
   const byTicker: Record<string, Record<string, number>> = {};
   for (const date of sortedDates) {
-    const cachedRow = cache[date] ?? {};
+    const cachedRow = raw[date] ?? {};
     const assetRow: Partial<Record<AssetKey, number>> = {};
     for (const key of ASSET_ORDER) {
       const ticker = BUILTIN_TICKERS[key];
