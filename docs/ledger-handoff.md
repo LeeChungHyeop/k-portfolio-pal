@@ -7,7 +7,7 @@ migration 004 최종 리뷰이며, 그 전에 임의로 DB 를 건드리지 않�
 
 - 브랜치: `feat/historical-performance-reconstruction`
 - 저장소 루트: `k-allweather/app/` (git 명령은 반드시 여기서)
-- 마지막 커밋: `6e6d99e` (이 문서)
+- 이 문서를 만든 커밋: `e8bbc2c`
 
 ---
 
@@ -19,7 +19,7 @@ migration 004 최종 리뷰이며, 그 전에 임의로 DB 를 건드리지 않�
 | 2 | verified dataset 반입 / 순수 도메인 모델 / 적재 전 게이트 | `34a9cb6` |
 | 3 | fingerprint · provenance / dry-run import / Worker API / 읽기 훅 | `0c10eaf` |
 | 4 | 거래 이력 UI (목록·필터·상세·편집·정정·audit·반응형) | `ccea87b` |
-| — | 이 인수인계 문서 | `6e6d99e` |
+| — | 이 인수인계 문서 | `e8bbc2c` |
 
 Phase 1 과 2 는 한 커밋에 함께 들어갔다(스키마와 그 스키마를 쓰는 도메인 모델을
 따로 커밋하면 중간 상태가 컴파일되지 않는다).
