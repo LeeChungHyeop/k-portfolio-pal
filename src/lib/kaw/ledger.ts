@@ -448,20 +448,67 @@ export const INTRA_DAY_ROW_ORDER: Readonly<Record<string, "asc" | "desc">> = {
  * 이 순서가 맞아야 "이전 → 이후 보유수량"이 증권사가 보고한 거래후잔고와 일치하고
  * 음수 보유수량이 생기지 않는다. 방향은 `INTRA_DAY_ROW_ORDER` 가 source 별로 정한다.
  *
- * `sourceRow` 가 없는 거래(사용자가 직접 보완한 행)는 그 날의 **마지막**에 두고 id 로
- * 순서를 고정한다 — 추측으로 끼워 넣지 않되 실행마다 순서가 달라지지도 않게 한다.
+ * ── 반드시 **유효한 전순서(total order)** 여야 한다 ───────────────────
+ *
+ * 이것은 취향이 아니라 **실측으로 드러난 요구사항**이다. 예전 구현은 행 번호를
+ * **계좌 구분 없이** 비교했다. 계좌마다 행 번호가 따로 매겨지므로 같은 날에 서로 다른
+ * 계좌 거래가 있으면 의미 없는 숫자끼리 비교됐고, 한 정렬 안에 "행 번호 기준"과
+ * "id 기준"이 섞여 **전이성이 깨졌다.** 실측 수치(463건 기준):
+ *
+ *   · 같은 event_date 에 2개 이상 계좌가 있는 날        12 / 39
+ *   · 계좌가 다른데 행 번호로 비교되는 쌍              1,101
+ *   · 전이성 위반 삼각형                              17,190
+ *
+ * `Array.prototype.sort` 는 비일관 비교자를 만나면 **입력 순서에 따라 다른 결과**를
+ * 낸다. 데이터셋 파일 순서가 우연히 맞는 답을 주고 있었을 뿐이다 — DB 에서 읽은
+ * 순서로는 postQuantity 불일치 12건, 무작위 순열에서는 최악 22건 + 음수 보유수량 5건이
+ * 나왔다. Worker 는 `.order("event_date")` 만 걸어서 같은 날 안은 Postgres 가 임의
+ * 순서로 준다 — 즉 UI 가 실행마다 다른 보유수량을 보일 수 있는 상태였다.
+ *
+ * 그래서 지금은 **사전식 전순서**다. 앞 키가 같을 때만 다음 키로 내려간다:
+ *
+ *   eventDate (호출하는 쪽에서 먼저 비교한다)
+ *     → accountId      계좌가 다르면 행 번호를 비교할 근거가 없다
+ *     → source         source 가 다르면 방향도 번호체계도 다르다
+ *     → sourceRow      **같은 (계좌, source) 안에서만** 방향을 적용해 비교
+ *     → id             deterministic tie-breaker
+ *
+ * **source 별 방향 규칙 자체는 하나도 바뀌지 않았다**(`INTRA_DAY_ROW_ORDER`).
+ * 같은 계좌·같은 source 안의 순서는 예전과 동일하다. 달라진 것은 "비교할 근거가
+ * 없는 쌍"을 명확히 분리해 전순서를 회복한 것뿐이다.
+ *
+ * `sourceRow` 가 없는 거래(사용자가 직접 보완한 행)는 그 (계좌, source) 그룹의
+ * **마지막**에 두고 id 로 순서를 고정한다 — 추측으로 끼워 넣지 않되, 실행마다
+ * 순서가 달라지지도 않게 한다.
+ *
+ * 순서 독립성은 `ledger-order.test.ts` 가 고정한다 — 같은 463건을 여러 입력 순서로
+ * 넣어 line 단위까지 같은 결과가 나오는지 확인한다. 파일 순서 하나로만 테스트해서
+ * 이 버그를 547건의 테스트가 못 잡았다.
  */
 export function compareIntraDayOrder(a: LedgerTransaction, b: LedgerTransaction): number {
-  const ra = a.sourceRow ?? null;
-  const rb = b.sourceRow ?? null;
-  if (ra !== null && rb !== null && ra !== rb) {
-    // 두 거래의 source 가 다르면 행 번호를 비교할 근거가 없다 — id 로 고정한다.
-    if (a.source !== b.source) return a.id.localeCompare(b.id);
-    return (INTRA_DAY_ROW_ORDER[a.source] ?? "asc") === "desc" ? rb - ra : ra - rb;
-  }
-  if (ra !== null && rb === null) return -1;
-  if (ra === null && rb !== null) return 1;
-  return a.id.localeCompare(b.id);
+  if (a.accountId !== b.accountId) return a.accountId < b.accountId ? -1 : 1;
+  if (a.source !== b.source) return a.source < b.source ? -1 : 1;
+  const ka = intraDayRowKey(a);
+  const kb = intraDayRowKey(b);
+  if (ka !== kb) return ka < kb ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * 정렬 키로 쓰는 행 번호. **같은 (계좌, source) 안에서만 의미가 있다** —
+ * 비교자가 그 둘을 먼저 걸러낸 뒤에만 이 키를 쓴다.
+ *
+ * `desc` source 는 부호를 뒤집어 **항상 오름차순 비교**로 만든다. 비교자 안에서
+ * 방향에 따라 분기하면 위치에 따라 부호가 뒤집힐 수 있어 전순서가 깨지기 쉬우므로,
+ * **키를 먼저 만들고 비교는 항상 같은 방향으로** 한다.
+ *
+ * `sourceRow` 가 없으면 +Infinity — 그룹의 마지막으로 간다. 둘 다 없으면 키가 같아져
+ * id tie-breaker 로 내려간다.
+ */
+function intraDayRowKey(t: LedgerTransaction): number {
+  const r = t.sourceRow ?? null;
+  if (r === null) return Number.POSITIVE_INFINITY;
+  return (INTRA_DAY_ROW_ORDER[t.source] ?? "asc") === "desc" ? -r : r;
 }
 
 /** 정정이 적용된 거래와 그 원본을 함께 들고 다닌다 (정렬에 원본의 sourceRow 가 필요하다). */

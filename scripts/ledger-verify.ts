@@ -212,6 +212,41 @@ async function main(): Promise<void> {
   check("cashflow checksum (데이터셋)", checksum === 151_855_018,
     checksum.toLocaleString("en-US"));
 
+  // ── **id 별 fingerprint 안정성** ──────────────────────────────
+  //
+  // parseVerifiedDataset 은 fingerprint 를 **파일에서 읽는 게 아니라 계산한다**
+  // (verified-transactions.ts 의 assignFingerprints). 그리고 assignFingerprints 는
+  // compareIntraDayOrder 로 내용이 같은 체결들의 **순번(occurrence)** 을 매긴다.
+  //
+  // 즉 비교자를 고치면 이론상 같은 거래가 다른 순번을 받아 **다른 fingerprint** 를
+  // 가질 수 있다. 그러면 재적재 시 upsert arbiter(fingerprint UNIQUE)가 기존 행을 못
+  // 찾아 중복을 만들거나 PK 충돌로 죽는다.
+  //
+  // "fingerprint 집합이 같다"로는 부족하다 — 집합은 같은채 **id 사이에서 서로
+  // 바뀜 수** 있기 때문이다. 그래서 **id → source_fingerprint 매핑을 1:1 대조**한다.
+  const regenerated = new Map(dataset.transactions.map((t) => [t.id, t.sourceFingerprint]));
+  const dbFp = new Map(rows.map((r) => [r.id, r.source_fingerprint]));
+
+  check("fingerprint 비교 대상 건수", dbFp.size === 463, `${dbFp.size} / 기대 463`);
+
+  const missingInDataset = [...dbFp.keys()].filter((id) => !regenerated.has(id));
+  check("id 누락 (DB→데이터셋)", missingInDataset.length === 0,
+    `${missingInDataset.length}건${missingInDataset.length ? ` 예: ${missingInDataset[0]}` : ""}`);
+
+  const missingInDb = [...regenerated.keys()].filter((id) => !dbFp.has(id));
+  check("id 누락 (데이터셋→DB)", missingInDb.length === 0,
+    `${missingInDb.length}건${missingInDb.length ? ` 예: ${missingInDb[0]}` : ""}`);
+
+  const noFp = [...dbFp.entries()].filter(([, fp]) => !fp);
+  check("fingerprint 누락", noFp.length === 0, `${noFp.length}건`);
+
+  const changed = [...dbFp.entries()].filter(([id, fp]) => regenerated.get(id) !== fp);
+  check("id 별 source_fingerprint 변경", changed.length === 0,
+    changed.length === 0 ? "0건 (production 매핑과 완전 동일)"
+      : changed.slice(0, 3).map(([id, fp]) =>
+          `${id}: DB=${fp} vs 재생성=${regenerated.get(id)}`).join(" | ")
+        + (changed.length > 3 ? ` … 총 ${changed.length}건` : ""));
+
   // ── batch / provenance ────────────────────────────────────────────────
   const { data: batchData, error: batchErr } = await client
     .from("kaw_ledger_import_batch")

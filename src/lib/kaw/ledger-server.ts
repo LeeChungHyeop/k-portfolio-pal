@@ -91,8 +91,22 @@ export async function handleLedgerGet(request: Request, env: DataEnv): Promise<R
   const { client, session } = a;
 
   const [tx, ev, corr, ovr] = await Promise.all([
+    // 조회 순서는 **transport 수준의 결정성**만 책임진다. event_date 하나만
+    // 걸면 같은 날 안은 Postgres 가 임의 순서로 주고, 그러면 응답이 실행마다
+    // 달라져 디버깅도 캐시도 어렵다. 그래서 2차 키를 같이 건다.
+    //
+    // **시간순을 여기서 재현하려고 하지 않는다.** source 마다 source_row 방향이
+    // 반대라(INTRA_DAY_ROW_ORDER) SQL 의 일률 asc/desc 로는 만들 수 없다. 실제
+    // 시간순과 "이전→이후 보유수량"의 source of truth 는 도메인 비교자이고,
+    // 브라우저는 서버가 준 순서를 믿지 않고 resolveEvents 에서 다시 정렬한다
+    // (useLedger.ts). 여기의 순서가 바뀜어도 화면 결과는 변하지 않는다 —
+    // ledger-order.test.ts 가 그걸 고정한다.
     scoped(client, "kaw_transaction_ledger", session)
-      .order("event_date", { ascending: true }).limit(LEDGER_ROW_LIMIT),
+      .order("event_date", { ascending: true })
+      .order("account_type", { ascending: true })
+      .order("source", { ascending: true })
+      .order("id", { ascending: true })
+      .limit(LEDGER_ROW_LIMIT),
     scoped(client, "kaw_rebalance_event", session).limit(LEDGER_ROW_LIMIT),
     scoped(client, "kaw_transaction_correction", session).limit(LEDGER_ROW_LIMIT),
     scoped(client, "kaw_transaction_event_override", session).limit(LEDGER_ROW_LIMIT),
