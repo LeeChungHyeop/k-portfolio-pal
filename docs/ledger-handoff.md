@@ -240,7 +240,48 @@ Rebalance Event. **계좌 화면의 legacy 히스토리 탭은 그대로 두었�
 `src/components/kaw/LedgerPage.tsx`, `LedgerEventDetail.tsx`,
 `src/lib/kaw/ledger.ts`(도메인), `ledger-ui.ts`(표시 규칙),
 `useLedger.ts`(훅), `ledger-server.ts`(Worker API),
-`verified-transactions.ts`(파서·게이트), `scripts/ledger-import.ts`.
+`verified-transactions.ts`(파서·게이트),
+`ledger-import-core.ts`(적재 쓰기 경로) + `scripts/ledger-import.ts`(CLI).
+
+### import 쓰기 흐름과 partial failure
+
+적재는 **두 번의 Supabase 요청**이고 **그 사이에 트랜잭션이 없다.** PostgREST 는
+요청 1건 = 트랜잭션 1건이다.
+
+```
+(1) kaw_transaction_ledger  upsert 463행   ← 단일 INSERT 문이라 all-or-nothing
+      on conflict (family_code, profile, source_fingerprint) do nothing
+      RETURNING 은 실제로 삽입된 행만 → 그 개수가 inserted
+(2) kaw_ledger_import_batch insert 1행     ← **완성된 provenance 를 한 번만** INSERT
+```
+
+`import_batch_id` 에는 **FK 가 없다**(provenance 참조일 뿐 무결성 제약이 아니다).
+그래서 원장을 먼저 넣어도 참조 위반이 나지 않는다.
+
+(2) 를 먼저 넣지 않는 이유는 `inserted`/`skipped` 가 (1) 의 결과라서다. 먼저 넣으려면
+나중에 UPDATE 해야 하는데 `kaw_ledger_import_batch` 는 service_role 에 select/insert
+만 있다. **지금 순서가 권한 모델과 맞는 유일한 순서이고, 적재 경로 전체에 UPDATE 가
+한 번도 없다.**
+
+| 상황 | 동작 |
+|---|---|
+| 최초 import | inserted 463 / skipped 0, batch 행 1개 |
+| 동일 dataset 재import | inserted 0 / skipped 463, batch 행이 **하나 더** 생긴다(실행 이력) |
+| (1) 실패 | batch 를 쓰지 않고 중단. 463행은 all-or-nothing 이라 일부만 남지 않는다. 단 **타임아웃이면 서버가 커밋했을 수 있어** 재실행 전에 dry-run 으로 행 수를 확인하라고 출력한다. fingerprint UNIQUE 때문에 재실행해도 중복은 안 생긴다 |
+| (1) 성공 + (2) 실패 | 3회 재시도 후 **throw 하고 비정상 종료한다.** 조용히 "적재 완료"로 끝나지 않는다 |
+
+**(1) 성공 + (2) 실패가 유일하게 위험한 상태다.** 원장 463행의 `import_batch_id` 가
+없는 batch 를 가리키고, 원장은 immutable 이라 그 컬럼을 고칠 수 없다. **그냥 재실행하면
+새 batch id 가 생겨 끊긴 참조가 영구히 남는다.** 그래서 스크립트는 그 경우
+**같은 id 로 넣을 `INSERT` 문을 그대로 출력**한다 — SQL Editor 에 붙여넣으면 복구된다
+(service_role INSERT 한 번이면 되므로 immutable 원칙을 깨지 않는다).
+
+재시도 안전성: 원장은 fingerprint UNIQUE 덕에 몇 번을 재실행해도 중복이 생기지 않는다.
+batch 는 실행마다 새 id(타임스탬프)라 행이 늘지만, 그것이 곧 실행 이력이라 해롭지 않다.
+
+쓰기 경로는 `src/lib/kaw/ledger-import-core.ts` 에 있고(스크립트는 인자 파싱·검증·리포트
+담당), `src/lib/kaw/ledger-import.test.ts` 가 가짜 Supabase 클라이언트로 고정한다
+(실제 463건 데이터셋 사용, update/delete 호출이 하나라도 있으면 실패).
 
 ### API
 
@@ -316,6 +357,8 @@ G. 사용자 승인 후 463건 production import
    **승인 없이 실행하지 않는다.**
 
 H. import 후 재검증
+   **(2) batch 기록 실패로 비정상 종료했다면** 출력된 INSERT 문을 SQL Editor 에
+   붙여넣어 먼저 복구한다. 그냥 재실행하면 원장의 import_batch_id 가 영구히 끊긴다.
    transaction 463 / event 65 / 계좌별 건수 / holdings 재생 결과 /
    kaw_ledger_import_batch 의 inserted·skipped.
    한 번 더 import 해서 inserted 0 / skipped 463 인지(멱등성) 확인.

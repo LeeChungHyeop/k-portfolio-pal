@@ -14,6 +14,26 @@
 //   - 적재는 fingerprint UNIQUE 제약에 기대는 **중복이면 건너뛰기**다. 같은 데이터셋을
 //     두 번 넣어도 2회차는 inserted 0 / skipped 463 으로 끝나고 행이 늘지 않는다.
 //   - 기존 행을 UPDATE 하지 않는다 — 원장은 immutable 이다. 정정은 overlay 로 한다.
+//
+// ── 쓰기 순서와 트랜잭션 경계 ──────────────────────────────────────────────────
+//
+// 적재는 **두 번의 Supabase 요청**이다. PostgREST 는 요청 1건 = 트랜잭션 1건이라
+//
+//   (1) 원장 463행 upsert   — 이 안에서는 all-or-nothing (단일 INSERT 문)
+//   (2) batch 1행 insert    — provenance. **완성된 행을 한 번만 넣는다**
+//
+// **두 요청 사이에는 트랜잭션이 없다.** 그래서 (1) 성공 + (2) 실패가 가능하고, 그러면
+// 원장 행의 import_batch_id 가 존재하지 않는 batch 를 가리킨다. 원장은 immutable 이라
+// 그 컬럼을 고칠 수 없으므로, 그냥 재실행하면 **새 batch id 가 생겨 끊긴 참조가 그대로
+// 남는다.** 그래서 (2) 가 끝내 실패하면 스크립트는 조용히 끝나지 않고 **같은 id 로 넣을
+// INSERT 문을 출력하고 비정상 종료**한다. 그 한 줄을 SQL Editor 에 붙여넣으면 복구된다.
+//
+// (2) 를 (1) 보다 먼저 넣지 않는 이유: inserted/skipped 는 (1) 의 결과라 미리 알 수 없고,
+// 먼저 넣으려면 나중에 UPDATE 해야 하는데 kaw_ledger_import_batch 는 service_role 에
+// select/insert 만 있다(migration 004). 지금 순서가 그 권한 모델과 맞는 유일한 순서다.
+//
+// import_batch_id 에는 **FK 가 없다**(004 확인). 그래서 원장을 먼저 넣어도 참조 위반이
+// 나지 않는다 — provenance 참조일 뿐 무결성 제약이 아니다.
 // ─────────────────────────────────────────────────────────────────────────────
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -26,9 +46,10 @@ import {
 import {
   FINGERPRINT_VERSION, findDuplicateFingerprints, replayFinalHoldings, resolveEvents,
 } from "../src/lib/kaw/ledger";
+// 실제 DB 쓰기는 src 쪽 모듈에 있다 — 테스트가 가짜 클라이언트로 그 흐름을 돌려본다.
+import { applyImport } from "../src/lib/kaw/ledger-import-core";
 
 const DATASET_PATH = resolve(process.cwd(), "data/verified-transactions.v1.json");
-const SOURCE_KIND = "verified_dataset_v1";
 
 interface Args {
   apply: boolean;
@@ -166,67 +187,6 @@ async function reportExisting(
 
 // ── 실제 적재 ───────────────────────────────────────────────────────────────
 
-async function applyImport(
-  client: SupabaseClient, d: VerifiedDataset, args: Args, checksum: string,
-): Promise<void> {
-  const batchId = `imp:${SOURCE_KIND}:${new Date().toISOString()}`;
-  const rows = d.transactions.map((t) => ({
-    family_code: args.familyCode,
-    profile: args.profile,
-    id: t.id,
-    account_type: t.accountId,
-    ticker: t.ticker,
-    etf_name: t.etfName,
-    side: t.side,
-    quantity: t.quantity,
-    price: t.price,
-    amount: t.amount,
-    trade_date: t.tradeDate,
-    settlement_date: t.settlementDate,
-    inferred_trade_date: t.inferredTradeDate,
-    event_date: t.eventDate,
-    trade_date_evidence: t.tradeDateEvidence,
-    fee: t.fee,
-    tax: t.tax,
-    post_quantity: t.postQuantity,
-    source: t.source,
-    source_file: t.sourceFile ?? null,
-    source_row: t.sourceRow ?? null,
-    source_fingerprint: t.sourceFingerprint,
-    fingerprint_version: t.fingerprintVersion ?? FINGERPRINT_VERSION,
-    import_batch_id: batchId,
-  }));
-
-  // 중복이면 건너뛴다 — 기존 행을 덮어쓰지 않는다(원장은 immutable).
-  const { data, error } = await client
-    .from("kaw_transaction_ledger")
-    .upsert(rows, {
-      onConflict: "family_code,profile,source_fingerprint",
-      ignoreDuplicates: true,
-    })
-    .select("id");
-  if (error) throw new Error(`적재 실패: ${error.message}`);
-
-  const inserted = data?.length ?? 0;
-  const skipped = rows.length - inserted;
-
-  const { error: batchError } = await client.from("kaw_ledger_import_batch").insert({
-    id: batchId,
-    family_code: args.familyCode,
-    profile: args.profile,
-    source_kind: SOURCE_KIND,
-    source_label: "data/verified-transactions.v1.json",
-    source_checksum: checksum,
-    inserted_count: inserted,
-    skipped_count: skipped,
-    verification: verifyDataset(d),
-    actor: args.profile,
-  });
-  if (batchError) console.error(`  (batch 이력 기록 실패: ${batchError.message})`);
-
-  console.log(`\n  적재 완료 — inserted ${inserted} / skipped(중복) ${skipped}`);
-  console.log(`  batch id: ${batchId}`);
-}
 
 // ── main ────────────────────────────────────────────────────────────────────
 
@@ -275,7 +235,7 @@ async function main(): Promise<void> {
   console.log("\n═══ 적재 완료 ════════════════════════════════════════════");
 }
 
-main().catch((e) => {
+main().catch((e: unknown) => {
   console.error(e);
   process.exit(1);
 });
