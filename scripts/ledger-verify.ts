@@ -285,6 +285,44 @@ async function main(): Promise<void> {
       `${usedBatches[0]} vs ${first.id}`);
   }
 
+  // ── overlay 상태 ────────────────────────────────────────────
+  //
+  // UI 쓰기 테스트 전후를 대조하기 위해 찍는다. 원장과 달리 overlay 는 사용자가
+  // 만드는 것이므로 "기대값"이 고정되지 않는다 — 검사항목이 아니라 보고만 한다.
+  const overlayCounts: [string, number][] = [];
+  for (const table of [
+    "kaw_transaction_correction", "kaw_transaction_event_override",
+    "kaw_rebalance_event", "kaw_ledger_audit",
+  ]) {
+    const { count, error: e } = await client.from(table)
+      .select("*", { count: "exact", head: true })
+      .eq("family_code", family).eq("profile", profile);
+    if (e) throw new Error(`${table} 조회 실패: ${e.message}`);
+    overlayCounts.push([table, count ?? 0]);
+  }
+  console.log("── overlay 상태 (검사항목 아님 — 쓰기 테스트 전후 대조용) ──────────");
+  for (const [t, n] of overlayCounts) console.log(`  ${t.padEnd(32)} ${n}`);
+
+  // rebalance_event 는 건수만으로는 부족하다 — 메모/태그/숨김이 바뀜 것도 봐야 한다.
+  const { data: evRows } = await client.from("kaw_rebalance_event")
+    .select("id, memo, tags, hidden, type, strategy_included, is_user_created")
+    .eq("family_code", family).eq("profile", profile).order("id");
+  if ((evRows ?? []).length > 0) {
+    console.log("  ─ kaw_rebalance_event 내용");
+    for (const e of evRows ?? []) {
+      console.log(`    ${JSON.stringify(e)}`);
+    }
+  }
+  const { data: corrRows } = await client.from("kaw_transaction_correction")
+    .select("transaction_id, excluded, reason")
+    .eq("family_code", family).eq("profile", profile).order("transaction_id");
+  for (const r of corrRows ?? []) console.log(`    correction ${JSON.stringify(r)}`);
+  const { data: ovrRows } = await client.from("kaw_transaction_event_override")
+    .select("transaction_id, event_id")
+    .eq("family_code", family).eq("profile", profile).order("transaction_id");
+  for (const r of ovrRows ?? []) console.log(`    override ${JSON.stringify(r)}`);
+  console.log("");
+
   // ── 날짜 근거 분포 (참고 출력) ────────────────────────────────────────
   const evidence = new Map<string, number>();
   for (const r of rows) evidence.set(r.trade_date_evidence, (evidence.get(r.trade_date_evidence) ?? 0) + 1);
