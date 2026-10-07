@@ -22,7 +22,8 @@ export interface DataEnv {
   RATE_LIMIT?: KVLike;
 }
 
-function json(body: unknown, status = 200): Response {
+/** 공용 JSON 응답 (no-store). 원장 API 등 다른 핸들러 모듈도 같은 모양을 쓰도록 export 한다. */
+export function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 }
 
@@ -43,7 +44,8 @@ async function resetRateLimit(env: DataEnv, key: string): Promise<void> {
 }
 
 let cachedClient: { url: string; client: SupabaseClient } | null = null;
-function serviceClient(env: DataEnv): SupabaseClient | null {
+/** service_role Supabase 클라이언트 (isolate 캐시). 원장 API 가 같은 클라이언트를 쓰도록 export 한다. */
+export function serviceClient(env: DataEnv): SupabaseClient | null {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return null;
   if (cachedClient?.url === env.SUPABASE_URL) return cachedClient.client;
   const client = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {

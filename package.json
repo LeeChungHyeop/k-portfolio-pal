@@ -11,7 +11,9 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "ledger:dry-run": "vite-node scripts/ledger-import.ts",
+    "ledger:import": "vite-node scripts/ledger-import.ts"
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.25.5",

@@ -57,9 +57,63 @@
 -- 보안: 001/002/003 과 같은 철학. RLS on + 정책 0개, anon/authenticated GRANT 회수,
 --       service_role 만 접근. 브라우저는 직접 붙지 않고 Worker 의 인증된 /api/* 만 쓴다.
 --
+-- ── 출처 추적(provenance)과 중복 적재 방지 ──────────────────────────────────
+--
+-- 앞으로 같은 원장에 **여러 경로**로 거래가 들어온다: 미래에셋 Excel, KIS API, 수동 보정.
+-- 그래서 특정 파일에 종속되지 않는 신원과 적재 이력을 함께 둔다.
+--
+--   source_fingerprint  그 체결의 **안정적 신원**. UNIQUE 라서 같은 거래를 두 번 넣을 수 없다.
+--   import_batch_id     어느 적재 작업에서 들어왔는가 (kaw_ledger_import_batch 참조)
+--   source / source_file / source_row   원본 위치. **신원이 아니라 참고용**이다.
+--
+-- **왜 source_row 를 신원으로 쓰지 않는가 (실측):**
+-- 미래에셋 export 는 둘 다 최신순이다 — DC 매매내역은 row 4 가 2026-10-01, row 456 이
+-- 2025-05-14 다. 즉 거래가 하나 추가되면 **기존 행 번호가 전부 밀린다.** 재export 하면
+-- 같은 체결이 다른 번호를 받으므로 (file, row) 는 재적재 시 중복을 만든다.
+-- 사용자가 직접 보완한 10 행은 source_row 가 아예 없다.
+--
+-- 그래서 fingerprint 는 **내용 기반**이다 (src/lib/kaw/ledger.ts transactionFingerprint):
+--   source | 계좌 | 종목 | 매매구분 | 수량 | 단가 | 금액 | 거래일 | 결제일 | 동일건순번
+-- 마지막 "동일건순번"이 필요한 이유도 실측이다 — IRP 에 내용이 완전히 같은 분할체결이
+-- 있다(2026-03-25 0072R0 1주 2건, 2026-08-28 438080 1주 3건). 순번이 없으면 5건이
+-- 2건으로 뭉개진다.
+--
 -- 실행: Supabase 대시보드 → SQL Editor 에 이 파일 전체를 붙여넣고 Run. idempotent 다.
 --       001 → 002 → 003 → 004 순서. 되돌리려면 `004_transaction_ledger_rollback.sql`.
+--
+-- 개정: provenance(import_batch_id / source_fingerprint)와 적재 이력 테이블은 **최초
+--       적용 전에** 이 파일에 추가됐다. 004 는 아직 production 에 적용된 적이 없으므로
+--       별도 패치 마이그레이션을 만들지 않고 이 파일을 고쳤다.
 -- ─────────────────────────────────────────────────────────────────────────────
+
+-- ── 0. 적재 배치 — "이 거래들이 언제 어디서 들어왔나" ──────────────────────
+-- 미래에셋 Excel / KIS API / 수동 보정이 모두 같은 원장에 쌓이므로, 묶음 단위로
+-- 출처와 검증 결과를 남긴다. 나중에 "이 batch 만 되돌리기"도 이 id 로 할 수 있다.
+create table if not exists public.kaw_ledger_import_batch (
+  id              text        not null,
+  family_code     text        not null,
+  profile         text        not null,
+
+  -- 'verified_dataset_v1' | 'kis_api' | 'manual' | ...
+  source_kind     text        not null,
+  -- 데이터셋 파일명·버전이나 API 조회 범위 등 사람이 읽을 출처 설명
+  source_label    text,
+  -- 적재한 데이터의 지문(파일 해시 등). 같은 입력을 두 번 넣었는지 눈으로 확인할 때 쓴다.
+  source_checksum text,
+
+  inserted_count  integer     not null default 0,
+  -- 이미 같은 fingerprint 가 있어 건너뛴 건수. 재적재하면 여기가 늘고 inserted 는 0 이다.
+  skipped_count   integer     not null default 0,
+  -- 적재 전 게이트 결과 전문 (verifyDataset 결과). 나중에 왜 통과시켰는지 추적한다.
+  verification    jsonb,
+  actor           text        not null,
+  created_at      timestamptz not null default now(),
+
+  constraint kaw_ledger_import_batch_pkey primary key (family_code, profile, id)
+);
+
+comment on table public.kaw_ledger_import_batch is
+  '원장 적재 묶음. 미래에셋 Excel / KIS API / 수동 보정이 같은 원장에 들어오므로 출처와 검증 결과를 묶음 단위로 남긴다. verification 에는 적재 전 게이트 결과 전문이 들어간다.';
 
 -- ── 1. 거래 원장 — 개별 실제 체결 ───────────────────────────────────────────
 create table if not exists public.kaw_transaction_ledger (
@@ -93,14 +147,22 @@ create table if not exists public.kaw_transaction_ledger (
 
   -- 어디서 온 데이터인가. 나중에 KIS API 적재가 들어와도 같은 테이블에 다른 source 로 쌓는다.
   source              text        not null,
+  -- 원본 위치. **신원이 아니라 참고용**이다 (재export 하면 행 번호가 밀린다 — 헤더 주석 참고).
   source_file         text,
   source_row          integer,
+  -- 이 체결의 **안정적 신원**. 같은 거래를 두 번 넣는 것을 DB 레벨에서 막는다.
+  source_fingerprint  text        not null,
+  -- 어느 적재 작업에서 들어왔는가
+  import_batch_id     text,
 
   created_at          timestamptz not null default now(),
   updated_at          timestamptz not null default now(),
 
   constraint kaw_transaction_ledger_pkey
     primary key (family_code, profile, id),
+  -- **중복 적재 방지의 핵심.** 같은 데이터셋을 두 번 import 해도 2회차는 전부 충돌한다.
+  constraint kaw_transaction_ledger_fingerprint_uq
+    unique (family_code, profile, source_fingerprint),
   constraint kaw_transaction_ledger_account_chk
     check (account_type in ('retirement', 'isa', 'pension', 'irp')),
   constraint kaw_transaction_ledger_side_chk
@@ -118,6 +180,11 @@ comment on column public.kaw_transaction_ledger.event_date is
 comment on column public.kaw_transaction_ledger.post_quantity is
   '증권사가 보고한 거래 후 보유수량. 보고하지 않는 계좌는 null 이며 0 으로 채우지 않는다.';
 
+comment on column public.kaw_transaction_ledger.source_fingerprint is
+  '체결의 안정적 신원 (source|계좌|종목|매매구분|수량|단가|금액|거래일|결제일|동일건순번). source_row 는 재export 때 밀리므로 신원으로 쓰지 않는다. UNIQUE 제약이 중복 적재를 막는다.';
+
+create index if not exists kaw_transaction_ledger_batch_idx
+  on public.kaw_transaction_ledger (family_code, profile, import_batch_id);
 create index if not exists kaw_transaction_ledger_lookup_idx
   on public.kaw_transaction_ledger (family_code, profile, account_type, event_date desc);
 create index if not exists kaw_transaction_ledger_ticker_idx
@@ -263,12 +330,14 @@ create index if not exists kaw_ledger_audit_target_idx
 -- ── 보안 (001/002/003 과 동일) ──────────────────────────────────────────────
 -- RLS 를 켜고 정책을 하나도 만들지 않는다 → anon/authenticated 는 전부 차단된다.
 -- service_role 은 RLS 를 우회하므로 Worker 만 읽고 쓸 수 있다.
+alter table public.kaw_ledger_import_batch         enable row level security;
 alter table public.kaw_transaction_ledger          enable row level security;
 alter table public.kaw_transaction_correction      enable row level security;
 alter table public.kaw_transaction_event_override  enable row level security;
 alter table public.kaw_rebalance_event             enable row level security;
 alter table public.kaw_ledger_audit                enable row level security;
 
+revoke all on public.kaw_ledger_import_batch        from anon, authenticated;
 revoke all on public.kaw_transaction_ledger         from anon, authenticated;
 revoke all on public.kaw_transaction_correction     from anon, authenticated;
 revoke all on public.kaw_transaction_event_override from anon, authenticated;
@@ -277,6 +346,7 @@ revoke all on public.kaw_ledger_audit               from anon, authenticated;
 
 -- 원장은 import 로만 들어온다. 정정은 overlay 이므로 update 권한을 주지 않는다
 -- (재import 시 충돌 해결을 위해 upsert 가 필요하면 그때 열어도 늦지 않다).
+grant select, insert         on public.kaw_ledger_import_batch        to service_role;
 grant select, insert         on public.kaw_transaction_ledger         to service_role;
 grant select, insert, update, delete on public.kaw_transaction_correction     to service_role;
 grant select, insert, update, delete on public.kaw_transaction_event_override to service_role;
@@ -345,6 +415,16 @@ create trigger kaw_rebalance_event_touch
 -- select account_type, count(distinct event_date) from public.kaw_transaction_ledger
 --  where family_code = '<CODE>' and profile = '<PROFILE>' group by 1 order by 1;
 --
--- -- (f) 추정 날짜 비율 (UI 신뢰도 표시의 근거)
+-- -- (f) 중복 적재가 없는가 — fingerprint 당 1행이어야 한다 (0행이 정상)
+-- select source_fingerprint, count(*) from public.kaw_transaction_ledger
+--  where family_code = '<CODE>' and profile = '<PROFILE>'
+--  group by 1 having count(*) > 1;
+--
+-- -- (g) 적재 배치 이력 — 재적재하면 inserted 0 / skipped 463 인 행이 하나 더 생긴다
+-- select id, source_kind, source_label, inserted_count, skipped_count, created_at
+--   from public.kaw_ledger_import_batch
+--  where family_code = '<CODE>' and profile = '<PROFILE>' order by created_at desc;
+--
+-- -- (h) 추정 날짜 비율 (UI 신뢰도 표시의 근거)
 -- select trade_date_evidence, count(*) from public.kaw_transaction_ledger
 --  where family_code = '<CODE>' and profile = '<PROFILE>' group by 1 order by 2 desc;

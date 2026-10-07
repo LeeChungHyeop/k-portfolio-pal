@@ -21,7 +21,8 @@
 
 import { ACCOUNT_IDS, type AccountId } from "./constants";
 import {
-  defaultEventId, replayFinalHoldings, resolveEvents,
+  assignFingerprints, defaultEventId, findDuplicateFingerprints,
+  replayFinalHoldings, resolveEvents,
   type LedgerTransaction, type RebalanceEventRow, type TradeSide,
 } from "./ledger";
 
@@ -127,7 +128,8 @@ export function parseVerifiedDataset(raw: unknown): VerifiedDataset {
   const v = (d.validation ?? {}) as Record<string, unknown>;
   return {
     schemaVersion: numOrNull(d.schemaVersion) ?? 0,
-    transactions,
+    // 적재 신원(fingerprint)을 여기서 채워둔다 — 파서를 거친 거래는 항상 신원을 갖는다.
+    transactions: assignFingerprints(transactions),
     events,
     tickerMap: (d.tickerMap ?? {}) as Record<string, string>,
     strategyStartDates: (d.strategyStartDates ?? {}) as Record<string, string>,
@@ -247,6 +249,33 @@ export function verifyDataset(d: VerifiedDataset): DatasetCheck[] {
   const inEvents = events.reduce((s, e) => s + e.lines.length, 0);
   add("모든 거래가 이벤트에 1회씩", inEvents === d.transactions.length,
     `${inEvents} / ${d.transactions.length}`);
+
+  // 9. 적재 신원이 전부 있고 서로 겹치지 않는가.
+  //    겹치면 DB 의 UNIQUE 제약에 걸려 적재가 중간에 깨진다 — 넣기 전에 잡는다.
+  const missingFp = d.transactions.filter((t) => !t.sourceFingerprint);
+  add("모든 거래에 fingerprint", missingFp.length === 0,
+    missingFp.length ? `${missingFp.length}건 누락` : `${d.transactions.length}건`);
+  const dupFp = findDuplicateFingerprints(d.transactions);
+  add("fingerprint 중복 없음", dupFp.length === 0,
+    dupFp.length
+      ? dupFp.slice(0, 3).map((x) => `${x.fingerprint} ×${x.ids.length}`).join(" | ")
+      : `${new Set(d.transactions.map((t) => t.sourceFingerprint)).size}개 유일`);
+
+  // 10. **멱등성** — 같은 입력을 다시 처리해도 신원이 똑같이 나오는가.
+  //     여기가 흔들리면 재적재 때 같은 거래가 새 신원으로 들어가 중복이 된다.
+  const again = assignFingerprints(d.transactions);
+  const sameFp = again.every(
+    (t, i) => t.sourceFingerprint === d.transactions[i].sourceFingerprint,
+  );
+  add("fingerprint 재계산 멱등", sameFp,
+    sameFp ? "동일 입력 → 동일 신원" : "재계산 결과가 달라졌다");
+
+  // 11. 입력 순서가 바뀌어도 같은 신원이 나오는가 (적재 순서에 의존하지 않는다).
+  const shuffled = assignFingerprints([...d.transactions].reverse());
+  const byId = new Map(shuffled.map((t) => [t.id, t.sourceFingerprint]));
+  const orderStable = d.transactions.every((t) => byId.get(t.id) === t.sourceFingerprint);
+  add("입력 순서와 무관", orderStable,
+    orderStable ? "역순 입력도 동일 신원" : "입력 순서에 따라 신원이 달라진다");
 
   return checks;
 }

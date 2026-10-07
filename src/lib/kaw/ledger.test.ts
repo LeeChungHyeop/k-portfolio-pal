@@ -15,7 +15,10 @@ import {
   splitEventId,
   valuateHoldings,
   INTRA_DAY_ROW_ORDER,
+  assignFingerprints,
   compareIntraDayOrder,
+  findDuplicateFingerprints,
+  transactionFingerprint,
   type LedgerTransaction,
   type TradeSide,
 } from "./ledger";
@@ -557,5 +560,79 @@ describe("일중 거래 순서 — source 별로 방향이 다르다", () => {
     expect(may.lines.map((l) => l.effective.id)).toEqual(["t1", "t2"]);
     expect(may.lines.every((l) => l.afterQuantity >= 0)).toBe(true);
     expect(replayFinalHoldings(list)[ACC]).toEqual({});
+  });
+});
+
+// ── 중복 적재 방지 ──────────────────────────────────────────────────────────
+describe("fingerprint — 체결의 안정적 신원", () => {
+  it("내용이 같으면 같은 신원, 다르면 다른 신원", () => {
+    const a = tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "a" });
+    const b = tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "b" });
+    const c = tx("2026-01-05", T_A, "buy", 11, 1_000, { id: "c" });
+    expect(transactionFingerprint(a)).toBe(transactionFingerprint(b));
+    expect(transactionFingerprint(a)).not.toBe(transactionFingerprint(c));
+  });
+
+  it("source_row 는 신원에 들어가지 않는다 (재export 하면 밀리는 값이다)", () => {
+    const a = tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "a", sourceRow: 5 });
+    const b = tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "b", sourceRow: 999 });
+    expect(transactionFingerprint(a)).toBe(transactionFingerprint(b));
+  });
+
+  it("계좌가 다르면 같은 내용이어도 다른 신원이다", () => {
+    const a = tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "a" });
+    const b = tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "b", accountId: ACC2 });
+    expect(transactionFingerprint(a)).not.toBe(transactionFingerprint(b));
+  });
+
+  it("내용이 완전히 같은 분할체결은 순번으로 구분된다 (뭉개지지 않는다)", () => {
+    // 실제로 IRP 에 이런 체결이 있다 — 2026-08-28 438080 1주 매수 3건.
+    const list = [
+      tx("2026-08-28", T_A, "buy", 1, 14_050, { id: "s1", sourceRow: 10 }),
+      tx("2026-08-28", T_A, "buy", 1, 14_050, { id: "s2", sourceRow: 11 }),
+      tx("2026-08-28", T_A, "buy", 1, 14_050, { id: "s3", sourceRow: 12 }),
+    ];
+    const fps = assignFingerprints(list).map((t) => t.sourceFingerprint);
+    expect(new Set(fps).size).toBe(3);
+    expect(findDuplicateFingerprints(assignFingerprints(list))).toEqual([]);
+  });
+
+  it("같은 입력을 다시 처리해도 신원이 같다 (멱등)", () => {
+    const list = [
+      tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "a", sourceRow: 3 }),
+      tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "b", sourceRow: 4 }),
+      tx("2026-02-05", T_B, "sell", 2, 500, { id: "c", sourceRow: 1 }),
+    ];
+    const first = assignFingerprints(list);
+    const second = assignFingerprints(list);
+    expect(second.map((t) => t.sourceFingerprint)).toEqual(first.map((t) => t.sourceFingerprint));
+  });
+
+  it("입력 순서가 바뀌어도 같은 거래는 같은 신원을 받는다", () => {
+    const list = [
+      tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "a", sourceRow: 3 }),
+      tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "b", sourceRow: 4 }),
+      tx("2026-02-05", T_B, "sell", 2, 500, { id: "c", sourceRow: 1 }),
+    ];
+    const forward = new Map(assignFingerprints(list).map((t) => [t.id, t.sourceFingerprint]));
+    const reversed = new Map(
+      assignFingerprints([...list].reverse()).map((t) => [t.id, t.sourceFingerprint]),
+    );
+    for (const id of ["a", "b", "c"]) expect(reversed.get(id)).toBe(forward.get(id));
+  });
+
+  it("assignFingerprints 는 입력 객체를 변형하지 않는다", () => {
+    const one = tx("2026-01-05", T_A, "buy", 10, 1_000, { id: "a" });
+    assignFingerprints([one]);
+    expect(one.sourceFingerprint).toBeUndefined();
+  });
+
+  it("findDuplicateFingerprints 는 겹치는 신원을 찾아낸다", () => {
+    const dup = [
+      { ...tx("2026-01-05", T_A, "buy", 1, 100, { id: "a" }), sourceFingerprint: "same" },
+      { ...tx("2026-01-05", T_A, "buy", 1, 100, { id: "b" }), sourceFingerprint: "same" },
+      { ...tx("2026-01-05", T_A, "buy", 1, 100, { id: "c" }), sourceFingerprint: "other" },
+    ];
+    expect(findDuplicateFingerprints(dup)).toEqual([{ fingerprint: "same", ids: ["a", "b"] }]);
   });
 });

@@ -72,7 +72,16 @@ export interface LedgerTransaction {
   postQuantity: number | null;
   source: string;
   sourceFile?: string | null;
+  /**
+   * 원본 파일의 행 번호. **신원이 아니라 참고용 + 일중 순서용**이다.
+   * 증권사 export 가 최신순이라 거래가 추가되면 기존 행 번호가 전부 밀린다
+   * (`transactionFingerprint` 주석 참고).
+   */
   sourceRow?: number | null;
+  /** 안정적 신원. 적재 시 `transactionFingerprint` 로 계산해 넣는다. */
+  sourceFingerprint?: string;
+  /** 어느 적재 작업에서 들어왔는가 */
+  importBatchId?: string | null;
 }
 
 /** 사용자 정정 overlay. 원본을 덮지 않는다 — 유효값 = corrected ?? 원본. */
@@ -277,6 +286,94 @@ export function replayFinalHoldings(
   }
   for (const id of Object.keys(byAccount)) byAccount[id] = compactHoldings(byAccount[id]);
   return byAccount;
+}
+
+// ── 중복 적재 방지: 체결의 안정적 신원 ─────────────────────────────────────
+//
+// 같은 원장에 미래에셋 Excel / KIS API / 수동 보정이 모두 들어온다. 같은 거래를 두 번
+// 넣지 않으려면 파일 위치가 아니라 **그 체결 자체**를 가리키는 신원이 필요하다.
+//
+// **`sourceRow` 를 쓰지 않는 이유 (실측):** 미래에셋 export 는 둘 다 최신순이다 —
+// DC 매매내역은 row 4 가 2026-10-01, row 456 이 2025-05-14 다. 거래가 하나 추가되면
+// 기존 행 번호가 전부 밀리므로, 재export 한 같은 체결이 다른 번호를 받는다.
+// 사용자가 직접 보완한 10 행은 `sourceRow` 가 아예 없기도 하다.
+//
+// **`occurrence`(동일건 순번)가 필요한 이유 (실측):** 내용이 완전히 같은 분할체결이
+// 실제로 있다 — IRP 2026-03-25 에 `0072R0` 1주 매수 2건, 2026-08-28 에 `438080`
+// 1주 매수 3건. 순번이 없으면 5건이 2건으로 뭉개진다.
+//
+// 해시가 아니라 **사람이 읽을 수 있는 문자열**로 둔다. DB 에서 눈으로 대조할 수 있고
+// 해시 충돌을 걱정할 필요도 없다.
+
+/** fingerprint 의 필드 구분자. 종목명·메모 같은 자유 문자열은 넣지 않으므로 충돌하지 않는다. */
+const FP_SEP = "|";
+
+/**
+ * 체결 1건의 안정적 신원.
+ *
+ * `occurrence` 는 **내용이 완전히 같은 체결들 사이의 순번**이다(0부터).
+ * 한 건만 있으면 0 이고, 보통은 `assignFingerprints` 가 계산해 넣는다.
+ */
+export function transactionFingerprint(
+  tx: Pick<LedgerTransaction,
+    "source" | "accountId" | "ticker" | "side" | "quantity" | "price" | "amount"
+    | "tradeDate" | "settlementDate">,
+  occurrence = 0,
+): string {
+  return [
+    tx.source,
+    tx.accountId,
+    tx.ticker,
+    tx.side,
+    tx.quantity,
+    tx.price,
+    tx.amount,
+    tx.tradeDate ?? "",
+    tx.settlementDate ?? "",
+    occurrence,
+  ].join(FP_SEP);
+}
+
+/**
+ * 거래 목록에 fingerprint 를 채워 돌려준다. **입력 객체를 변형하지 않는다.**
+ *
+ * 내용이 같은 체결이 여러 건이면 순번을 0,1,2… 로 매긴다. 순번 순서는
+ * `compareIntraDayOrder` 가 정하는 시간순이라 같은 입력에 대해 항상 같다.
+ *
+ * 한계(알고 쓴다): 증권사가 나중에 **같은 날 내용까지 똑같은 체결을 추가로** 내보내면
+ * 그 그룹의 순번이 밀릴 수 있다. 그 경우 재적재는 조용히 중복을 만들지 않고 건수
+ * 불일치로 드러난다 — import 리포트가 inserted/skipped 를 항상 같이 보여주는 이유다.
+ */
+export function assignFingerprints(
+  transactions: readonly LedgerTransaction[],
+): LedgerTransaction[] {
+  const ordered = [...transactions].sort(
+    (a, b) => a.eventDate.localeCompare(b.eventDate) || compareIntraDayOrder(a, b),
+  );
+  const seen = new Map<string, number>();
+  const fpById = new Map<string, string>();
+  for (const tx of ordered) {
+    const base = transactionFingerprint(tx, 0);
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    fpById.set(tx.id, transactionFingerprint(tx, n));
+  }
+  return transactions.map((tx) => ({ ...tx, sourceFingerprint: fpById.get(tx.id)! }));
+}
+
+/** fingerprint 가 겹치는 거래들 (0건이어야 정상). 적재 전 게이트가 쓴다. */
+export function findDuplicateFingerprints(
+  transactions: readonly LedgerTransaction[],
+): { fingerprint: string; ids: string[] }[] {
+  const byFp = new Map<string, string[]>();
+  for (const tx of transactions) {
+    const fp = tx.sourceFingerprint;
+    if (!fp) continue;
+    byFp.set(fp, [...(byFp.get(fp) ?? []), tx.id]);
+  }
+  return [...byFp.entries()]
+    .filter(([, ids]) => ids.length > 1)
+    .map(([fingerprint, ids]) => ({ fingerprint, ids }));
 }
 
 /**

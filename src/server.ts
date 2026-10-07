@@ -13,6 +13,10 @@ import {
   handleDataGet, handleDataPost, upsertLivePrices, listLivePriceTickers,
   handleSnapshotsGet, writeDailySnapshots, kstTimeString, requireSession,
 } from "./lib/kaw/data-server";
+import {
+  handleLedgerGet, handleLedgerEventPost, handleLedgerAssignPost,
+  handleLedgerCorrectPost, handleLedgerAuditGet,
+} from "./lib/kaw/ledger-server";
 
 // Cloudflare Workers environment bindings
 export interface Env {
@@ -263,6 +267,17 @@ export default {
 
     // ── 일별 자산 스냅샷 읽기 (기간 성과용, 세션 토큰 필요) ─────────────────
     if (pathname === "/api/snapshots" && request.method === "GET") return handleSnapshotsGet(request, env);
+
+    // ── 거래 원장 (세션 토큰 필요) ────────────────────────────────────────
+    // 브라우저는 Supabase 에 직접 붙지 않는다 — 기존 /api/data · /api/snapshots 와
+    // 같은 인증 경로만 쓴다. 원장(kaw_transaction_ledger)은 **읽기 전용**이고,
+    // 적재는 scripts/ledger-import.ts 로만 한다(service_role 에 update 권한도 없다).
+    // 사용자가 바꾸는 것은 전부 overlay 다: 정정 / 소속 이벤트 / 메모·태그·숨김.
+    if (pathname === "/api/ledger" && request.method === "GET") return handleLedgerGet(request, env);
+    if (pathname === "/api/ledger/audit" && request.method === "GET") return handleLedgerAuditGet(request, env);
+    if (pathname === "/api/ledger/event" && request.method === "POST") return handleLedgerEventPost(request, env);
+    if (pathname === "/api/ledger/assign" && request.method === "POST") return handleLedgerAssignPost(request, env);
+    if (pathname === "/api/ledger/correct" && request.method === "POST") return handleLedgerCorrectPost(request, env);
 
     // ── TanStack Start app (SSR + static) ───────────────────────────────
     try {
