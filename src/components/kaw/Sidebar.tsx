@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, Wifi, WifiOff, Info } from "lucide-react";
+import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, Wifi, WifiOff, Info, ReceiptText } from "lucide-react";
 import { usePortfolioStore, syncNow, getOrDefaultLibrary, formatKRW } from "@/lib/kaw/store";
 import { type FamilyData } from "@/lib/kaw/auth";
 import { useKisPriceContext, type TickerMeta } from "@/lib/kaw/KisPriceContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
-export type Page = "dashboard" | "dashboard-old" | "compare" | "retirement" | "isa" | "pension" | "irp" | "settings";
+export type Page = "dashboard" | "dashboard-old" | "compare" | "ledger" | "retirement" | "isa" | "pension" | "irp" | "settings";
 
 // 빌드 시점에 vite.config.ts가 baking한 실제 커밋 해시/일시 (import.meta.env.VITE_* — build 시점 값이라 항상 정확함)
 const BUILD_TIME = (import.meta.env.VITE_BUILD_TIME as string | undefined) ?? "";
@@ -31,6 +31,9 @@ const NAV = [
   { id: "isa"        as Page, label: "ISA계좌",     icon: PiggyBank,       color: "text-emerald-500" },
   { id: "pension"    as Page, label: "연금저축펀드", icon: TrendingUp,     color: "text-amber-500" },
   { id: "irp"        as Page, label: "IRP계좌",     icon: Briefcase,       color: "text-rose-500" },
+  // 전 계좌의 **실제 체결내역**을 보는 화면. 계좌 화면의 "히스토리" 탭(legacy 리밸런싱
+  // 기록)과는 다른 데이터다 — 그쪽은 그대로 두고 여기는 신규 원장만 본다.
+  { id: "ledger"     as Page, label: "거래 이력",    icon: ReceiptText,     color: "text-cyan-500" },
 ];
 
 interface Props {

@@ -31,7 +31,8 @@ interface ServerTx {
   event_date: string; trade_date_evidence: string;
   fee: number | string | null; tax: number | string | null; post_quantity: number | string | null;
   source: string; source_file: string | null; source_row: number | null;
-  source_fingerprint: string; import_batch_id: string | null;
+  source_fingerprint: string; fingerprint_version: number | null;
+  import_batch_id: string | null;
 }
 
 const num = (v: number | string | null | undefined): number =>
@@ -64,6 +65,7 @@ function toTransaction(r: ServerTx): LedgerTransaction {
     sourceFile: r.source_file,
     sourceRow: r.source_row,
     sourceFingerprint: r.source_fingerprint,
+    fingerprintVersion: r.fingerprint_version ?? undefined,
     importBatchId: r.import_batch_id,
   };
 }

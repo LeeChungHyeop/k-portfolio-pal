@@ -6,6 +6,7 @@ import { LegacyDashboard } from "@/components/kaw/LegacyDashboard";
 import { IndexComparison } from "@/components/kaw/IndexComparison";
 import { AccountPage } from "@/components/kaw/AccountPage";
 import { SettingsPage } from "@/components/kaw/SettingsPage";
+import { LedgerPage } from "@/components/kaw/LedgerPage";
 
 import { AuthGate } from "@/components/kaw/AuthGate";
 import { ProfileSelect } from "@/components/kaw/ProfileSelect";
@@ -189,6 +190,7 @@ export function App({ forcedDemoProfileId }: { forcedDemoProfileId?: string } = 
         {allowedPage === "dashboard"     && <Dashboard onNavigate={navigate} />}
         {allowedPage === "dashboard-old" && <LegacyDashboard onNavigate={navigate} />}
         {allowedPage === "compare"    && <IndexComparison />}
+        {allowedPage === "ledger"     && <LedgerPage />}
         {allowedPage === "retirement" && <AccountPage accountId="retirement" />}
         {allowedPage === "isa"        && <AccountPage accountId="isa" />}
         {allowedPage === "pension"    && <AccountPage accountId="pension" />}

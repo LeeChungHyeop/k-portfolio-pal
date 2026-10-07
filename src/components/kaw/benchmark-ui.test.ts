@@ -30,9 +30,9 @@ function navBlock(): string {
 describe("사이드바: 내부 페이지는 일반 메뉴가 아니다", () => {
   const nav = navBlock();
 
-  it("NAV 는 대시보드 + 계좌 4개 뿐이다", () => {
+  it("NAV 는 대시보드 + 계좌 4개 + 거래 이력이다", () => {
     const ids = [...nav.matchAll(/id: "([a-z-]+)"/g)].map((m) => m[1]);
-    expect(ids).toEqual(["dashboard", "retirement", "isa", "pension", "irp"]);
+    expect(ids).toEqual(["dashboard", "retirement", "isa", "pension", "irp", "ledger"]);
   });
 
   it("NAV 에 dashboard-old / compare 가 없다", () => {

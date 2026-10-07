@@ -24,7 +24,7 @@ import {
   type VerifiedDataset,
 } from "../src/lib/kaw/verified-transactions";
 import {
-  findDuplicateFingerprints, replayFinalHoldings, resolveEvents,
+  FINGERPRINT_VERSION, findDuplicateFingerprints, replayFinalHoldings, resolveEvents,
 } from "../src/lib/kaw/ledger";
 
 const DATASET_PATH = resolve(process.cwd(), "data/verified-transactions.v1.json");
@@ -139,6 +139,7 @@ function reportIdempotency(rawText: string): boolean {
   const uniq = new Set(fpA).size;
 
   console.log("\n── import idempotency ──────────────────────────────────────");
+  console.log(`  fingerprint 규칙 버전   v${FINGERPRINT_VERSION}`);
   console.log(`  fingerprint 유일 개수   ${uniq} / ${a.transactions.length}`);
   console.log(`  2회 파싱 결과 동일      ${same ? "예" : "아니오"}`);
   console.log(`  => 같은 데이터셋을 다시 import 하면 ${uniq}건 전부 skipped 로 끝난다`);
@@ -192,6 +193,7 @@ async function applyImport(
     source_file: t.sourceFile ?? null,
     source_row: t.sourceRow ?? null,
     source_fingerprint: t.sourceFingerprint,
+    fingerprint_version: t.fingerprintVersion ?? FINGERPRINT_VERSION,
     import_batch_id: batchId,
   }));
 

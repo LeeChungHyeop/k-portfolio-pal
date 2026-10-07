@@ -80,6 +80,8 @@ export interface LedgerTransaction {
   sourceRow?: number | null;
   /** 안정적 신원. 적재 시 `transactionFingerprint` 로 계산해 넣는다. */
   sourceFingerprint?: string;
+  /** 그 신원을 만든 규칙의 버전 (`FINGERPRINT_VERSION`). 규칙이 바뀌면 올라간다. */
+  fingerprintVersion?: number;
   /** 어느 적재 작업에서 들어왔는가 */
   importBatchId?: string | null;
 }
@@ -309,7 +311,31 @@ export function replayFinalHoldings(
 const FP_SEP = "|";
 
 /**
- * 체결 1건의 안정적 신원.
+ * 지금 쓰는 fingerprint 생성 규칙의 버전.
+ *
+ * **규칙이 바뀌면 이 숫자를 올린다.** 앞으로 KIS API 처럼 다른 source 가 들어오면
+ * 중복 판정에 쓸 수 있는 필드가 달라진다 — 예를 들어 KIS 는 주문번호/체결번호를 주므로
+ * 내용 조합 대신 그 번호 하나로 신원을 잡는 편이 정확하다. 그때 v2 규칙을 추가한다.
+ *
+ * 버전은 **fingerprint 문자열 맨 앞에도 들어간다.** 그래서
+ *   - 규칙이 달라진 두 신원이 **우연히 같은 문자열이 되는 일이 없고**,
+ *   - DB 를 보면 어떤 규칙으로 만들어진 행인지 바로 알 수 있고,
+ *   - 재적재 멱등성은 **같은 버전끼리만** 판정된다.
+ *
+ * 규칙을 바꿀 때의 절차(의도적으로 번거롭게 둔다):
+ *   1. 새 버전 함수를 추가하고 `FINGERPRINT_VERSION` 을 올린다.
+ *   2. 기존 행의 fingerprint 를 다시 계산해 넣는 마이그레이션을 쓴다
+ *      (원장 자체는 immutable 이지만 **신원 컬럼 재계산은 내용 변경이 아니다** —
+ *       같은 체결을 가리키는 이름만 바꾸는 것이다).
+ *   3. 섞인 상태로 두지 않는다. 한 profile 안에 두 버전이 공존하면 같은 거래가
+ *      다른 신원으로 두 번 들어갈 수 있다.
+ */
+export const FINGERPRINT_VERSION = 1;
+
+/**
+ * 체결 1건의 안정적 신원 (v1 규칙).
+ *
+ * v1 = `v1 | source | 계좌 | 종목 | 매매구분 | 수량 | 단가 | 금액 | 거래일 | 결제일 | 순번`
  *
  * `occurrence` 는 **내용이 완전히 같은 체결들 사이의 순번**이다(0부터).
  * 한 건만 있으면 0 이고, 보통은 `assignFingerprints` 가 계산해 넣는다.
@@ -319,8 +345,10 @@ export function transactionFingerprint(
     "source" | "accountId" | "ticker" | "side" | "quantity" | "price" | "amount"
     | "tradeDate" | "settlementDate">,
   occurrence = 0,
+  version: number = FINGERPRINT_VERSION,
 ): string {
   return [
+    `v${version}`,
     tx.source,
     tx.accountId,
     tx.ticker,
@@ -332,6 +360,12 @@ export function transactionFingerprint(
     tx.settlementDate ?? "",
     occurrence,
   ].join(FP_SEP);
+}
+
+/** fingerprint 문자열에서 생성 규칙 버전을 읽는다. 모양이 아니면 null. */
+export function fingerprintVersionOf(fingerprint: string | undefined): number | null {
+  const m = /^v(\d+)\|/.exec(fingerprint ?? "");
+  return m ? Number(m[1]) : null;
 }
 
 /**
@@ -358,7 +392,11 @@ export function assignFingerprints(
     seen.set(base, n + 1);
     fpById.set(tx.id, transactionFingerprint(tx, n));
   }
-  return transactions.map((tx) => ({ ...tx, sourceFingerprint: fpById.get(tx.id)! }));
+  return transactions.map((tx) => ({
+    ...tx,
+    sourceFingerprint: fpById.get(tx.id)!,
+    fingerprintVersion: FINGERPRINT_VERSION,
+  }));
 }
 
 /** fingerprint 가 겹치는 거래들 (0건이어야 정상). 적재 전 게이트가 쓴다. */

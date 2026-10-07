@@ -63,6 +63,8 @@
 -- 그래서 특정 파일에 종속되지 않는 신원과 적재 이력을 함께 둔다.
 --
 --   source_fingerprint  그 체결의 **안정적 신원**. UNIQUE 라서 같은 거래를 두 번 넣을 수 없다.
+--   fingerprint_version 그 신원을 만든 규칙의 버전. KIS API 등 다른 source 가 들어오면
+--                       중복 판정 규칙이 달라질 수 있어서 둔다(문자열 맨 앞에도 들어간다).
 --   import_batch_id     어느 적재 작업에서 들어왔는가 (kaw_ledger_import_batch 참조)
 --   source / source_file / source_row   원본 위치. **신원이 아니라 참고용**이다.
 --
@@ -152,6 +154,11 @@ create table if not exists public.kaw_transaction_ledger (
   source_row          integer,
   -- 이 체결의 **안정적 신원**. 같은 거래를 두 번 넣는 것을 DB 레벨에서 막는다.
   source_fingerprint  text        not null,
+  -- 그 신원을 만든 **규칙의 버전**. KIS API 처럼 다른 source 가 들어오면 중복 판정에 쓸
+  -- 필드가 달라지므로(주문번호/체결번호 등) 규칙을 바꿀 수 있어야 한다. 버전은
+  -- fingerprint 문자열 맨 앞("v1|...")에도 들어가서 서로 다른 규칙의 신원이 우연히
+  -- 같아지지 않는다. 규칙을 바꾸면 기존 행을 재계산하는 마이그레이션을 같이 쓴다.
+  fingerprint_version integer     not null default 1,
   -- 어느 적재 작업에서 들어왔는가
   import_batch_id     text,
 
@@ -181,7 +188,9 @@ comment on column public.kaw_transaction_ledger.post_quantity is
   '증권사가 보고한 거래 후 보유수량. 보고하지 않는 계좌는 null 이며 0 으로 채우지 않는다.';
 
 comment on column public.kaw_transaction_ledger.source_fingerprint is
-  '체결의 안정적 신원 (source|계좌|종목|매매구분|수량|단가|금액|거래일|결제일|동일건순번). source_row 는 재export 때 밀리므로 신원으로 쓰지 않는다. UNIQUE 제약이 중복 적재를 막는다.';
+  '체결의 안정적 신원 (v1: v1|source|계좌|종목|매매구분|수량|단가|금액|거래일|결제일|동일건순번). source_row 는 재export 때 밀리므로 신원으로 쓰지 않는다. UNIQUE 제약이 중복 적재를 막는다.';
+comment on column public.kaw_transaction_ledger.fingerprint_version is
+  'source_fingerprint 를 만든 규칙의 버전. 규칙이 바뀌면(예: KIS API 의 체결번호 기반 v2) 올리고 기존 행을 재계산한다. 한 profile 안에 두 버전이 섞이면 같은 거래가 다른 신원으로 두 번 들어갈 수 있으므로 섞어두지 않는다.';
 
 create index if not exists kaw_transaction_ledger_batch_idx
   on public.kaw_transaction_ledger (family_code, profile, import_batch_id);
@@ -419,6 +428,10 @@ create trigger kaw_rebalance_event_touch
 -- select source_fingerprint, count(*) from public.kaw_transaction_ledger
 --  where family_code = '<CODE>' and profile = '<PROFILE>'
 --  group by 1 having count(*) > 1;
+--
+-- -- (f-2) fingerprint 규칙 버전이 섞여 있지 않은가 (1행이어야 한다)
+-- select fingerprint_version, count(*) from public.kaw_transaction_ledger
+--  where family_code = '<CODE>' and profile = '<PROFILE>' group by 1;
 --
 -- -- (g) 적재 배치 이력 — 재적재하면 inserted 0 / skipped 463 인 행이 하나 더 생긴다
 -- select id, source_kind, source_label, inserted_count, skipped_count, created_at
