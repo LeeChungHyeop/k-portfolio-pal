@@ -97,9 +97,17 @@ Phase 1 과 2 는 한 커밋에 함께 들어갔다(스키마와 그 스키마�
 2. **과거 목표비중으로 거래를 추론하지 않는다.** 스키마에도 도메인 모델에도
    목표비중 필드가 없다. "당시 목표가 40%였으므로 이렇게 리밸런싱했을 것"이라는
    계산 경로를 만들지 않는다.
-3. **`kaw_transaction_ledger` 는 immutable.** service_role 에서 UPDATE/DELETE/TRUNCATE 를
-   **회수**한다(단순히 grant 하지 않는 것으로는 부족하다 — 아래 "권한 모델" 참고).
-   적재는 `scripts/ledger-import.ts` 로만 한다.
+3. **`kaw_transaction_ledger` 는 immutable.** 단 그 범위는 **`service_role`**이다 —
+   migration 004 가 service_role 에서 UPDATE/DELETE/TRUNCATE 를 회수한다(단순히
+   grant 하지 않는 것으로는 부족하다). 따라서 앱·Worker·스크립트 경로에서는
+   원본을 바꾸거나 지울 수 없다. 적재는 `scripts/ledger-import.ts` 로만 한다.
+
+   **owner(`postgres`)는 예외다.** SQL Editor 에서는 지울 수 있고, 그것을 권한으로
+   막을 방법도 없다(소유자니까). 즉 **"적재하면 테이블 drop 외에는 되돌릴 수
+   없다"는 틀린 말이다.** import batch 단위로 정확히 되돌리는 비상 절차가
+   `docs/ledger-emergency-rollback.md` 에 있다(관리자 전용, 평상시 사용 금지).
+   그 문서가 cascade 로 함께 사라지는 overlay 까지 포함해 설명한다.
+
 4. **거래 정정은 overlay** (`kaw_transaction_correction`). 유효값 = `corrected_* ?? 원본`.
    제외도 삭제가 아니라 `excluded` 플래그다.
 5. **소속 이벤트 변경도 overlay** (`kaw_transaction_event_override`). 병합/분리/이동이
