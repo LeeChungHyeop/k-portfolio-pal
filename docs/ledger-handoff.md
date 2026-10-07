@@ -2,11 +2,19 @@
 
 새 세션에서 이 문서만 읽고 바로 이어받을 수 있도록 쓴 상태 기록이다.
 
-**지금 production DB 에는 아무것도 적용/적재되지 않았다.**
+**거래 원장은 production 에 적재·배포까지 끝났다.** migration 004 적용, 463건 import,
+멱등성 검증, 모바일 읽기 UI 검증이 모두 완료됐다. 상세는 §2 와 §9.
 
-migration 004 최종 리뷰는 **끝났다.** 리뷰에서 나온 차단 이슈(Supabase 기본 권한 때문에
-`service_role` 이 원장·audit 에 UPDATE/DELETE/TRUNCATE 를 그대로 갖는 문제)와 CHECK 2종을
-004 에 반영했다. 다음 작업은 §9 의 **B(사용자가 SQL Editor 에서 004 실행)** 부터다.
+**남은 것은 두 가지뿐이고 둘 다 보류 상태다:**
+
+1. **거래 이력 write smoke test (§9 의 B~F)** — memo / tag / 숨김 / 정정 / 분리·이동.
+   아직 하지 않았다. 숨김·복원만 우연히 검증됐다(§2 참고).
+2. **legacy consumer 전환 (§9 J)** — 아직 시작하지 않았다.
+
+> **다음 우선 작업은 이 둘이 아니다.** 작업 우선순위가 **"대시보드 기간 성과 →
+> 수익 분석 개편"** 으로 옮겨갔다. 거래 원장 쪽은 위 두 항목을 남겨둔 채 **안정된
+> 상태로 멈춰 있다** — production 데이터와 배포는 정상이므로 그대로 두면 된다.
+> 나중에 이어받을 때 §9 의 B 단계부터 보면 된다.
 
 - 브랜치: `feat/historical-performance-reconstruction`
 - 저장소 루트: `k-allweather/app/` (git 명령은 반드시 여기서)
@@ -23,9 +31,21 @@ migration 004 최종 리뷰는 **끝났다.** 리뷰에서 나온 차단 이슈(
 | 3 | fingerprint · provenance / dry-run import / Worker API / 읽기 훅 | `0c10eaf` |
 | 4 | 거래 이력 UI (목록·필터·상세·편집·정정·audit·반응형) | `ccea87b` |
 | — | 이 인수인계 문서 | `e8bbc2c` |
+| 5 | migration 004 권한 교체(전부 회수 후 재부여) + CHECK 2종 | `a434682` |
+| 5 | batch 기록 실패를 드러내고 복구 가능하게 / 쓰기 경로 분리 | `f9e1a0b` |
+| 5 | `process.exit` → `exitCode` (종료코드가 127 로 덮이던 문제) | `7b60a02` |
+| 5 | 긴급 batch 롤백 절차 + 적재 후 검증 스크립트 | `3e2cad6` |
+| 6 | **`compareIntraDayOrder` 를 유효한 전순서로** (입력 순서 의존 버그) | `f8ad88b` |
+| 6 | production import 완료 반영 | `1c85df2` |
+| 7 | `buyCount`/`sellCount` 를 체결 건수 → **종목 수**로 | `acf347a` |
+| 7 | 모바일 상세 뒤로가기 / 다이얼로그 X 가림 수정 | `309523f` |
+| 7 | 모바일 목록 진입 화살표 제거 | `f6c2a66` |
 
 Phase 1 과 2 는 한 커밋에 함께 들어갔다(스키마와 그 스키마를 쓰는 도메인 모델을
 따로 커밋하면 중간 상태가 컴파일되지 않는다).
+
+Phase 5~7 은 production 적용 과정에서 나온 수정이다. 특히 6 은 **적재 후 검증에서
+드러난 실제 버그**였다 — 자세한 내용은 §5.
 
 ### 이 작업 직전의 선행 커밋 (참고)
 
@@ -41,16 +61,56 @@ Phase 1 과 2 는 한 커밋에 함께 들어갔다(스키마와 그 스키마�
 
 ## 2. 현재 production 상태
 
-- **migration 004 미적용.** `kaw_transaction_ledger` 등 신규 테이블이 production 에 없다.
-- **verified transaction 463건 미적재.**
-- legacy `kaw_data.data -> 'history'` 와 그것을 읽는 모듈은 **전부 그대로**다.
-  이번 작업에서 한 줄도 바꾸지 않았다:
-  `snapshot.ts`, `kaw_portfolio_live_view`, `historical-performance.ts`,
-  `benchmark-series.ts`, `backtest.ts`, `AccountPage` 히스토리 탭, `Dashboard`,
-  migrations 001–003.
-- 신규 거래 이력 화면은 `/api/ledger/*` 만 쓴다. migration 미적용 상태에서는 그
-  페이지 안에서만 "거래 원장 기능이 아직 활성화되지 않았습니다" 안내가 뜨고
-  나머지 화면은 평소대로 동작한다.
+**적재·배포 완료 (2026-10-07).**
+
+| 항목 | 상태 |
+|---|---|
+| migration 004 | **적용됨** (사용자가 SQL Editor 에서 실행, 검증 쿼리 통과) |
+| `kaw_transaction_ledger` | **463건 적재됨** |
+| 기본 grouping event | **65** |
+| negative holding | **0** |
+| postQuantity mismatch | **0** (대조 가능 171건) |
+| finalHoldings | 데이터셋과 **완전 일치** |
+| `fingerprint_version` | `1` 단일 |
+| orphan / null `import_batch_id` | **0 / 0** |
+| production 배포 | **정상** — `https://portfolio.hyeobi.workers.dev` |
+
+### import batch 이력
+
+```
+2026-10-07T04:47:36Z  inserted 463 / skipped   0  imp:verified_dataset_v1:2026-10-07T04:47:35.189Z
+2026-10-07T06:29:48Z  inserted   0 / skipped 463  imp:verified_dataset_v1:2026-10-07T06:29:47.300Z
+```
+
+2차 import 로 **멱등성 검증 완료** — 전체 건수 463 유지, 기존 463행의 `import_batch_id`
+는 최초 batch 그대로다. 2차 batch 를 가리키는 거래는 0건이고, 그것이 정상이다
+(재실행 이력일 뿐이다).
+
+### overlay 현황 (write test 전 기준선이 아니다)
+
+```
+kaw_transaction_correction       0
+kaw_transaction_event_override   0
+kaw_rebalance_event              1   ← rev:pension:2026-08-28 (no-op 행)
+kaw_ledger_audit                 3
+```
+
+사용자가 2026-10-07 12:02 에 모바일에서 `2026-08-28 연금저축` 이벤트를 **숨겼다가
+복원**하면서 생긴 것이다. audit 3건(`event_hide` ×2 / `event_restore`)이 append-only
+로 남아 있고, `rebalance_event` 행은 `memo: null, tags: [], hidden: false` 인 **무해한
+no-op** 이다(기본 grouping 과 동일한 상태라 화면에 영향이 없다).
+
+**결과적으로 §9 D단계(숨김/복원)는 실제 production 에서 정상 동작이 확인된 셈이다** —
+행이 생기고, 플래그가 토글되고, 복원되고, audit 가 남았다. 원장은 그대로다.
+이 행을 지울지는 정하지 않았다. 남겨도 무방하고, 다른 이벤트로 테스트하면 간섭이 없다.
+
+### legacy 는 그대로다
+
+legacy `kaw_data.data -> 'history'` 와 그것을 읽는 모듈은 **전부 그대로**다.
+이번 작업에서 한 줄도 바꾸지 않았다:
+`snapshot.ts`, `kaw_portfolio_live_view`, `historical-performance.ts`,
+`benchmark-series.ts`, `backtest.ts`, `AccountPage` 히스토리 탭, `Dashboard`,
+migrations 001-003.
 
 ### 손대지 않는 로컬 작업물
 
@@ -169,7 +229,7 @@ retirement 를 내림차순으로 돌리면 `484790` 이 2026-05-26 에 **-723�
 
 ---
 
-## 6. 신규 DB 구조 (migration 004 — 미적용)
+## 6. 신규 DB 구조 (migration 004 — **적용 완료**)
 
 | 테이블 | 역할 |
 |---|---|
@@ -259,6 +319,21 @@ Rebalance Event. **계좌 화면의 legacy 히스토리 탭은 그대로 두었�
 `useLedger.ts`(훅), `ledger-server.ts`(Worker API),
 `verified-transactions.ts`(파서·게이트),
 `ledger-import-core.ts`(적재 쓰기 경로) + `scripts/ledger-import.ts`(CLI).
+
+### production 적용 후 고친 UI 문제 (2026-10-07)
+
+| 문제 | 수정 | 커밋 |
+|---|---|---|
+| `buyCount`/`sellCount` 가 체결 건수인데 화면은 "매수 N**종목**"으로 표시 | 값을 distinct ticker 수로 변경. `tradeCount` 는 체결 건수 유지 | `acf347a` |
+| 상세 닫기가 불명확 — 공용 `DialogClose` 에 z-index 가 없어 sticky 헤더(z-10) 뒤로 숨고, `absolute` 라 스크롤하면 뷰포트 밖으로 사라짐 | sticky 헤더에 모바일 전용 `← 거래 이력` 추가(탭 영역 36px), 헤더에 `pr-12`, 공용 `DialogClose` 에 `z-20` | `309523f` |
+| 모바일 목록의 진입 화살표가 화면 끝에 붙어 잘려 보임 | 제거. 카드 전체가 이미 탭 대상이라 중복 UI 였다. 데스크톱 표의 화살표는 유지 | `f6c2a66` |
+
+`buyCount` 가 틀렸던 실측 예(수정 전 → 후): 2026-08-28 퇴직연금 매수 **14 → 5**,
+IRP 매수 5 → 2 / 매도 3 → 3, 2026-06-26 ISA 매수 5 → 2.
+`verified-transactions.test.ts` 가 이 세 값을 고정값으로 들고 있다.
+
+**데스크톱에 남은 문제(별건, 미수정):** 본문을 길게 스크롤하면 공용 X 가 같이 밀려
+사라진다. Esc 와 바깥 클릭은 동작한다. 고치려면 X 를 sticky 헤더 안으로 옮기면 된다.
 
 ### import 쓰기 흐름과 partial failure
 
@@ -393,18 +468,38 @@ H. import 후 재검증  ✅ 완료 — 24항목 전부 통과
    달라졌다(DB 순서로 mismatch 12건). `f8ad88b` 에서 고쳤고
    `ledger-order.test.ts` 가 순서 독립성을 고정한다. 상세는 §5 참고.
 
-I. 신규 거래 이력 UI 에서 실제 데이터 육안 검증
-   목록·필터·상세·메모/태그 저장·병합/분리/이동·정정·원본 복귀·audit 가
-   실제로 저장되는지 확인(Phase 4 에서 못 한 write 경로 검증).
+I. 신규 거래 이력 UI 검증
+   I-1. 읽기 검증  ✅ 완료 (2026-10-07, 아이폰 Safari 실기기)
+        목록 / 계좌·기간·매수매도 필터 / 검색 / 상세 / 날짜 추정 배지 /
+        null 은 0 이 아니라 "—" / 모바일 카드 레이아웃 — 전부 기대값과 일치.
+        특히 2026-06-26 ISA 상세에서 같은 종목 연속 거래의
+        991 → 1029 → 1302 → 803 순서가 증권사 거래후잔고와 모두 일치함을 확인했다.
 
-J. 문제가 없으면 legacy consumer 전환 계획 수립
+   I-2. write smoke test (B~F)  ⏸ **보류 — 아직 하지 않았다**
+        memo / tag / correction / split·move 를 실제 UI 에서 돌려보고 DB 로
+        확인하는 단계. 숨김·복원(D)만 §2 의 경위로 우연히 검증됐다.
+        **자동화는 막혀 있다** — production SESSION_SECRET 이 `.dev.vars` 값과
+        달라(Cloudflare 시크릿은 읽기 불가) 테스트 토큰을 만들 수 없고,
+        로컬 dev 서버는 `env` 가 undefined 라 /api 를 서빙하지 못한다(§8-3).
+        production 시크릿 변경·공유·별도 테스트 Worker 는 모두 하지 않기로 했다.
+        → 재개하려면 **사용자가 UI 에서 한 단계씩 조작하고 그때마다 DB 로 확인**하는
+          방식으로 간다. 대상 후보는 정해져 있다:
+            B·C·D: `rev:isa:2026-06-11` (체결 1건 — TIGER 미국S&P500 18주 매수)
+            E     : 그 이벤트의 유일한 거래 `vtx:8245b2c1abf10fdf`
+            F     : `rev:pension:2026-06-26` (체결 3건 — 1건만 떼어내고 복귀)
+
+J. legacy consumer 전환  ⏸ **보류 — 아직 시작하지 않았다**
    snapshot.ts / kaw_portfolio_live_view / historical-performance.ts /
    benchmark-series.ts / backtest.ts 의 보유수량 소스를 원장으로 옮기는 계획.
    **각 소비처마다 전환 전후 수치를 대조한 뒤 하나씩** 옮긴다.
    원장 재생 최종 보유수량 vs 현재 계좌 보유수량 대조가 그 전환의 게이트다.
 ```
 
-**production DB 에 지금 아무 작업도 실행하지 않는다.**
+> **다음 우선 작업은 I-2 도 J 도 아니다.** "대시보드 기간 성과 → 수익 분석 개편"
+> 으로 넘어간다. 거래 원장은 production 데이터와 배포가 모두 정상인 상태로
+> 멈춰 있으므로 그대로 두면 되고, 나중에 위 두 항목만 이어서 하면 된다.
+
+
 
 ---
 
@@ -414,15 +509,22 @@ J. 문제가 없으면 legacy consumer 전환 계획 수립
 cd k-allweather/app
 
 npm run dev                 # http://localhost:8080 (API 는 dev 에서 동작하지 않는다)
-npm test                    # vitest — 547건
+npm test                    # vitest — 676건
 npx tsc --noEmit
 npm run build
 
 npm run ledger:dry-run      # 검증만. DB 에 쓰지 않는다 (기본)
-npm run ledger:dry-run -- --family=<CODE> --profile=<PROFILE>   # DB 읽기 포함
-npm run ledger:import -- --apply --family=<CODE> --profile=<PROFILE>  # 승인 후에만
+npm run ledger:dry-run -- --family=soye --profile=hyeobi    # DB 읽기 포함
+npm run ledger:verify -- --family=soye --profile=hyeobi     # 적재 후 검증(읽기 전용) 24항목
+npm run ledger:import -- --apply --family=soye --profile=hyeobi   # 승인 후에만
 
 npx vitest run src/lib/kaw/ledger-migration.test.ts   # 004 권한 모델 고정 테스트
+npx vitest run src/lib/kaw/ledger-order.test.ts       # 정렬 순서 독립성 고정 테스트
+
+# 배포 (프로젝트 기존 경로 — package.json 에 deploy 스크립트는 없다)
+npm run build && npx wrangler deploy
 ```
 
-게이트 현황: `tsc` 통과 / `build` 통과 / `test` **671건 통과 (18 파일)**.
+게이트 현황: `tsc` 통과 / `build` 통과 / `test` **676건 통과 (18 파일)**.
+
+production 배포: `https://portfolio.hyeobi.workers.dev` — 최신 버전 `ddae2703` (`f6c2a66`).
