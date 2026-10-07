@@ -175,8 +175,11 @@ export interface ResolvedEvent {
   /** 날짜 근거 모음. `broker-order-date` 외의 값이 있으면 추정이 섞인 것이다. */
   dateEvidence: readonly TradeDateEvidence[];
   lines: readonly EventTransactionLine[];
+  /** 체결 **건수**. 같은 종목을 여러 번 사도 그대로 센다. */
   tradeCount: number;
+  /** 매수한 **종목 수**(distinct ticker). 체결 건수가 아니다 — 화면이 "매수 N종목"으로 쓴다. */
   buyCount: number;
+  /** 매도한 **종목 수**(distinct ticker). 체결 건수가 아니다. */
   sellCount: number;
   buyAmount: number;
   sellAmount: number;
@@ -605,17 +608,22 @@ export function resolveEvents(input: ResolveEventsInput): ResolvedEvent[] {
     const date = dates.reduce((a, b) => (a < b ? a : b));
     const dateEnd = dates.reduce((a, b) => (a > b ? a : b));
 
-    let buyCount = 0, sellCount = 0, buyAmount = 0, sellAmount = 0;
+    let buyAmount = 0, sellAmount = 0;
     const pre: Record<string, number> = {};
     const post: Record<string, number> = {};
     const buyByEtf = new Map<string, number>();
+    // **종목 수**다 — 체결 건수가 아니다. 화면이 "매수 N종목"으로 읽히므로
+    // 같은 종목을 하루에 여러 번 사면 1로 센다. 체결 건수는 tradeCount 에 있다.
+    // (실제 예: 2026-08-28 퇴직연금은 매수 체결 14건이지만 종목은 5개다.)
+    const buyTickers = new Set<string>();
+    const sellTickers = new Set<string>();
 
     for (const l of lines) {
       if (l.effective.side === "buy") {
-        buyCount += 1; buyAmount += l.effective.amount;
+        buyTickers.add(l.effective.ticker); buyAmount += l.effective.amount;
         buyByEtf.set(l.effective.etfName, (buyByEtf.get(l.effective.etfName) ?? 0) + l.effective.amount);
       } else {
-        sellCount += 1; sellAmount += l.effective.amount;
+        sellTickers.add(l.effective.ticker); sellAmount += l.effective.amount;
       }
       const t = l.effective.ticker;
       // 한 이벤트에서 같은 종목을 여러 번 거래하면 **처음 before** 와 **마지막 after** 가
@@ -648,8 +656,8 @@ export function resolveEvents(input: ResolveEventsInput): ResolvedEvent[] {
       dateEvidence: evidence,
       lines,
       tradeCount: lines.length,
-      buyCount,
-      sellCount,
+      buyCount: buyTickers.size,
+      sellCount: sellTickers.size,
       buyAmount,
       sellAmount,
       netAmount: buyAmount - sellAmount,

@@ -127,15 +127,37 @@ describe("기본 grouping 이 데이터셋 이벤트와 같다", () => {
     }
   });
 
-  it("이벤트 집계(건수·매수/매도 금액)가 소속 거래와 맞는다", () => {
+  it("이벤트 집계(건수·종목 수·매수/매도 금액)가 소속 거래와 맞는다", () => {
     for (const e of events) {
       const buys = e.lines.filter((l) => l.effective.side === "buy");
       const sells = e.lines.filter((l) => l.effective.side === "sell");
+      // tradeCount 는 **체결 건수**, buyCount/sellCount 는 **종목 수**다.
       expect(e.tradeCount).toBe(e.lines.length);
-      expect(e.buyCount).toBe(buys.length);
-      expect(e.sellCount).toBe(sells.length);
+      expect(e.buyCount).toBe(new Set(buys.map((l) => l.effective.ticker)).size);
+      expect(e.sellCount).toBe(new Set(sells.map((l) => l.effective.ticker)).size);
       expect(e.buyAmount).toBe(buys.reduce((s, l) => s + l.effective.amount, 0));
       expect(e.sellAmount).toBe(sells.reduce((s, l) => s + l.effective.amount, 0));
+      // 종목 수가 체결 건수를 넘을 수는 없다.
+      expect(e.buyCount).toBeLessThanOrEqual(buys.length);
+      expect(e.sellCount).toBeLessThanOrEqual(sells.length);
+    }
+  });
+
+  it("같은 종목을 하루에 여러 번 거래하면 종목 수는 1로 센다 (실측값 고정)", () => {
+    // Phase 4 요구사항은 "매수/매도 종목 수"인데 예전 구현은 체결 건수를 셌다.
+    // 화면 라벨이 "매수 N종목"이라 14건을 14종목으로 보여주고 있었다.
+    const expected: [string, number, number, number][] = [
+      // [eventId, tradeCount, buyCount(종목), sellCount(종목)]
+      ["rev:retirement:2026-08-28", 17, 5, 2],
+      ["rev:irp:2026-08-28", 8, 2, 3],
+      ["rev:isa:2026-06-26", 7, 2, 2],
+    ];
+    for (const [id, trades, buyTickers, sellTickers] of expected) {
+      const e = events.find((x) => x.id === id);
+      expect(e, `${id} 를 찾을 수 없다`).toBeDefined();
+      expect(e!.tradeCount, `${id} tradeCount`).toBe(trades);
+      expect(e!.buyCount, `${id} buyCount(종목)`).toBe(buyTickers);
+      expect(e!.sellCount, `${id} sellCount(종목)`).toBe(sellTickers);
     }
   });
 

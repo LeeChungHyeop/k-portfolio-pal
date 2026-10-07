@@ -60,6 +60,43 @@ function tx(
   };
 }
 
+// ── 매수/매도 종목 수 ───────────────────────────────────────────────────────
+describe("buyCount / sellCount 는 체결 건수가 아니라 종목 수다", () => {
+  // 화면 라벨이 "매수 N종목"이라, 같은 종목을 하루에 여러 번 사면 1로 세야 한다.
+  // 체결 건수는 tradeCount 가 따로 들고 있다.
+  const list = [
+    tx("2026-08-25", T_A, "buy", 3, 10_000),
+    tx("2026-08-25", T_A, "buy", 2, 10_100),   // 같은 종목 추가 매수
+    tx("2026-08-25", T_B, "buy", 1, 2_000),
+    tx("2026-08-25", T_B, "sell", 4, 2_100),
+    tx("2026-08-25", T_B, "sell", 1, 2_200),   // 같은 종목 추가 매도
+  ];
+  const e = resolveEvents({ transactions: list })[0];
+
+  it("종목 수로 센다", () => {
+    expect(e.buyCount).toBe(2);   // T_A, T_B
+    expect(e.sellCount).toBe(1);  // T_B
+  });
+
+  it("tradeCount 는 체결 건수 그대로다", () => {
+    expect(e.tradeCount).toBe(5);
+  });
+
+  it("금액은 건별 합계라 영향을 받지 않는다", () => {
+    expect(e.buyAmount).toBe(3 * 10_000 + 2 * 10_100 + 1 * 2_000);
+    expect(e.sellAmount).toBe(4 * 2_100 + 1 * 2_200);
+    expect(e.netAmount).toBe(e.buyAmount - e.sellAmount);
+  });
+
+  it("매수/매도가 아예 없으면 0 이다 (side 필터가 이 값을 쓴다)", () => {
+    const onlyBuy = resolveEvents({
+      transactions: [tx("2026-09-01", T_A, "buy", 1, 100), tx("2026-09-01", T_A, "buy", 2, 100)],
+    })[0];
+    expect(onlyBuy.buyCount).toBe(1);
+    expect(onlyBuy.sellCount).toBe(0);
+  });
+});
+
 // ── 기본 grouping ───────────────────────────────────────────────────────────
 describe("기본 grouping — 동일 계좌 + 동일 거래일", () => {
   const list = [
