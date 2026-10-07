@@ -1,0 +1,50 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 004 되돌리기 — 거래 원장 / 리밸런싱 이벤트 제거
+--
+-- **이 스크립트는 004 가 만든 데이터를 전부 지운다.** 적재한 체결내역과 사용자가 남긴
+-- 메모·태그·정정·변경이력이 함께 사라진다. 실행 전에 반드시 아래 백업을 먼저 뜬다.
+--
+-- 004 는 기존 객체를 하나도 건드리지 않으므로, 이 롤백도 001/002/003 의 테이블·뷰·함수를
+-- 건드리지 않는다. 특히 `kaw_touch_updated_at()` 는 003 이 만들어 쓰고 있으므로
+-- **삭제하지 않는다.** `kaw_data.data -> 'history'`(legacy 이력)도 그대로 남는다.
+--
+-- ── 1단계: 백업 (롤백 전에 반드시 실행하고 결과를 내려받는다) ───────────────
+--
+--   select json_agg(t) from public.kaw_transaction_ledger t;
+--   select json_agg(t) from public.kaw_transaction_correction t;
+--   select json_agg(t) from public.kaw_transaction_event_override t;
+--   select json_agg(t) from public.kaw_rebalance_event t;
+--   select json_agg(t) from public.kaw_ledger_audit t;
+--
+-- 원장(kaw_transaction_ledger)은 저장소의 `data/verified-transactions.v1.json` 에서
+-- 언제든 다시 적재할 수 있다. **되살릴 수 없는 것은 사용자가 직접 만든 overlay 들이다**
+-- (정정·병합/분리·메모·태그·숨김·audit). 위 백업을 건너뛰지 않는다.
+--
+-- ── 2단계: 삭제 ─────────────────────────────────────────────────────────────
+-- 아래 블록의 주석을 풀고 실행한다. 실수로 통째 실행되는 것을 막기 위해 주석 처리해 둔다.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- -- 트리거 (테이블과 함께 사라지지만 명시해 둔다)
+-- drop trigger if exists kaw_rebalance_event_touch            on public.kaw_rebalance_event;
+-- drop trigger if exists kaw_transaction_event_override_touch on public.kaw_transaction_event_override;
+-- drop trigger if exists kaw_transaction_correction_touch     on public.kaw_transaction_correction;
+--
+-- -- 자식(FK) 먼저. kaw_transaction_ledger 를 참조하는 두 overlay 를 먼저 지운다.
+-- drop table if exists public.kaw_transaction_event_override;
+-- drop table if exists public.kaw_transaction_correction;
+-- drop table if exists public.kaw_rebalance_event;
+-- drop table if exists public.kaw_ledger_audit;
+-- drop table if exists public.kaw_transaction_ledger;
+--
+-- -- public.kaw_touch_updated_at() 는 **지우지 않는다** — 003 의
+-- -- kaw_daily_portfolio_snapshots 트리거가 쓰고 있다.
+
+-- ── 3단계: 확인 (0행이어야 한다) ────────────────────────────────────────────
+--
+-- select table_name from information_schema.tables
+--  where table_schema = 'public'
+--    and table_name in ('kaw_transaction_ledger','kaw_transaction_correction',
+--                       'kaw_transaction_event_override','kaw_rebalance_event','kaw_ledger_audit');
+--
+-- -- 003 의 트리거 함수가 살아 있는지 (1행이어야 한다)
+-- select proname from pg_proc where proname = 'kaw_touch_updated_at';
