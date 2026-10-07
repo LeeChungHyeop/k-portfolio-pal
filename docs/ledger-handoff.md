@@ -149,7 +149,16 @@ Phase 1 과 2 는 한 커밋에 함께 들어갔다(스키마와 그 스키마�
 하루 안 방향이 반대**다. 네 조합을 전수 비교해 음수 0건 + 불일치 0/171 인 조합만
 채택했다.
 
-**이 규칙을 바꾸면 `postQuantity` 대조와 holdings replay 가 깨진다.** 구체적으로,
+**이 규칙을 바꾸면 `postQuantity` 대조와 holdings replay 가 깨진다.**
+
+> **2026-10-07 추가 — 비교자는 반드시 유효한 전순서여야 한다.**
+> 위 방향 규칙은 그대로지만, 구현이 행 번호를 **계좌 구분 없이** 비교해
+> 전이성이 깨져 있었다(위반 삼각형 17,190개). `Array.sort` 는 그럴 때
+> 입력 순서에 따라 다른 결과를 내므로, 파일 순서만 우연히 맞았고 DB
+> 조회 순서로는 postQuantity 불일치 12건이 나왔다. `f8ad88b` 에서 사전식
+> 전순서(accountId → source → 방향 적용된 sourceRow → id)로 고쳤다.
+> 새 source 를 추가할 때도 **파일 순서 하나로만 검증하지 말고**
+> `ledger-order.test.ts` 의 여러 입력 순서를 통과하는지 확인한다. 구체적으로,
 retirement 를 내림차순으로 돌리면 `484790` 이 2026-05-26 에 **-723주**가 된다
 (그 날 매수 689+34 와 매도 1381 의 순서가 뒤집히기 때문). 오름차순이면
 658 → 692 → 1381 → 0 으로 이어진다.
@@ -361,16 +370,28 @@ E. reconciliation 재실행  ✅ 완료
 F. 모든 gate 통과 확인  ✅ 완료 (tsc / build / test 590건)
    npx tsc --noEmit / npm run build / npm test
 
-G. 사용자 승인 후 463건 production import
-   npm run ledger:import -- --apply --family=<CODE> --profile=<PROFILE>
-   **승인 없이 실행하지 않는다.**
+G. 463건 production import  ✅ 완료 (2026-10-07)
+   batch  imp:verified_dataset_v1:2026-10-07T04:47:35.189Z
+   inserted 463 / skipped 0
 
-H. import 후 재검증
-   **(2) batch 기록 실패로 비정상 종료했다면** 출력된 INSERT 문을 SQL Editor 에
-   붙여넣어 먼저 복구한다. 그냥 재실행하면 원장의 import_batch_id 가 영구히 끊긴다.
-   transaction 463 / event 65 / 계좌별 건수 / holdings 재생 결과 /
-   kaw_ledger_import_batch 의 inserted·skipped.
-   한 번 더 import 해서 inserted 0 / skipped 463 인지(멱등성) 확인.
+H. import 후 재검증  ✅ 완료 — 24항목 전부 통과
+   npm run ledger:verify -- --family=soye --profile=hyeobi
+   transaction 463 / event 65 / retirement 227 · isa 85 · pension 86 · irp 65 /
+   duplicate fingerprint 0 / negative holding 0 /
+   postQuantity mismatch 0 (대조 가능 171) / finalHoldings 전 계좌 일치 /
+   fingerprint_version [1] / orphan import_batch_id 0 /
+   **id 별 source_fingerprint 변경 0건**
+
+   멱등성 확인(2차 import) ✅
+   batch  imp:verified_dataset_v1:2026-10-07T06:29:47.300Z
+   inserted 0 / skipped 463, 전체 건수 463 그대로, batch 총 2행.
+   기존 463행의 import_batch_id 는 **최초 batch 그대로** — 2차 batch 를
+   가리키는 거래는 0건이고, 그것이 정상이다(재실행 이력일 뿐이다).
+
+   ⚠ 이 단계에서 **정렬 버그**를 찾았다. compareIntraDayOrder 가 계좌 구분 없이
+   sourceRow 를 비교해 전순서가 아니었고, 그래서 입력 순서에 따라 결과가
+   달라졌다(DB 순서로 mismatch 12건). `f8ad88b` 에서 고쳤고
+   `ledger-order.test.ts` 가 순서 독립성을 고정한다. 상세는 §5 참고.
 
 I. 신규 거래 이력 UI 에서 실제 데이터 육안 검증
    목록·필터·상세·메모/태그 저장·병합/분리/이동·정정·원본 복귀·audit 가
@@ -404,4 +425,4 @@ npm run ledger:import -- --apply --family=<CODE> --profile=<PROFILE>  # 승인 �
 npx vitest run src/lib/kaw/ledger-migration.test.ts   # 004 권한 모델 고정 테스트
 ```
 
-게이트 현황: `tsc` 통과 / `build` 통과 / `test` **590건 통과 (17 파일)**.
+게이트 현황: `tsc` 통과 / `build` 통과 / `test` **671건 통과 (18 파일)**.
