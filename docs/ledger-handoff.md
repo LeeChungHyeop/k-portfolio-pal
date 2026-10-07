@@ -2,8 +2,11 @@
 
 새 세션에서 이 문서만 읽고 바로 이어받을 수 있도록 쓴 상태 기록이다.
 
-**지금 production DB 에는 아무것도 적용/적재되지 않았다.** 다음 세션의 첫 작업은
-migration 004 최종 리뷰이며, 그 전에 임의로 DB 를 건드리지 않는다.
+**지금 production DB 에는 아무것도 적용/적재되지 않았다.**
+
+migration 004 최종 리뷰는 **끝났다.** 리뷰에서 나온 차단 이슈(Supabase 기본 권한 때문에
+`service_role` 이 원장·audit 에 UPDATE/DELETE/TRUNCATE 를 그대로 갖는 문제)와 CHECK 2종을
+004 에 반영했다. 다음 작업은 §9 의 **B(사용자가 SQL Editor 에서 004 실행)** 부터다.
 
 - 브랜치: `feat/historical-performance-reconstruction`
 - 저장소 루트: `k-allweather/app/` (git 명령은 반드시 여기서)
@@ -94,13 +97,14 @@ Phase 1 과 2 는 한 커밋에 함께 들어갔다(스키마와 그 스키마�
 2. **과거 목표비중으로 거래를 추론하지 않는다.** 스키마에도 도메인 모델에도
    목표비중 필드가 없다. "당시 목표가 40%였으므로 이렇게 리밸런싱했을 것"이라는
    계산 경로를 만들지 않는다.
-3. **`kaw_transaction_ledger` 는 immutable.** service_role 에 UPDATE 권한조차 주지
-   않았다. 적재는 `scripts/ledger-import.ts` 로만 한다.
+3. **`kaw_transaction_ledger` 는 immutable.** service_role 에서 UPDATE/DELETE/TRUNCATE 를
+   **회수**한다(단순히 grant 하지 않는 것으로는 부족하다 — 아래 "권한 모델" 참고).
+   적재는 `scripts/ledger-import.ts` 로만 한다.
 4. **거래 정정은 overlay** (`kaw_transaction_correction`). 유효값 = `corrected_* ?? 원본`.
    제외도 삭제가 아니라 `excluded` 플래그다.
 5. **소속 이벤트 변경도 overlay** (`kaw_transaction_event_override`). 병합/분리/이동이
    전부 이것 하나로 표현되고, 행을 지우면 기본 grouping 으로 되돌아간다.
-6. **audit 는 append-only.** service_role 에 UPDATE/DELETE 권한이 없다.
+6. **audit 는 append-only.** service_role 에서 UPDATE/DELETE/TRUNCATE 를 회수한다.
 7. **파생값을 DB 에 중복 저장하지 않는다.** 거래건수·매수/매도 금액·전후 보유수량은
    소속 거래가 바뀌면 즉시 달라지므로 `ledger.ts resolveEvents` 가 계산한다.
 8. **fingerprint version 은 v1.** 문자열 맨 앞에도 들어간다(`v1|...`).
@@ -159,8 +163,50 @@ retirement 를 내림차순으로 돌리면 `484790` 이 2026-05-26 에 **-723�
 | `kaw_rebalance_event` | 사용자 의미정보만 — 메모·태그·숨김·유형·`strategy_included`·`is_user_created`. 기본 grouping 이벤트는 행이 없어도 된다 |
 | `kaw_ledger_audit` | append-only 변경 이력. UI 분류 수정(`event_merge`/`event_split`/`tx_move`/`memo_change`/`tag_change`/`event_hide`/`event_restore`)과 거래정보 정정(`tx_correct`/`tx_uncorrect`)을 `action` 으로 구분 |
 
-보안은 001/002/003 과 동일 — RLS on + 정책 0개, `anon`/`authenticated` GRANT 회수,
-`service_role` 만 접근. 브라우저는 Worker 의 `/api/*` 만 쓴다.
+### 권한 모델 (001~003 과 다른 부분)
+
+RLS on + 정책 0개, 브라우저는 Worker 의 `/api/*` 만 쓴다 — 여기까지는 001/002/003 과 같다.
+**다른 것은 GRANT 를 거는 방식이다.**
+
+Supabase 는 `public` 스키마에 기본 권한이 걸려 있어서
+(`alter default privileges in schema public grant all on tables to postgres, anon,
+authenticated, service_role`) **새 테이블은 생성되는 순간 `service_role` 에도 `ALL` 이
+붙는다.** GRANT 는 가산이라 "필요한 것만 grant" 는 빼기가 되지 않는다. 001~003 처럼
+`anon`/`authenticated` 만 회수하면 `service_role` 은 UPDATE/DELETE/TRUNCATE 를 그대로
+갖고, 그러면 **원장 immutable 도 audit append-only 도 전혀 성립하지 않는다.**
+
+그래서 004 는 신규 6개 테이블에 대해 **PUBLIC / anon / authenticated / service_role 의
+권한을 먼저 전부 회수한 뒤 `service_role` 에 필요한 것만 다시 부여한다.**
+
+| 테이블 | service_role | 금지 |
+|---|---|---|
+| `kaw_transaction_ledger` | SELECT, INSERT | UPDATE / DELETE / TRUNCATE / REFERENCES / TRIGGER |
+| `kaw_ledger_audit` | SELECT, INSERT | UPDATE / DELETE / TRUNCATE / REFERENCES / TRIGGER |
+| `kaw_ledger_import_batch` | SELECT, INSERT | UPDATE / DELETE / TRUNCATE / REFERENCES / TRIGGER |
+| `kaw_transaction_correction` | SELECT, INSERT, UPDATE, DELETE | TRUNCATE / REFERENCES / TRIGGER |
+| `kaw_transaction_event_override` | SELECT, INSERT, UPDATE, DELETE | TRUNCATE / REFERENCES / TRIGGER |
+| `kaw_rebalance_event` | SELECT, INSERT, UPDATE, DELETE | TRUNCATE / REFERENCES / TRIGGER |
+
+PUBLIC / `anon` / `authenticated` 에는 아무 권한도 주지 않는다.
+**owner(`postgres`)는 건드리지 않는다** — 여기서 말하는 immutable / append-only 는
+"Worker 가 쓰는 `service_role` 키로는 원장과 audit 을 바꾸거나 지울 수 없다"는 뜻이고,
+SQL Editor 의 소유자 권한까지 막으려는 것이 아니다(소유자는 어차피 막을 수 없다).
+
+`kaw_ledger_audit.id` 는 identity 다. **identity 시퀀스에는 별도 GRANT 를 주지 않는다** —
+identity 컬럼의 시퀀스는 컬럼에 internal dependency 로 묶여 있어 `nextval` 이 권한 검사를
+거치지 않는다(`serial` 과 다르다). 004 의 smoke test (j) 가 시퀀스 권한을 전부 회수한
+트랜잭션 안에서 실제 INSERT 로 이것을 확인하고, 실패할 때만 `usage` 를 추가한다.
+
+### DB 레벨 CHECK 2종
+
+- `kaw_transaction_ledger_fp_version_chk` — `source_fingerprint` 가 자기
+  `fingerprint_version` 과 맞는 prefix(`v<n>|…`)를 갖도록 강제한다. 둘이 어긋나면
+  "한 profile 에 두 버전을 섞지 않는다"는 규칙을 검증 쿼리 (f-2) 로도 못 잡는다.
+- `kaw_transaction_correction_nonempty_chk` — 정정 6필드가 전부 null 이고 `excluded` 도
+  false 인 행을 막는다. 유효값 규칙이 `corrected_* ?? 원본` 이라 **"null 로 정정"을
+  표현할 방법이 애초에 없으므로** 그런 행은 아무 값도 안 바꾸면서 그 거래를 "사용자 정정
+  데이터"로 잘못 배지하기만 한다. 원본 복귀는 행 삭제(`clear: true`)다.
+  `handleLedgerCorrectPost` 가 같은 조건을 먼저 검사해 400 으로 돌려준다.
 
 기본 grouping: **동일 계좌 + 동일 실효 거래일** → `rev:<account>:<date>` (계산 가능).
 
@@ -230,9 +276,13 @@ production import 의 blocker 가 아니므로 **지금 구현하지 않는다.*
 ## 9. 다음 세션에서 진행할 정확한 순서
 
 ```
-A. migration 004 최종 리뷰
-   migrations/004_transaction_ledger.sql 을 다시 읽고 컬럼·제약·권한·인덱스를 확인.
-   특히 fingerprint UNIQUE, fingerprint_version, RLS/GRANT, 롤백 스크립트.
+A. migration 004 최종 리뷰  ✅ 완료
+   차단 이슈 1건을 찾아 004 에 반영했다 — Supabase 가 public 스키마 기본 권한으로 새
+   테이블에 ALL 을 붙이기 때문에, "필요한 것만 grant" 로는 service_role 의 UPDATE/DELETE/
+   TRUNCATE 가 그대로 남아 원장 immutable 과 audit append-only 가 성립하지 않았다.
+   권한을 "네 주체 전부 회수 → service_role 에 필요한 것만 재부여"로 바꾸고,
+   CHECK 2종(fp_version / correction_nonempty)과 실효 권한 검증·smoke test 를 추가했다.
+   재발 방지로 src/lib/kaw/ledger-migration.test.ts 가 004 의 권한 패턴을 고정한다.
 
 B. 사용자에게 적용 안내
    Supabase 대시보드 → SQL Editor 에 004 전체를 붙여넣고 Run.
@@ -244,10 +294,15 @@ C. migration 적용 후 실제 DB 대상 dry-run
    .dev.vars 의 접속정보로 **읽기만** 해서 기존 행 수와 중복 여부를 같이 본다.
 
 D. DB schema / constraint / 권한 검증
-   004 파일 하단 주석의 검증 쿼리 (a)~(h) 를 실행:
-   테이블 생성 / anon·authenticated 권한 0행 / 계좌별 건수 /
-   보유수량 재생 / 이벤트 수 / fingerprint 중복 0 / fingerprint_version 단일 /
-   배치 이력 / 날짜 근거 분포.
+   004 파일 하단 주석의 검증 쿼리를 실행한다.
+   적용 직후: (a) 테이블 6개 / (a-2) 컬럼 수 80 / (a-3) RLS on·정책 0 /
+             (a-4) CHECK 2종 / (b) 선언된 GRANT / (b-2) 실효 권한 /
+             (b-3) immutable 3종 0행 / (b-4) anon·authenticated 0행 /
+             (j) service_role INSERT smoke test (rollback) / (k) 실패해야 정상인 probe
+   import 후:  (c)~(h) 계좌별 건수 / 보유수량 재생 / 이벤트 수 / fingerprint 중복 0 /
+             fingerprint_version 단일 / 배치 이력 / 날짜 근거 분포.
+
+   **(b-3) 이 0행이 아니면 import 를 진행하지 않는다.**
 
 E. reconciliation 재실행
    npm test (ledger / verified-transactions 테스트 포함)
@@ -293,6 +348,8 @@ npm run build
 npm run ledger:dry-run      # 검증만. DB 에 쓰지 않는다 (기본)
 npm run ledger:dry-run -- --family=<CODE> --profile=<PROFILE>   # DB 읽기 포함
 npm run ledger:import -- --apply --family=<CODE> --profile=<PROFILE>  # 승인 후에만
+
+npx vitest run src/lib/kaw/ledger-migration.test.ts   # 004 권한 모델 고정 테스트
 ```
 
 게이트 현황: `tsc` 통과 / `build` 통과 / `test` **547건 통과 (15 파일)**.

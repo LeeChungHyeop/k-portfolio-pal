@@ -54,8 +54,14 @@
 --   추정 날짜를 직접 사실인 것처럼 보여주지 않는다. 대신 사용자가 정정할 수 있게 한다
 --   (corrected_trade_date overlay) — 그래도 원본 세 컬럼은 남는다.
 --
--- 보안: 001/002/003 과 같은 철학. RLS on + 정책 0개, anon/authenticated GRANT 회수,
---       service_role 만 접근. 브라우저는 직접 붙지 않고 Worker 의 인증된 /api/* 만 쓴다.
+-- 보안: RLS on + 정책 0개, service_role 만 접근, 브라우저는 Worker 의 인증된 /api/* 만.
+--       철학은 001/002/003 과 같지만 **권한 설정 방식이 다르다** — Supabase 는 public
+--       스키마 기본 권한으로 새 테이블에 anon/authenticated/service_role 전부 ALL 을
+--       붙이므로, 001~003 처럼 anon/authenticated 만 회수하면 service_role 은 UPDATE/
+--       DELETE/TRUNCATE 를 그대로 갖는다. 그러면 원장 immutable 도 audit append-only 도
+--       성립하지 않는다. 그래서 004 는 **네 주체(PUBLIC/anon/authenticated/service_role)
+--       의 권한을 먼저 전부 회수하고 service_role 에 필요한 것만 다시 준다.**
+--       자세한 내용과 최종 권한표는 아래 "보안" 섹션에 있다.
 --
 -- ── 출처 추적(provenance)과 중복 적재 방지 ──────────────────────────────────
 --
@@ -83,9 +89,12 @@
 -- 실행: Supabase 대시보드 → SQL Editor 에 이 파일 전체를 붙여넣고 Run. idempotent 다.
 --       001 → 002 → 003 → 004 순서. 되돌리려면 `004_transaction_ledger_rollback.sql`.
 --
--- 개정: provenance(import_batch_id / source_fingerprint)와 적재 이력 테이블은 **최초
---       적용 전에** 이 파일에 추가됐다. 004 는 아직 production 에 적용된 적이 없으므로
---       별도 패치 마이그레이션을 만들지 않고 이 파일을 고쳤다.
+-- 개정: 아래 항목들은 **최초 적용 전에** 이 파일에 직접 반영됐다. 004 는 production 에
+--       적용된 적이 없으므로 별도 패치 마이그레이션을 만들지 않았다.
+--        · provenance(import_batch_id / source_fingerprint)와 적재 이력 테이블 추가
+--        · 권한을 "전부 회수 후 재부여" 방식으로 교체 (위 보안 항목)
+--        · kaw_transaction_ledger_fp_version_chk / kaw_transaction_correction_nonempty_chk 추가
+--        · 검증 섹션에 실효 권한(has_table_privilege) 확인과 smoke test (j)(k) 추가
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- ── 0. 적재 배치 — "이 거래들이 언제 어디서 들어왔나" ──────────────────────
@@ -115,7 +124,7 @@ create table if not exists public.kaw_ledger_import_batch (
 );
 
 comment on table public.kaw_ledger_import_batch is
-  '원장 적재 묶음. 미래에셋 Excel / KIS API / 수동 보정이 같은 원장에 들어오므로 출처와 검증 결과를 묶음 단위로 남긴다. verification 에는 적재 전 게이트 결과 전문이 들어간다.';
+  '원장 적재 묶음. 미래에셋 Excel / KIS API / 수동 보정이 같은 원장에 들어오므로 출처와 검증 결과를 묶음 단위로 남긴다. verification 에는 적재 전 게이트 결과 전문이 들어간다. 기록 후 불변 — service_role 에 SELECT/INSERT 만 있다(owner 는 예외).';
 
 -- ── 1. 거래 원장 — 개별 실제 체결 ───────────────────────────────────────────
 create table if not exists public.kaw_transaction_ledger (
@@ -181,7 +190,7 @@ create table if not exists public.kaw_transaction_ledger (
 );
 
 comment on table public.kaw_transaction_ledger is
-  '실제 증권사 체결내역 1건 = 1행. 리밸런싱 이력의 source of truth 다. 원본은 import 이후 수정하지 않는다 — 사용자 정정은 kaw_transaction_correction overlay 로, 소속 이벤트 변경은 kaw_transaction_event_override 로 쌓인다. 물리 삭제하지 않는다. 목표비중은 이 테이블에 없다(과거 이력은 실제 체결만으로 재구성한다).';
+  '실제 증권사 체결내역 1건 = 1행. 리밸런싱 이력의 source of truth 다. 원본은 import 이후 수정하지 않는다 — 사용자 정정은 kaw_transaction_correction overlay 로, 소속 이벤트 변경은 kaw_transaction_event_override 로 쌓인다. 물리 삭제하지 않는다. immutable 은 관례가 아니라 권한으로 강제한다: service_role 에 SELECT/INSERT 만 있고 UPDATE/DELETE/TRUNCATE 는 회수돼 있다(owner 는 예외). 목표비중은 이 테이블에 없다(과거 이력은 실제 체결만으로 재구성한다).';
 comment on column public.kaw_transaction_ledger.event_date is
   '이벤트 grouping 에 쓰는 실효 거래일 = trade_date ?? inferred_trade_date. 근거는 trade_date_evidence 에 있고 UI 는 추정 날짜를 직접 사실처럼 보여주지 않는다.';
 comment on column public.kaw_transaction_ledger.post_quantity is
@@ -198,6 +207,26 @@ create index if not exists kaw_transaction_ledger_lookup_idx
   on public.kaw_transaction_ledger (family_code, profile, account_type, event_date desc);
 create index if not exists kaw_transaction_ledger_ticker_idx
   on public.kaw_transaction_ledger (family_code, profile, ticker, event_date desc);
+
+-- fingerprint 문자열의 버전 prefix 와 fingerprint_version 컬럼이 어긋나지 않게 한다.
+-- 둘이 따로 놀면 "한 profile 안에 두 버전을 섞지 않는다"는 규칙을 (f-2) 쿼리로도
+-- 탐지하지 못한다 — 컬럼은 1인데 문자열은 v2 인 행을 세면 버전이 하나로 보이기 때문이다.
+--
+-- CREATE TABLE 안이 아니라 밖에 두는 이유: `create table if not exists` 는 모양이 다른
+-- 동명 테이블이 이미 있으면 조용히 통과하므로, 그 경우에도 제약이 붙게 하려면 별도
+-- ALTER 가 필요하다. 아래 블록은 멱등하다(이미 있으면 아무것도 하지 않는다).
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'public.kaw_transaction_ledger'::regclass
+       and conname  = 'kaw_transaction_ledger_fp_version_chk'
+  ) then
+    alter table public.kaw_transaction_ledger
+      add constraint kaw_transaction_ledger_fp_version_chk
+      check (source_fingerprint like 'v' || fingerprint_version::text || '|%');
+  end if;
+end $$;
 
 -- ── 2. 거래 정정 overlay ────────────────────────────────────────────────────
 -- 원본 행을 덮어쓰지 않는다. 유효값 = corrected_* ?? 원본. 되돌리려면 이 행만 지우면 된다.
@@ -236,6 +265,39 @@ create table if not exists public.kaw_transaction_correction (
 
 comment on table public.kaw_transaction_correction is
   '사용자가 정정한 거래정보. 원본(kaw_transaction_ledger)을 덮어쓰지 않고 overlay 로 쌓는다 — 유효값 = corrected_* ?? 원본. 이 행이 있으면 해당 거래는 "사용자 정정 데이터"로 표시된다. excluded 는 계산 제외 플래그이며 삭제가 아니다.';
+
+-- 아무것도 정정하지 않는 행을 막는다.
+--
+-- 이 overlay 의 유효값 규칙은 `corrected_* ?? 원본` 이다(ledger.ts effectiveTransaction).
+-- 즉 **null 은 "이 필드는 정정하지 않았다"는 뜻이고, "null 로 정정했다"를 표현할 방법이
+-- 애초에 없다.** 정정 대상 6 필드가 전부 null 이고 excluded 도 false 인 행은 어떤 값도
+-- 바꾸지 않으면서, 테이블 주석대로 그 거래를 "사용자 정정 데이터"로 잘못 배지하기만 한다
+-- (reason 만 적힌 행이 그렇다). 원본으로 되돌리는 방법은 이 행을 **지우는 것**이다
+-- (ledger-server.ts 의 clear: true 경로).
+--
+-- UI 는 이미 변경이 없으면 저장 버튼이 비활성이라 이런 행을 만들지 않는다. 이 CHECK 는
+-- API 를 직접 호출하는 경로에 대한 방어선이고, handleLedgerCorrectPost 가 같은 조건을
+-- 먼저 검사해 400 으로 돌려주므로 여기까지 오는 일은 정상 경로에서 없다.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'public.kaw_transaction_correction'::regclass
+       and conname  = 'kaw_transaction_correction_nonempty_chk'
+  ) then
+    alter table public.kaw_transaction_correction
+      add constraint kaw_transaction_correction_nonempty_chk
+      check (
+        excluded
+        or corrected_quantity   is not null
+        or corrected_price      is not null
+        or corrected_amount     is not null
+        or corrected_trade_date is not null
+        or corrected_side       is not null
+        or corrected_ticker     is not null
+      );
+  end if;
+end $$;
 
 -- ── 3. 소속 이벤트 재지정 overlay (병합 / 분리 / 이동) ──────────────────────
 -- 기본 소속은 `rev:<account_type>:<event_date>` 로 계산된다. 이 테이블에 행이 있는
@@ -329,16 +391,60 @@ create table if not exists public.kaw_ledger_audit (
 );
 
 comment on table public.kaw_ledger_audit is
-  'append-only 변경 이력. UI 분류 수정(event_merge/event_split/tx_move/memo_change/tag_change/event_hide/event_restore)과 실제 거래정보 정정(tx_correct)을 action 으로 구분한다. 행을 수정하거나 삭제하지 않는다.';
+  'append-only 변경 이력. UI 분류 수정(event_merge/event_split/tx_move/memo_change/tag_change/event_hide/event_restore)과 실제 거래정보 정정(tx_correct)을 action 으로 구분한다. append-only 는 권한으로 강제한다: service_role 에 SELECT/INSERT 만 있고 UPDATE/DELETE/TRUNCATE 는 회수돼 있다(owner 는 예외). id 는 identity 이며 시퀀스에 별도 GRANT 를 주지 않는다 — identity 시퀀스의 nextval 은 권한 검사를 거치지 않는다.';
 
 create index if not exists kaw_ledger_audit_lookup_idx
   on public.kaw_ledger_audit (family_code, profile, at desc);
 create index if not exists kaw_ledger_audit_target_idx
   on public.kaw_ledger_audit (family_code, profile, target_type, target_id, at desc);
 
--- ── 보안 (001/002/003 과 동일) ──────────────────────────────────────────────
--- RLS 를 켜고 정책을 하나도 만들지 않는다 → anon/authenticated 는 전부 차단된다.
--- service_role 은 RLS 를 우회하므로 Worker 만 읽고 쓸 수 있다.
+-- ── 보안 ────────────────────────────────────────────────────────────────────
+--
+-- 철학은 001/002/003 과 같지만, **권한 설정 방식이 다르다.** 001~003 은 anon/authenticated
+-- 만 회수했는데, 그것만으로는 아래 2) 의 이유로 service_role 에 대한 제약이 성립하지 않는다.
+--
+-- 1) RLS 를 켜고 정책을 하나도 만들지 않는다 → anon/authenticated 는 전부 차단된다.
+--    **service_role 은 BYPASSRLS 라 RLS 로 걸러지지 않는다.** 그래서 service_role 에
+--    대해서는 GRANT 가 유일한 방어선이고, 2)·3) 이 그 방어선을 만든다.
+--
+-- 2) **필요한 것만 grant 하는 것으로는 부족하다 — 먼저 전부 회수해야 한다.**
+--    Supabase 프로젝트는 public 스키마에 기본 권한이 걸려 있다:
+--
+--      alter default privileges in schema public
+--        grant all on tables to postgres, anon, authenticated, service_role;
+--
+--    그래서 새 테이블은 **생성되는 순간 anon·authenticated·service_role 에 ALL 이 이미
+--    붙은 채로** 만들어진다. GRANT 는 가산이라 "select, insert 만 grant" 는 빼기가 되지
+--    않는다. revoke 를 먼저 하지 않으면 원장 immutable 도 audit append-only 도 **전혀
+--    성립하지 않는다**(service_role 이 UPDATE/DELETE/TRUNCATE 를 그대로 갖는다).
+--    그래서 PUBLIC(의사 롤) 까지 포함해 네 주체를 전부 0 으로 되돌린 뒤 3) 에서 다시 준다.
+--
+--    owner(postgres)는 건드리지 않는다. **여기서 말하는 immutable / append-only 는
+--    "Worker 가 쓰는 service_role 키로는 원장과 audit 을 바꾸거나 지울 수 없다"는 뜻**이고,
+--    SQL Editor 의 소유자 권한까지 막으려는 것이 아니다(소유자는 어차피 막을 수 없다).
+--
+-- 3) service_role 에 **필요한 것만** 다시 부여한다.
+--
+--      kaw_transaction_ledger          select, insert                  (immutable)
+--      kaw_ledger_audit                select, insert                  (append-only)
+--      kaw_ledger_import_batch         select, insert                  (기록 후 불변)
+--      kaw_transaction_correction      select, insert, update, delete
+--      kaw_transaction_event_override  select, insert, update, delete
+--      kaw_rebalance_event             select, insert, update, delete
+--
+--    여섯 테이블 모두 TRUNCATE / REFERENCES / TRIGGER 는 주지 않는다.
+--    overlay 3종에만 update/delete 가 필요한 이유는 정정·재지정이 upsert 이고 "원본 복귀"가
+--    행 삭제이기 때문이다(ledger-server.ts 의 clear / eventId:null 경로). 원장과 audit 에는
+--    그런 경로가 아예 없다.
+--
+--    **identity 시퀀스(kaw_ledger_audit.id)에는 권한을 주지 않는다.** identity 컬럼의
+--    시퀀스는 컬럼에 internal dependency 로 묶여 있어 nextval 이 권한 검사 없이 호출된다.
+--    (serial 과 다른 점이다 — serial 은 DEFAULT 안의 nextval 이 호출자 권한으로 평가되므로
+--     시퀀스 USAGE 가 필요하다.) 아래 검증 섹션의 smoke test (j) 가 시퀀스 권한을 전부
+--     회수한 상태에서 실제로 INSERT 해 이것을 확인한다. 거기서 실패하면 그때만 USAGE 를
+--     추가한다.
+--
+-- 이 블록은 멱등하다. 004 를 몇 번 실행해도 최종 상태는 항상 아래 표와 같다.
 alter table public.kaw_ledger_import_batch         enable row level security;
 alter table public.kaw_transaction_ledger          enable row level security;
 alter table public.kaw_transaction_correction      enable row level security;
@@ -346,22 +452,34 @@ alter table public.kaw_transaction_event_override  enable row level security;
 alter table public.kaw_rebalance_event             enable row level security;
 alter table public.kaw_ledger_audit                enable row level security;
 
-revoke all on public.kaw_ledger_import_batch        from anon, authenticated;
-revoke all on public.kaw_transaction_ledger         from anon, authenticated;
-revoke all on public.kaw_transaction_correction     from anon, authenticated;
-revoke all on public.kaw_transaction_event_override from anon, authenticated;
-revoke all on public.kaw_rebalance_event            from anon, authenticated;
-revoke all on public.kaw_ledger_audit               from anon, authenticated;
+-- 2) 기존 권한을 **전부** 회수한다 (PUBLIC / anon / authenticated / service_role).
+--    Supabase 기본 권한으로 이미 붙어 있는 ALL 을 여기서 떼어낸다. owner 는 제외다.
+revoke all on public.kaw_transaction_ledger
+  from public, anon, authenticated, service_role;
+revoke all on public.kaw_ledger_audit
+  from public, anon, authenticated, service_role;
+revoke all on public.kaw_ledger_import_batch
+  from public, anon, authenticated, service_role;
+revoke all on public.kaw_transaction_correction
+  from public, anon, authenticated, service_role;
+revoke all on public.kaw_transaction_event_override
+  from public, anon, authenticated, service_role;
+revoke all on public.kaw_rebalance_event
+  from public, anon, authenticated, service_role;
 
--- 원장은 import 로만 들어온다. 정정은 overlay 이므로 update 권한을 주지 않는다
--- (재import 시 충돌 해결을 위해 upsert 가 필요하면 그때 열어도 늦지 않다).
-grant select, insert         on public.kaw_ledger_import_batch        to service_role;
-grant select, insert         on public.kaw_transaction_ledger         to service_role;
-grant select, insert, update, delete on public.kaw_transaction_correction     to service_role;
-grant select, insert, update, delete on public.kaw_transaction_event_override to service_role;
-grant select, insert, update, delete on public.kaw_rebalance_event            to service_role;
--- audit 는 append-only — update/delete 를 주지 않는다.
-grant select, insert         on public.kaw_ledger_audit               to service_role;
+-- 3) service_role 에 필요한 것만 부여한다.
+--    PUBLIC / anon / authenticated 에는 **아무것도 주지 않는다** (2 에서 회수한 상태 유지).
+
+-- immutable 3종 — update/delete/truncate/references/trigger 없음.
+grant select, insert                 on public.kaw_transaction_ledger          to service_role;
+grant select, insert                 on public.kaw_ledger_audit                to service_role;
+grant select, insert                 on public.kaw_ledger_import_batch         to service_role;
+
+-- overlay 3종 — 쓰기·되돌리기가 있어야 하므로 update/delete 까지.
+--               truncate/references/trigger 는 여전히 없음.
+grant select, insert, update, delete on public.kaw_transaction_correction      to service_role;
+grant select, insert, update, delete on public.kaw_transaction_event_override  to service_role;
+grant select, insert, update, delete on public.kaw_rebalance_event             to service_role;
 
 -- updated_at 자동 갱신 (003 에서 만든 공용 트리거 함수를 재사용한다)
 create or replace function public.kaw_touch_updated_at()
@@ -395,17 +513,102 @@ create trigger kaw_rebalance_event_touch
 -- (주석을 풀고 family_code / profile 을 채워서 쓴다.)
 -- ─────────────────────────────────────────────────────────────────────────────
 --
--- -- (a) 테이블 5개가 생겼는가
+-- -- (a) 테이블 6개가 생겼는가 (6행이어야 한다)
 -- select table_name from information_schema.tables
---  where table_schema = 'public' and table_name like 'kaw_%ledger%'
---     or table_schema = 'public' and table_name in
---        ('kaw_transaction_correction','kaw_transaction_event_override','kaw_rebalance_event');
+--  where table_schema = 'public'
+--    and table_name in ('kaw_ledger_import_batch','kaw_transaction_ledger',
+--                       'kaw_transaction_correction','kaw_transaction_event_override',
+--                       'kaw_rebalance_event','kaw_ledger_audit')
+--  order by 1;
 --
--- -- (b) anon/authenticated 에 권한이 남아 있지 않은가 (0행이어야 한다)
--- select grantee, table_name, privilege_type from information_schema.role_table_grants
---  where table_schema = 'public' and grantee in ('anon','authenticated')
---    and table_name in ('kaw_transaction_ledger','kaw_transaction_correction',
---                       'kaw_transaction_event_override','kaw_rebalance_event','kaw_ledger_audit');
+-- -- (a-2) 컬럼 수 대조. `create table if not exists` 는 **모양이 다른 동명 테이블이 이미
+-- --       있으면 조용히 통과**하므로 (a) 만으로는 구버전이 적용돼 있던 경우를 못 잡는다.
+-- --       기대값: kaw_ledger_audit 11 / kaw_ledger_import_batch 11 /
+-- --               kaw_rebalance_event 13 / kaw_transaction_correction 13 /
+-- --               kaw_transaction_event_override 6 / kaw_transaction_ledger 26  (합 80)
+-- select table_name, count(*) as cols from information_schema.columns
+--  where table_schema = 'public'
+--    and table_name in ('kaw_ledger_import_batch','kaw_transaction_ledger',
+--                       'kaw_transaction_correction','kaw_transaction_event_override',
+--                       'kaw_rebalance_event','kaw_ledger_audit')
+--  group by 1 order by 1;
+--
+-- -- (a-3) RLS 가 켜져 있고 정책이 0개인가 (relrowsecurity = t, policies = 0)
+-- select c.relname, c.relrowsecurity,
+--        (select count(*) from pg_policies pp
+--          where pp.schemaname = 'public' and pp.tablename = c.relname) as policies
+--   from pg_class c join pg_namespace n on n.oid = c.relnamespace
+--  where n.nspname = 'public'
+--    and c.relname in ('kaw_ledger_import_batch','kaw_transaction_ledger',
+--                      'kaw_transaction_correction','kaw_transaction_event_override',
+--                      'kaw_rebalance_event','kaw_ledger_audit')
+--  order by 1;
+--
+-- -- (a-4) 이번에 추가한 CHECK 2개가 붙었는가 (2행)
+-- select conrelid::regclass as tbl, conname, pg_get_constraintdef(oid)
+--   from pg_constraint
+--  where conname in ('kaw_transaction_ledger_fp_version_chk',
+--                    'kaw_transaction_correction_nonempty_chk')
+--  order by 1;
+--
+-- -- (b) **선언된** GRANT. PUBLIC/anon/authenticated 행이 하나도 없어야 하고,
+-- --     service_role 은 아래와 정확히 같아야 한다.
+-- --       kaw_transaction_ledger / kaw_ledger_audit / kaw_ledger_import_batch
+-- --          → INSERT,SELECT
+-- --       kaw_transaction_correction / kaw_transaction_event_override / kaw_rebalance_event
+-- --          → DELETE,INSERT,SELECT,UPDATE
+-- select table_name, grantee,
+--        string_agg(privilege_type, ',' order by privilege_type) as privs
+--   from information_schema.role_table_grants
+--  where table_schema = 'public'
+--    and grantee in ('PUBLIC','anon','authenticated','service_role')
+--    and table_name in ('kaw_ledger_import_batch','kaw_transaction_ledger',
+--                       'kaw_transaction_correction','kaw_transaction_event_override',
+--                       'kaw_rebalance_event','kaw_ledger_audit')
+--  group by 1, 2 order by 1, 2;
+--
+-- -- (b-2) **실효(effective) 권한.** (b) 는 ACL 에 적힌 것만 보여주므로, service_role 이
+-- --       다른 롤의 멤버라서 상속받는 권한은 드러나지 않는다. 실제로 할 수 있는지는
+-- --       has_table_privilege 가 답한다. 이쪽이 최종 판정이다.
+-- select t.name,
+--        has_table_privilege('service_role', 'public.'||t.name, 'SELECT')     as sel,
+--        has_table_privilege('service_role', 'public.'||t.name, 'INSERT')     as ins,
+--        has_table_privilege('service_role', 'public.'||t.name, 'UPDATE')     as upd,
+--        has_table_privilege('service_role', 'public.'||t.name, 'DELETE')     as del,
+--        has_table_privilege('service_role', 'public.'||t.name, 'TRUNCATE')   as trunc,
+--        has_table_privilege('service_role', 'public.'||t.name, 'REFERENCES') as refs,
+--        has_table_privilege('service_role', 'public.'||t.name, 'TRIGGER')    as trg
+--   from (values ('kaw_transaction_ledger'), ('kaw_ledger_audit'),
+--                ('kaw_ledger_import_batch'), ('kaw_transaction_correction'),
+--                ('kaw_transaction_event_override'), ('kaw_rebalance_event')) as t(name)
+--  order by 1;
+--
+-- --   기대값                            sel ins upd del trunc refs trg
+-- --   kaw_ledger_audit                   t   t   f   f    f     f    f
+-- --   kaw_ledger_import_batch            t   t   f   f    f     f    f
+-- --   kaw_transaction_ledger             t   t   f   f    f     f    f
+-- --   kaw_rebalance_event                t   t   t   t    f     f    f
+-- --   kaw_transaction_correction         t   t   t   t    f     f    f
+-- --   kaw_transaction_event_override     t   t   t   t    f     f    f
+--
+-- -- (b-3) immutable 3종 한 줄 판정 — **0행이면 통과**다. 한 행이라도 나오면
+-- --       그 테이블의 그 권한이 service_role 에 살아 있다는 뜻이고, 원장 immutable /
+-- --       audit append-only 가 성립하지 않는다. import 를 진행하지 않는다.
+-- select t.name as table_name, p.priv
+--   from (values ('kaw_transaction_ledger'), ('kaw_ledger_audit'),
+--                ('kaw_ledger_import_batch')) as t(name),
+--        (values ('UPDATE'), ('DELETE'), ('TRUNCATE')) as p(priv)
+--  where has_table_privilege('service_role', 'public.'||t.name, p.priv);
+--
+-- -- (b-4) anon/authenticated/PUBLIC 실효 판정 — 이것도 **0행이면 통과**다.
+-- select r.role, t.name as table_name, p.priv
+--   from (values ('anon'), ('authenticated')) as r(role),
+--        (values ('kaw_ledger_import_batch'), ('kaw_transaction_ledger'),
+--                ('kaw_transaction_correction'), ('kaw_transaction_event_override'),
+--                ('kaw_rebalance_event'), ('kaw_ledger_audit')) as t(name),
+--        (values ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'),
+--                ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) as p(priv)
+--  where has_table_privilege(r.role, 'public.'||t.name, p.priv);
 --
 -- -- (c) import 후 계좌별 건수 — 기대값 retirement 227 / irp 65 / isa 85 / pension 86
 -- select account_type, count(*) from public.kaw_transaction_ledger
@@ -441,3 +644,133 @@ create trigger kaw_rebalance_event_touch
 -- -- (h) 추정 날짜 비율 (UI 신뢰도 표시의 근거)
 -- select trade_date_evidence, count(*) from public.kaw_transaction_ledger
 --  where family_code = '<CODE>' and profile = '<PROFILE>' group by 1 order by 2 desc;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- (j) service_role smoke test — **production 데이터를 남기지 않는다**
+--
+-- (b-2)/(b-3) 은 권한 카탈로그를 읽을 뿐이다. 실제로 Worker 와 같은 롤로 INSERT 가
+-- 되는지는 해봐야 안다. 특히 확인하는 것:
+--
+--   · kaw_ledger_audit.id 는 identity 다. **시퀀스 권한 없이도 INSERT 되는가?**
+--     j-0 에서 그 시퀀스의 권한을 이 트랜잭션 안에서만 전부 회수한 뒤 j-1 을 넣으므로,
+--     j-1 이 id 를 채워 돌려주면 "identity 시퀀스에는 별도 GRANT 가 필요 없다"가
+--     결정적으로 증명된다(serial 이었다면 여기서 permission denied 가 난다).
+--     j-1 이 실패할 때만 아래를 004 에 추가한다 — 성공하면 추가하지 않는다:
+--         grant usage on sequence public.kaw_ledger_audit_id_seq to service_role;
+--   · 새로 추가한 CHECK 2 개가 **정상 데이터를 막지는 않는가** (j-3, j-4).
+--   · 3) 의 GRANT 가 정상 쓰기 경로를 과하게 막지는 않는가.
+--
+-- 블록 **전체를 한 번에** SQL Editor 에 붙여넣고 Run 한다. 마지막 rollback 으로
+-- j-0 의 권한 변경과 j-1~j-4 의 4 행이 전부 사라진다. family_code 는 실제로 쓰지 않는
+-- '__smoke__' 라서 만약 rollback 이 누락돼도 실데이터와 섞이지 않는다.
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- begin;
+--
+-- -- j-0. identity 시퀀스 권한을 이 트랜잭션 안에서만 전부 회수한다(소유자 자격으로).
+-- --      이렇게 해야 j-1 의 성공이 "권한이 있어서"가 아니라 "권한이 필요 없어서"임이 증명된다.
+-- revoke all on sequence public.kaw_ledger_audit_id_seq
+--   from public, anon, authenticated, service_role;
+--
+-- set local role service_role;
+--
+-- -- j-1. audit (identity). id 가 채워져 나오면 통과.
+-- insert into public.kaw_ledger_audit
+--   (family_code, profile, actor, action, target_type, target_id, note)
+-- values ('__smoke__', '__smoke__', '__smoke__', 'import', 'import', '__smoke__',
+--         '004 smoke test — rollback 됨')
+-- returning id;
+--
+-- -- j-2. 적재 배치
+-- insert into public.kaw_ledger_import_batch
+--   (id, family_code, profile, source_kind, source_label, actor)
+-- values ('__smoke__', '__smoke__', '__smoke__', 'manual', '004 smoke test', '__smoke__')
+-- returning id;
+--
+-- -- j-3. 원장 1 행. source_fingerprint 'v1|…' 와 fingerprint_version 1 이 맞으므로
+-- --      kaw_transaction_ledger_fp_version_chk 를 통과해야 한다.
+-- insert into public.kaw_transaction_ledger
+--   (family_code, profile, id, account_type, ticker, etf_name, side,
+--    quantity, price, amount, event_date, trade_date_evidence,
+--    source, source_fingerprint, fingerprint_version)
+-- values ('__smoke__', '__smoke__', 'vtx:__smoke__', 'isa', '000000', 'SMOKE', 'buy',
+--         1, 1, 1, date '2026-01-01', 'broker-order-date',
+--         'smoke', 'v1|smoke', 1)
+-- returning id;
+--
+-- -- j-4. 정정 overlay. corrected_quantity 가 있으므로
+-- --      kaw_transaction_correction_nonempty_chk 를 통과해야 한다.
+-- insert into public.kaw_transaction_correction
+--   (family_code, profile, transaction_id, corrected_quantity, reason)
+-- values ('__smoke__', '__smoke__', 'vtx:__smoke__', 2, '004 smoke test')
+-- returning transaction_id;
+--
+-- rollback;   -- ← 반드시 실행된다. j-0 의 revoke 와 j-1~j-4 의 4 행이 전부 사라진다.
+--
+-- -- j-5. 정말 아무것도 남지 않았는지 (네 쿼리 모두 0행)
+-- select count(*) from public.kaw_ledger_audit            where family_code = '__smoke__';
+-- select count(*) from public.kaw_ledger_import_batch     where family_code = '__smoke__';
+-- select count(*) from public.kaw_transaction_ledger      where family_code = '__smoke__';
+-- select count(*) from public.kaw_transaction_correction  where family_code = '__smoke__';
+--
+-- -- j-6. j-0 의 시퀀스 권한 회수가 rollback 으로 원복됐는지 (migration 직후 상태와 동일)
+-- select has_sequence_privilege('service_role',
+--          'public.kaw_ledger_audit_id_seq', 'USAGE') as service_role_seq_usage;
+-- --   값이 t 든 f 든 **상관없다.** Supabase 기본 권한 때문에 t 로 나오는 것이 보통이고,
+-- --   "권한이 필요 없다"의 증명은 j-0 + j-1 쪽이다. 이 줄은 migration 전후 상태가
+-- --   같은지 확인하는 용도다.
+--
+-- ─────────────────────────────────────────────────────────────────────────────
+-- (k) **실패해야 정상**인 probe — 설계가 깨졌는지 직접 때려서 확인한다
+--
+-- (j) 와 반대로, 아래는 전부 에러가 나야 통과다. 성공해 버리면 그 줄의 보장이 없는 것이다.
+-- 실패한 문장은 트랜잭션을 끊으므로 **블록을 하나씩 따로** 실행한다.
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- -- k-1. 원장 UPDATE 거부   expect: permission denied for table kaw_transaction_ledger
+-- --      (권한 검사는 실행 계획 시작 시점이라 대상 행이 0 건이어도 에러가 난다)
+-- begin; set local role service_role;
+--   update public.kaw_transaction_ledger set etf_name = 'X' where false;
+-- rollback;
+--
+-- -- k-2. 원장 DELETE 거부   expect: permission denied for table kaw_transaction_ledger
+-- begin; set local role service_role;
+--   delete from public.kaw_transaction_ledger where false;
+-- rollback;
+--
+-- -- k-3. audit UPDATE 거부  expect: permission denied for table kaw_ledger_audit
+-- begin; set local role service_role;
+--   update public.kaw_ledger_audit set note = 'X' where false;
+-- rollback;
+--
+-- -- k-4. audit DELETE 거부  expect: permission denied for table kaw_ledger_audit
+-- begin; set local role service_role;
+--   delete from public.kaw_ledger_audit where false;
+-- rollback;
+--
+-- -- k-5. 배치 UPDATE 거부   expect: permission denied for table kaw_ledger_import_batch
+-- begin; set local role service_role;
+--   update public.kaw_ledger_import_batch set actor = 'X' where false;
+-- rollback;
+--
+-- -- k-6. fingerprint prefix 불일치 거부
+-- --      expect: violates check constraint "kaw_transaction_ledger_fp_version_chk"
+-- --      (문자열은 v1| 인데 컬럼은 2 다)
+-- begin; set local role service_role;
+--   insert into public.kaw_transaction_ledger
+--     (family_code, profile, id, account_type, ticker, etf_name, side,
+--      quantity, price, amount, event_date, trade_date_evidence,
+--      source, source_fingerprint, fingerprint_version)
+--   values ('__smoke__', '__smoke__', 'vtx:__bad__', 'isa', '000000', 'SMOKE', 'buy',
+--           1, 1, 1, date '2026-01-01', 'broker-order-date',
+--           'smoke', 'v1|mismatch', 2);
+-- rollback;
+--
+-- -- k-7. 아무것도 정정하지 않는 correction 거부
+-- --      expect: violates check constraint "kaw_transaction_correction_nonempty_chk"
+-- --      (CHECK 는 FK 트리거보다 먼저 평가되므로 부모 행이 없어도 CHECK 에서 걸린다)
+-- begin; set local role service_role;
+--   insert into public.kaw_transaction_correction
+--     (family_code, profile, transaction_id, reason)
+--   values ('__smoke__', '__smoke__', 'vtx:__smoke__', '사유만 있는 행');
+-- rollback;

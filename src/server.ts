@@ -271,7 +271,9 @@ export default {
     // ── 거래 원장 (세션 토큰 필요) ────────────────────────────────────────
     // 브라우저는 Supabase 에 직접 붙지 않는다 — 기존 /api/data · /api/snapshots 와
     // 같은 인증 경로만 쓴다. 원장(kaw_transaction_ledger)은 **읽기 전용**이고,
-    // 적재는 scripts/ledger-import.ts 로만 한다(service_role 에 update 권한도 없다).
+    // 적재는 scripts/ledger-import.ts 로만 한다. 이건 관례가 아니라 권한으로 강제된다 —
+    // migration 004 가 service_role 에서 원장의 update/delete/truncate 를 회수한다
+    // (Supabase 기본 권한이 새 테이블에 ALL 을 붙이므로 "주지 않는" 것만으로는 부족하다).
     // 사용자가 바꾸는 것은 전부 overlay 다: 정정 / 소속 이벤트 / 메모·태그·숨김.
     if (pathname === "/api/ledger" && request.method === "GET") return handleLedgerGet(request, env);
     if (pathname === "/api/ledger/audit" && request.method === "GET") return handleLedgerAuditGet(request, env);

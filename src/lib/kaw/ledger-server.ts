@@ -254,7 +254,9 @@ const numOrNull = (v: unknown): number | null =>
  *   { transactionId, clear: true }  → 정정을 지워 원본으로 되돌린다
  *
  * **원본 행(kaw_transaction_ledger)은 어떤 경우에도 UPDATE 하지 않는다.**
- * 서비스 롤에 원장 update 권한 자체를 주지 않았으므로 실수로도 덮어쓸 수 없다.
+ * migration 004 가 service_role 에서 원장의 update/delete 권한을 **회수**하므로 실수로도
+ * 덮어쓸 수 없다(Supabase 는 새 테이블에 기본으로 ALL 을 붙이기 때문에, 단순히 grant 하지
+ * 않는 것만으로는 막히지 않는다 — 004 의 보안 섹션 참고).
  */
 export async function handleLedgerCorrectPost(request: Request, env: DataEnv): Promise<Response> {
   const a = await auth(request, env);
@@ -295,6 +297,21 @@ export async function handleLedgerCorrectPost(request: Request, env: DataEnv): P
     excluded: bool(body.excluded) ?? false,
     reason: str(body.reason) ?? null,
   };
+
+  // 아무것도 정정하지 않는 overlay 행은 만들지 않는다. 유효값 규칙이 `corrected_* ?? 원본`
+  // 이라 전 필드 null + excluded false 는 어떤 값도 바꾸지 않으면서 그 거래를 "사용자 정정
+  // 데이터"로 잘못 배지하기만 한다. 원본 복귀는 이 행을 지우는 것(clear: true)이다.
+  // DB 에도 같은 조건이 kaw_transaction_correction_nonempty_chk 로 걸려 있고, 여기서
+  // 먼저 걸러 500 대신 400 과 읽을 수 있는 메시지를 돌려준다.
+  const hasCorrectedValue =
+    row.corrected_quantity !== null || row.corrected_price !== null
+    || row.corrected_amount !== null || row.corrected_trade_date !== null
+    || row.corrected_side !== null || row.corrected_ticker !== null;
+  if (!row.excluded && !hasCorrectedValue) {
+    return json({
+      error: "정정할 값이 없습니다. 값을 바꾸거나 제외로 표시하세요 (원본 복귀는 clear: true).",
+    }, 400);
+  }
 
   const { data, error } = await client.from("kaw_transaction_correction")
     .upsert(row, { onConflict: "family_code,profile,transaction_id" })
