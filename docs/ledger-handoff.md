@@ -330,11 +330,12 @@ B. 사용자에게 적용 안내
    (001 → 002 → 003 → 004 순서. idempotent. 기존 객체는 건드리지 않는다.)
    **이 단계는 사용자가 직접 한다.**
 
-C. migration 적용 후 실제 DB 대상 dry-run
-   npm run ledger:dry-run -- --family=<CODE> --profile=<PROFILE>
-   .dev.vars 의 접속정보로 **읽기만** 해서 기존 행 수와 중복 여부를 같이 본다.
+C. migration 적용 후 실제 DB 대상 dry-run  ✅ 완료 (2026-10-07)
+   npm run ledger:dry-run -- --family=soye --profile=hyeobi
+   게이트 17개 전부 통과 / DB 기존 행 0건 — 즉 004 가 적용됐고
+   원장은 비어 있다. 읽기만 했다.
 
-D. DB schema / constraint / 권한 검증
+D. DB schema / constraint / 권한 검증  ✅ 완료 (사용자 직접 수행)
    004 파일 하단 주석의 검증 쿼리를 실행한다.
    적용 직후: (a) 테이블 6개 / (a-2) 컬럼 수 80 / (a-3) RLS on·정책 0 /
              (a-4) CHECK 2종 / (b) 선언된 GRANT / (b-2) 실효 권한 /
@@ -345,11 +346,11 @@ D. DB schema / constraint / 권한 검증
 
    **(b-3) 이 0행이 아니면 import 를 진행하지 않는다.**
 
-E. reconciliation 재실행
+E. reconciliation 재실행  ✅ 완료
    npm test (ledger / verified-transactions 테스트 포함)
    dry-run 리포트의 finalHoldings·checksum 재확인.
 
-F. 모든 gate 통과 확인
+F. 모든 gate 통과 확인  ✅ 완료 (tsc / build / test 590건)
    npx tsc --noEmit / npm run build / npm test
 
 G. 사용자 승인 후 463건 production import
@@ -395,4 +396,4 @@ npm run ledger:import -- --apply --family=<CODE> --profile=<PROFILE>  # 승인 �
 npx vitest run src/lib/kaw/ledger-migration.test.ts   # 004 권한 모델 고정 테스트
 ```
 
-게이트 현황: `tsc` 통과 / `build` 통과 / `test` **547건 통과 (15 파일)**.
+게이트 현황: `tsc` 통과 / `build` 통과 / `test` **590건 통과 (17 파일)**.

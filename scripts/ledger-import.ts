@@ -190,6 +190,22 @@ async function reportExisting(
 
 // ── main ────────────────────────────────────────────────────────────────────
 
+/**
+ * 종료코드를 process.exit() 없이 설정한다.
+ *
+ * Windows + Node 에서 Supabase(undici) 소켓이 닫히는 중에 process.exit() 를
+ * 부르면 libuv 가 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` 로
+ * abort 하고 **종료코드가 127 로 덮인다.** 그러면 성공(0) / 게이트 실패(1) /
+ * batch 기록 실패(1) 을 호출한 쪽에서 구분할 수 없다.
+ *
+ * 실측: --family/--profile 로 DB 조회를 한 뒤 process.exit(0) 을 부르면 127,
+ * 그냥 리턴하면 0 으로 깨끗하게 끝난다(멈추지도 않는다).
+ * 그래서 exitCode 만 세팅하고 이벤트 루프가 스스로 비워지게 둔다.
+ */
+function fail(code: number): void {
+  process.exitCode = code;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const rawText = readFileSync(DATASET_PATH, "utf-8");
@@ -215,21 +231,21 @@ async function main(): Promise<void> {
     console.log("\n═══ DRY-RUN 종료 — DB 에 아무것도 쓰지 않았습니다 ════════");
     console.log("  실제 적재: migration 004 적용 후");
     console.log("    npm run ledger:import -- --apply --family=<CODE> --profile=<PROFILE>");
-    process.exit(datasetOk && idempotentOk ? 0 : 1);
+    return fail(datasetOk && idempotentOk ? 0 : 1);
   }
 
   // ── 여기부터는 실제 쓰기 ──
   if (!datasetOk || !idempotentOk) {
     console.error("\n게이트 실패 — 적재하지 않습니다.");
-    process.exit(1);
+    return fail(1);
   }
   if (!client) {
     console.error("\nSupabase 접속정보가 없습니다 (.dev.vars 의 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY).");
-    process.exit(1);
+    return fail(1);
   }
   if (!args.familyCode || !args.profile) {
     console.error("\n--family=<CODE> --profile=<PROFILE> 가 필요합니다.");
-    process.exit(1);
+    return fail(1);
   }
   await applyImport(client, dataset, args, checksum);
   console.log("\n═══ 적재 완료 ════════════════════════════════════════════");
@@ -237,5 +253,5 @@ async function main(): Promise<void> {
 
 main().catch((e: unknown) => {
   console.error(e);
-  process.exit(1);
+  fail(1);
 });
