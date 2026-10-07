@@ -13,7 +13,7 @@
 import { useMemo, useState } from "react";
 import {
   X, Pencil, EyeOff, Eye, Scissors, ArrowRightLeft, RotateCcw, History,
-  Check, AlertTriangle, Info,
+  Check, AlertTriangle, Info, ChevronLeft,
 } from "lucide-react";
 import { ACCOUNT_LABELS_SHORT } from "@/lib/kaw/constants";
 import {
@@ -366,7 +366,23 @@ export function LedgerEventDetail({
     <>
       <Dialog open onOpenChange={onClose}>
         <DialogContent className="max-w-3xl max-h-[92vh] overflow-y-auto p-0">
-          <DialogHeader className="px-4 pt-4 pb-3 border-b sticky top-0 bg-background z-10">
+          {/* pr-12: 공용 Dialog 의 X 버튼(absolute right-4 top-4)과 제목이 겹치지 않게 비워둔다. */}
+          <DialogHeader className="px-4 pt-3 pb-3 pr-12 border-b sticky top-0 bg-background z-10">
+            {/* 모바일 전용 뒤로가기.
+                데스크톱은 우상단 X 로 닫지만, 아이폰에서는 그 X 가 작고 본문이 스크롤되면
+                시야에서 사라져서 "바깥을 살짝 눌러야 닫히는" 상태였다. sticky 헤더 안에
+                두어 **스크롤 중에도 항상 보이게** 한다. 탭 영역은 44px 에 가깝게 잡았다. */}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="거래 이력으로 돌아가기"
+              className="md:hidden -ml-2 mb-0.5 inline-flex w-fit min-h-9 items-center gap-0.5
+                         self-start rounded-md py-2 pl-1.5 pr-2.5 text-xs font-medium
+                         text-muted-foreground active:bg-muted"
+            >
+              <ChevronLeft className="w-4 h-4" />
+              거래 이력
+            </button>
             <DialogTitle className="text-base flex flex-wrap items-center gap-2">
               <span className="tabular-nums">{eventDateLabel(event)}</span>
               <span className="text-muted-foreground font-normal">

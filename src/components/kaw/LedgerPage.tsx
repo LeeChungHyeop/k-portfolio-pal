@@ -377,7 +377,9 @@ function EventRow({
                   </div>
                 )}
               </div>
-              <ChevronRight className="w-4 h-4 text-muted-foreground/40 shrink-0 mt-1" />
+              {/* 카드 좌우 패딩이 px-3 뿐이라 화살표가 화면 끝에 붙어 잘린 것처럼 보였다.
+                  mr-2 로 8px 더 안쪽에 둔다(총 20px). 본문은 flex-1 이라 8px 만 줄어든다. */}
+              <ChevronRight className="w-4 h-4 text-muted-foreground/40 shrink-0 mt-1 mr-2" />
             </div>
           </div>
         </td>
