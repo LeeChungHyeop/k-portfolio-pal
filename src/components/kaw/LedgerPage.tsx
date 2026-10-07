@@ -377,9 +377,10 @@ function EventRow({
                   </div>
                 )}
               </div>
-              {/* 카드 좌우 패딩이 px-3 뿐이라 화살표가 화면 끝에 붙어 잘린 것처럼 보였다.
-                  mr-2 로 8px 더 안쪽에 둔다(총 20px). 본문은 flex-1 이라 8px 만 줄어든다. */}
-              <ChevronRight className="w-4 h-4 text-muted-foreground/40 shrink-0 mt-1 mr-2" />
+              {/* 모바일에는 진입 화살표를 두지 않는다 — 카드 전체가 이미 탭 대상이고
+                  (active:bg-muted/50 으로 피드백도 준다) 화살표 자체에 기능이 없다.
+                  좁은 화면에서 공간만 먹고 화면 끝에 붙어 잘려 보였다.
+                  데스크톱 표에는 그대로 둔다(행이 넓어 길잡이 역할을 한다). */}
             </div>
           </div>
         </td>
