@@ -38,6 +38,8 @@ import {
   gapProfit,
   spanOfSegment,
   computeProfitAnalysis,
+  accountJoinFlows,
+  type AccountDayValuation,
 } from "./profit-analysis";
 import { verifiedCashflowsFor } from "./verified-cashflows";
 import type { PriceBarsByTicker } from "./useHistoricalPrices";
@@ -1141,5 +1143,128 @@ describe("수익률 분모·분자 회귀", () => {
     expect(r.averageCapital).toBeLessThan(200_000_000);
     expect(r.returnPctLow).toBeCloseTo((r.knownProfit / r.averageCapital) * 100, 9);
     expect(r.returnPctHigh).toBeNull(); // headroom 미정 → 상한 없음
+  });
+});
+
+// ── 합산 가산성 회귀 ────────────────────────────────────────────────────────
+//
+// 2026 전체 손익이 계좌별 합보다 **정확히 9,112,312원**(ISA 2026-01-06 입금액) 많았다.
+// ISA 는 01-06 에 입금되고 **다음 거래일** 01-07 부터 성과 구간이 시작하는데, 그 입금이
+// `e(01-06) < performanceStart(01-07)` 라 외부흐름에서 빠졌다. 그런데 01-07 의 V_open 에는
+// 그 현금이 들어 있어서, 전체 scope 에서는 "없던 자산이 생긴" 것이 그대로 수익이 됐다.
+
+describe("합산 가산성 (aggregate == Σ account)", () => {
+  const dates = ["2026-01-02", "2026-01-07", "2026-03-02"];
+  const covOf = (id: string, performanceStart: string): AccountCoverage => ({
+    accountId: id as AccountId,
+    inception: performanceStart,
+    strategyStart: performanceStart,
+    performanceStart,
+    strategyStartIsTransition: false,
+    seam: null,
+    ledgerCutoff: "2026-12-31",
+    anchorDates: [],
+  });
+  const val = (
+    date: string,
+    accountId: string,
+    vOpen: number,
+    vClose: number,
+  ): AccountDayValuation => ({
+    date,
+    accountId,
+    vOpen,
+    vClose,
+    term1: vClose - vOpen,
+    term2: 0,
+    costs: 0,
+    holdingsSource: "ledger",
+    cashQuality: "derived",
+    usable: true,
+    missing: [],
+  });
+
+  // A: 처음부터 있다. B: 01-07 에 9,112,312원을 들고 합류한다(그 전에는 자산 0).
+  const coverages = [covOf("A", "2026-01-02"), covOf("B", "2026-01-07")];
+  const valuations = [
+    val("2026-01-02", "A", 100_000_000, 100_500_000),
+    val("2026-01-07", "A", 100_500_000, 101_000_000),
+    val("2026-03-02", "A", 101_000_000, 102_000_000),
+    // B 는 01-02 에 아직 없다 (valuation 자체가 없다)
+    val("2026-01-07", "B", 9_112_312, 9_100_000),
+    val("2026-03-02", "B", 9_100_000, 9_050_000),
+  ];
+  const derived = buildDerivedCash({ flows: [], trades: [], tradingDates: dates });
+  const incomeSources = [
+    { accountId: "A", derived, cap: 0 },
+    { accountId: "B", derived, cap: 0 },
+  ];
+
+  it("★ 합류 자본이 외부흐름으로 잡힌다 (없던 자산이 수익으로 둔갑하지 않는다)", () => {
+    const joins = accountJoinFlows(valuations, coverages, ["A", "B"]);
+    // A 는 구간 시작과 동시에 있었으므로 합류 흐름이 아니다(시작값에 이미 들어 있다)
+    expect(joins).toEqual([
+      { date: "2026-01-02", amount: 100_000_000 },
+      { date: "2026-01-07", amount: 9_112_312 },
+    ]);
+  });
+
+  it("★ aggregate profit == Σ account profit (동일 global window)", () => {
+    const [agg] = computeProfitAnalysis({
+      valuations,
+      coverages,
+      scopeAccountIds: ["A", "B"],
+      period: "yearly",
+      flows: [],
+      incomeSources,
+    });
+    // 같은 window 에서 계좌별로 직접 계산 (미개설 구간은 0)
+    const openDate = "2026-01-02",
+      closeDate = "2026-03-02";
+    const perAccount = ["A", "B"].map((id) => {
+      const o = valuations.find((v) => v.accountId === id && v.date === openDate);
+      const c2 = valuations.find((v) => v.accountId === id && v.date === closeDate)!;
+      const cv = coverages.find((x) => x.accountId === id)!;
+      const join =
+        cv.performanceStart! > openDate
+          ? valuations.find((v) => v.accountId === id && v.date === cv.performanceStart)!.vOpen
+          : 0;
+      const start = o?.vOpen ?? 0;
+      return { start, end: c2.vClose, flow: join, profit: c2.vClose - start - join };
+    });
+    const sumStart = perAccount.reduce((s, x) => s + x.start, 0);
+    const sumEnd = perAccount.reduce((s, x) => s + x.end, 0);
+    const sumFlow = perAccount.reduce((s, x) => s + x.flow, 0);
+    const sumProfit = perAccount.reduce((s, x) => s + x.profit, 0);
+
+    expect(agg.beginningTotal).toBe(sumStart);
+    expect(agg.endingTotal).toBe(sumEnd);
+    expect(agg.netCashflow).toBe(sumFlow);
+    expect(agg.knownProfit).toBe(sumProfit);
+    // 버그 당시에는 합류 자본 9,112,312 만큼 손익이 부풀려졌다
+    expect(agg.knownProfit).not.toBe(sumProfit + 9_112_312);
+  });
+
+  it("합류일이 구간 시작일과 같으면 흐름으로 세지 않는다 (이중계산 금지)", () => {
+    // A 만 보는 scope — 구간이 A 의 performanceStart 에서 시작하므로 합류 흐름이 없다
+    const [onlyA] = computeProfitAnalysis({
+      valuations,
+      coverages,
+      scopeAccountIds: ["A"],
+      period: "yearly",
+      flows: [],
+      incomeSources,
+    });
+    expect(onlyA.beginningTotal).toBe(100_000_000);
+    expect(onlyA.netCashflow).toBe(0);
+    expect(onlyA.knownProfit).toBe(102_000_000 - 100_000_000);
+  });
+
+  it("미개설 계좌는 0 으로 더해지고 그 날짜를 버리지 않는다", () => {
+    const scope = aggregateScope(valuations, coverages, ["A", "B"]);
+    // 01-02 에는 B 가 아직 없다 — 그래도 point 가 만들어지고 A 만 합산된다
+    expect(scope.map((s) => s.date)).toEqual(dates);
+    expect(scope[0].vOpen).toBe(100_000_000);
+    expect(scope[1].vOpen).toBe(100_500_000 + 9_112_312);
   });
 });

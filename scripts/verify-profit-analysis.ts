@@ -41,6 +41,7 @@ import {
   buildSegments,
   computeProfitAnalysis,
   gapProfit,
+  accountJoinFlows,
   type AccountDayValuation,
   type PeriodId,
 } from "../src/lib/kaw/profit-analysis";
@@ -323,6 +324,53 @@ const flowPoints = allFlows.map((f) => ({ date: f.date, amount: f.amount }));
     }
   }
   console.log(`  → 실패 ${bad}건 (0 이어야 정상)`);
+}
+
+// ── 가산성 검증: 동일 global window 에서 aggregate == Σ account
+{
+  console.log("\n── 가산성 검증 (동일 global window, aggregate == Σ account) ──");
+  const sdAll = aggregateScope(valuations, coverages, scopeAll).map((d) => d.date);
+  const perAcctFlows = new Map<string, { date: string; amount: number }[]>();
+  for (const id of ACCOUNT_IDS) {
+    perAcctFlows.set(id, allFlows.filter((f) => f.accountId === id).map((f) => ({ date: f.date, amount: f.amount })));
+  }
+  const evalWindow = (ids: string[], openDate: string, closeDate: string) => {
+    const byD = new Map(aggregateScope(valuations, coverages, ids).map((d) => [d.date, d]));
+    const start = byD.get(openDate)?.vOpen ?? 0;
+    const end = byD.get(closeDate)?.vClose ?? 0;
+    const fl = [
+      ...ids.flatMap((id) => perAcctFlows.get(id) ?? []),
+      ...accountJoinFlows(valuations, coverages, ids).filter((j) => j.date > openDate),
+    ].filter((f) => f.date >= openDate && f.date <= closeDate);
+    const net = fl.reduce((s, f) => s + f.amount, 0);
+    return { start, end, net, profit: end - start - net };
+  };
+  let bad = 0;
+  for (const y of ["2025", "2026"]) {
+    const inYear = sdAll.filter((d) => d.startsWith(y));
+    if (inYear.length < 2) continue;
+    const o = inYear[0], cl = inYear[inYear.length - 1];
+    let sS = 0, sE = 0, sF = 0, sP = 0;
+    for (const id of ACCOUNT_IDS) {
+      const r = evalWindow([id], o, cl);
+      sS += r.start; sE += r.end; sF += r.net; sP += r.profit;
+      console.log(`  ${y} ${id.padEnd(11)} start ${krw(r.start).padStart(13)} end ${krw(r.end).padStart(13)}`
+        + ` flow ${krw(r.net).padStart(13)} profit ${krw(r.profit).padStart(12)}`);
+    }
+    const agg = evalWindow(scopeAll, o, cl);
+    const checks: [string, number][] = [
+      ["startValue", agg.start - sS], ["endValue", agg.end - sE],
+      ["externalFlow", agg.net - sF], ["profit", agg.profit - sP],
+    ];
+    console.log(`  ${y} ${"전체".padEnd(11)} start ${krw(agg.start).padStart(13)} end ${krw(agg.end).padStart(13)}`
+      + ` flow ${krw(agg.net).padStart(13)} profit ${krw(agg.profit).padStart(12)}`);
+    for (const [label, diff] of checks) {
+      const ok = Math.abs(diff) < 1;
+      if (!ok) bad++;
+      console.log(`     ${y} ${label.padEnd(13)} ${ok ? "OK" : `*** mismatch ${krw(diff)}`}`);
+    }
+  }
+  console.log(`  → 가산성 mismatch ${bad}건 (0 이어야 정상)`);
 }
 
 // ── 실제 생성되는 기간 목록

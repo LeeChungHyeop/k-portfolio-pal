@@ -621,6 +621,35 @@ export interface ComputeInput {
   }[];
 }
 
+/**
+ * 계좌가 성과 구간에 **합류하면서 들고 들어온 자본**.
+ *
+ * 계좌는 자기 `performanceStart` 부터 합산에 들어오고 그 전에는 자산 0 이다(사실이다).
+ * 그런데 합류 시점의 `V_open` 이 0 이 아니면 — 예컨대 ISA 는 2026-01-06 에 9,112,312원이
+ * 입금되고 **다음 거래일**인 01-07 부터 성과 구간이 시작한다 — 전체 scope 입장에서는
+ * "없던 자산이 갑자기 생긴" 것이 된다. 그 돈은 **외부에서 들어온 자본**이므로 반드시
+ * 외부흐름으로 세야 한다. 세지 않으면 그만큼이 통째로 수익으로 둔갑한다.
+ *
+ * 실제로 그랬다: 2026 전체 손익이 계좌별 합보다 정확히 9,112,312원 많았다.
+ *
+ * 합류일이 구간 시작일과 **같으면** 그 자본은 이미 `beginningTotal` 에 들어 있으므로
+ * 흐름으로 세지 않는다(호출부에서 `date > seg.openDate` 로 거른다).
+ */
+export function accountJoinFlows(
+  valuations: readonly AccountDayValuation[],
+  coverages: readonly AccountCoverage[],
+  scopeAccountIds: readonly string[],
+): FlowPoint[] {
+  const out: FlowPoint[] = [];
+  for (const id of scopeAccountIds) {
+    const cv = coverages.find((c) => c.accountId === id);
+    if (!cv?.performanceStart) continue;
+    const v = valuations.find((x) => x.accountId === id && x.date === cv.performanceStart);
+    if (v?.usable && v.vOpen !== 0) out.push({ date: cv.performanceStart, amount: v.vOpen });
+  }
+  return out;
+}
+
 export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
   const scopeDays = aggregateScope(input.valuations, input.coverages, input.scopeAccountIds);
   if (scopeDays.length < 1) return [];
@@ -632,6 +661,7 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
   const last = dates[dates.length - 1];
   const inScope = new Set(input.scopeAccountIds);
   const sources = input.incomeSources.filter((s) => inScope.has(s.accountId));
+  const joins = accountJoinFlows(input.valuations, input.coverages, input.scopeAccountIds);
 
   return segments.map((seg) => {
     let recognized = 0;
@@ -642,10 +672,12 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
       if (s.cap === null) anyCapMissing = true;
       else capSum += s.cap;
     }
+    // 구간 **도중에** 합류한 계좌의 자본만 외부흐름에 더한다.
+    const segFlows = [...input.flows, ...joins.filter((j) => j.date > seg.openDate)];
     return segmentProfit(
       seg,
       scopeDays,
-      input.flows,
+      segFlows,
       { recognized, headroom: anyCapMissing ? null : capSum },
       spanOfSegment(seg, input.period, first, last),
     );
