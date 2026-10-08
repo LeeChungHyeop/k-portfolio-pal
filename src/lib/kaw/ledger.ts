@@ -522,6 +522,17 @@ export function findDuplicateFingerprints(
 export const INTRA_DAY_ROW_ORDER: Readonly<Record<string, "asc" | "desc">> = {
   miraeasset_retirement_web: "asc",
   miraeasset_transaction_history: "desc",
+  // MTS 거래내역 **화면 캡처**에서 복원한 행 (v2 증분 6건, 연금저축 2026-10-02).
+  // 화면이 최신순이고 sourceRow 도 그 순서로 매겼으므로 `desc` 다 —
+  // 같은 export 계열인 miraeasset_transaction_history 와 같은 방향이다.
+  //
+  // **방향을 실측으로 확정할 수는 없다**(거래후잔고가 화면에 없다). 대신 이 source 의
+  // 행들은 방향에 **결과가 의존하지 않는다**는 것을 실측했다: 6건이 전부 같은 날이고,
+  // 매도 수량이 직전 보유수량 이하라 어떤 순서로 재생해도 음수가 생기지 않으며
+  // 최종 보유수량도 같다(scripts/verify-ledger-v2.mjs 의 "일중 순서 무관" 검사가
+  // 720개 순열을 전부 돌려 확인한다). 그래서 이 값은 표기일 뿐 판정에 영향이 없다.
+  // 이 source 에 **다른 날짜 행을 추가하려면 그 전제가 깨지므로 다시 실측해야 한다.**
+  miraeasset_capture_qty_price_reconstructed: "desc",
 };
 
 /**

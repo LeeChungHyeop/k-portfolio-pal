@@ -24,7 +24,12 @@ import {
   type LedgerTransaction,
 } from "../src/lib/kaw/ledger";
 
-const DATASET_PATH = resolve(process.cwd(), "data/verified-transactions.v1.json");
+// 기본 v1 — `--dataset=data/verified-transactions.v2.json` 으로 세대를 바꾼다.
+const DATASET_PATH = resolve(
+  process.cwd(),
+  (process.argv.find((a) => a.startsWith("--dataset=")) ?? "").slice(10)
+    || "data/verified-transactions.v1.json",
+);
 
 function arg(name: string): string {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));

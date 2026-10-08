@@ -49,12 +49,16 @@ import {
 // 실제 DB 쓰기는 src 쪽 모듈에 있다 — 테스트가 가짜 클라이언트로 그 흐름을 돌려본다.
 import { applyImport } from "../src/lib/kaw/ledger-import-core";
 
-const DATASET_PATH = resolve(process.cwd(), "data/verified-transactions.v1.json");
+// 기본은 v1 이다 — 인자 없이 돌리면 지금까지와 **똑같이** 동작한다.
+// v2(=v1 463건 + 보충 6건)를 넣으려면 명시한다:
+//   npm run ledger:dry-run -- --dataset=data/verified-transactions.v2.json
+const DEFAULT_DATASET = "data/verified-transactions.v1.json";
 
 interface Args {
   apply: boolean;
   familyCode: string;
   profile: string;
+  dataset: string;
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -67,6 +71,7 @@ function parseArgs(argv: readonly string[]): Args {
     // production 식별자를 코드에 박지 않는다 — 인자나 환경변수로 받는다.
     familyCode: get("family") ?? process.env.KAW_FAMILY_CODE ?? "",
     profile: get("profile") ?? process.env.KAW_PROFILE ?? "",
+    dataset: get("dataset") ?? DEFAULT_DATASET,
   };
 }
 
@@ -208,13 +213,14 @@ function fail(code: number): void {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const rawText = readFileSync(DATASET_PATH, "utf-8");
+  const datasetPath = resolve(process.cwd(), args.dataset);
+  const rawText = readFileSync(datasetPath, "utf-8");
   const checksum = checksumOf(rawText);
   const dataset = parseVerifiedDataset(JSON.parse(rawText));
 
   console.log("═══ 거래 원장 적재 ═══════════════════════════════════════");
   console.log(`  모드      ${args.apply ? "APPLY (DB 에 씁니다)" : "DRY-RUN (아무것도 쓰지 않습니다)"}`);
-  console.log(`  데이터셋  ${DATASET_PATH}`);
+  console.log(`  데이터셋  ${datasetPath}`);
   console.log(`  checksum  ${checksum}`);
 
   const datasetOk = reportDataset(dataset);
@@ -230,7 +236,7 @@ async function main(): Promise<void> {
   if (!args.apply) {
     console.log("\n═══ DRY-RUN 종료 — DB 에 아무것도 쓰지 않았습니다 ════════");
     console.log("  실제 적재: migration 004 적용 후");
-    console.log("    npm run ledger:import -- --apply --family=<CODE> --profile=<PROFILE>");
+    console.log(`    npm run ledger:import -- --apply --dataset=${args.dataset} --family=<CODE> --profile=<PROFILE>`);
     return fail(datasetOk && idempotentOk ? 0 : 1);
   }
 
@@ -247,7 +253,8 @@ async function main(): Promise<void> {
     console.error("\n--family=<CODE> --profile=<PROFILE> 가 필요합니다.");
     return fail(1);
   }
-  await applyImport(client, dataset, args, checksum);
+  // batch 이력에 어느 세대를 넣었는지 남긴다 (source_kind = verified_dataset_v1 / v2).
+  await applyImport(client, dataset, { ...args, datasetLabel: args.dataset }, checksum);
   console.log("\n═══ 적재 완료 ════════════════════════════════════════════");
 }
 

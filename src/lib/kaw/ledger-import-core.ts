@@ -32,10 +32,24 @@ import { verifyDataset, type VerifiedDataset } from "./verified-transactions";
 export const SOURCE_KIND = "verified_dataset_v1";
 export const SOURCE_LABEL = "data/verified-transactions.v1.json";
 
+/**
+ * 적재한 **데이터셋 세대**를 batch 이력에 남긴다.
+ *
+ * v1 463건을 넣은 batch 와 v2 469건을 넣은 batch 가 이력에서 구분되지 않으면
+ * "이 행은 어느 파일에서 왔는가"를 나중에 말할 수 없다. 기본값은 v1 그대로라
+ * 기존 호출부·테스트의 동작은 바뀌지 않는다.
+ */
+export function datasetProvenance(label: string): { kind: string; label: string } {
+  const m = /verified-transactions\.v(\d+)\.json$/.exec(label.split("\\").join("/"));
+  return { kind: m ? `verified_dataset_v${m[1]}` : SOURCE_KIND, label };
+}
+
 /** 적재 대상 식별자. CLI 의 --family / --profile 에서 온다. */
 export interface ImportTarget {
   familyCode: string;
   profile: string;
+  /** 적재한 데이터셋 파일 경로. 없으면 v1 로 본다(기존 동작). */
+  datasetLabel?: string;
 }
 
 /** SQL 문자열 리터럴. 사람이 SQL Editor 에 붙여넣을 복구문을 만들 때만 쓴다. */
@@ -101,7 +115,8 @@ export async function applyImport(
   // batch 기록 재시도. 테스트가 대기 없이 돌 수 있도록 열어뒀다.
   retry: { attempts: number; waitMs: number } = { attempts: 3, waitMs: 400 },
 ): Promise<void> {
-  const batchId = `imp:${SOURCE_KIND}:${new Date().toISOString()}`;
+  const prov = datasetProvenance(args.datasetLabel ?? SOURCE_LABEL);
+  const batchId = `imp:${prov.kind}:${new Date().toISOString()}`;
   const rows = d.transactions.map((t) => ({
     family_code: args.familyCode,
     profile: args.profile,
@@ -156,8 +171,8 @@ export async function applyImport(
     id: batchId,
     family_code: args.familyCode,
     profile: args.profile,
-    source_kind: SOURCE_KIND,
-    source_label: SOURCE_LABEL,
+    source_kind: prov.kind,
+    source_label: prov.label,
     source_checksum: checksum,
     inserted_count: inserted,
     skipped_count: skipped,
