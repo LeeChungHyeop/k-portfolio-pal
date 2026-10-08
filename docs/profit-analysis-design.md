@@ -1,9 +1,53 @@
-# 수익 분석 (구 "기간 성과") 전면 개편 — 설계안 (rev3)
+# 수익 분석 (구 "기간 성과") 전면 개편 — 설계안 (rev4, 구현 완료)
 
 **상태: 설계만. 구현 코드 변경 0건.** production DB write / migration / legacy 삭제는 범위 밖이다.
 
 - 활성 프로젝트: `k-allweather`
 - 선행 문서: `docs/ledger-handoff.md`
+
+## rev4 — 구현 완료 (2026-10-08)
+
+설계대로 구현했고 게이트를 전부 통과했다. **production DB write 0건 / migration 0건 /
+배포 안 함.**
+
+| 결정 | 반영 |
+|---|---|
+| retirement 성과 시작 **2025-09-11** (09-10 전환일 제외) | `resolvePerformanceStart` 가 전략시작 직전 보유수량으로 **데이터에서** 판정한다. 고정 테스트 있음 |
+| holdings source 를 **cutoff** 에서 전환 (seam 아님) | `holdingsSourceFor`: `date <= ledgerCutoff → ledger`, 이후 `anchor`. seam 은 reconciliation checkpoint 로만 남았다 |
+| span 과 quality 분리 | `span`(full / account-inception / in-progress) × `cashQuality`(derived / anchor-implied / cashflow-pending / unknown) × `holdingsSource`. `exact` 는 **ledger + derived 일 때만** |
+| 평가 엔진 전 구간 동일 | 보유수량 source 만 구간별로 다르고, open/close 평가는 하나의 OHLC 엔진 |
+| monthly/yearly 합성 금지 | period 마다 `segmentProfit(O, C)` 독립 호출. **bridge 항등식**(segment = Σ일간 + Σ기간외갭)을 실데이터 14개월에서 오차 **0.000000** 으로 확인 |
+
+### Step 1c 사전 실측 결과 (2026-10-08)
+
+- siseJson 이 `['날짜','시가','고가','저가','종가',…]` 를 주고 **시가는 m[2]** 다. 13개월
+  구간을 **종목당 요청 1회**로 받는다(268 거래일)
+- 모바일 JSON 폴백에도 **`openPrice` 가 있다**(쉼표 포함 문자열) → 폴백 경로도 bar 를 만든다
+- **17종목 전부 조회 성공**, open ≤ 0 인 행 0건
+- 뒤늦게 상장된 3종목(`0162Z0` 2026-02-26 / `0167A0` 2026-03-17 / `0181B0` 2026-05-12)도
+  **첫 원장 매수일이 상장일 이후**라 "가격 없는 보유" 가 생기지 않는다
+
+### 구현 중 발견해 고친 것
+
+1. **유도 예수금은 계좌 개시일부터 만들어야 한다.** 표시 구간(전략시작~)만으로 만들면
+   retirement 의 60.9M 입금이 구간 밖이라 매수만 반영돼 모델 예수금이 **21M** 으로 나왔다.
+   전 구간으로 고치자 `R = 1,087원` 이 됐다(실제 예수금 3,621 vs 모델 2,534).
+2. **일간 차트 폭 측정** — 바깥 wrapper 를 재면 레이아웃 전에 0 이 나와 slot 이 최소값으로
+   굳었다(375px 에서 18개만 보임). **스크롤 컨테이너 자체**를 관측하고 0 을 무시하도록
+   고쳐 375px 에서 **22 거래일**이 보인다.
+3. `pickSeriesInRange`(종가 전용)와 `pickBarsInRange`(시가+종가)를 **분리**했다. 하나로
+   합치면 기존 과거 복원 경로가 시가 없이는 동작하지 않게 된다.
+
+### 게이트
+
+```
+npx tsc --noEmit   통과
+npm test           716건 통과 (19 파일, 신규 35건)
+npm run build      통과
+npm run profit:verify   seam 불일치 0 / bridge 오차 0.000000 / 스냅샷 교차검증 통과
+```
+
+---
 
 ## rev3 — 목표 재정의 (이 절이 범위를 정한다)
 

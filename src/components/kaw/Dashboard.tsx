@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import type { Page } from "@/components/kaw/Sidebar";
 import { PortfolioBenchmarkSection } from "@/components/kaw/PortfolioBenchmarkChart";
+import { ProfitAnalysisSection } from "@/components/kaw/ProfitAnalysisSection";
 
 // ── 종목별 비중 도넛 색상 ─────────────────────────────────────────────────
 // 대시보드(구)와 같은 팔레트/배정 원칙을 쓴다: 전체 합산 기준 상위 8개 종목에 색을 고정
@@ -293,80 +294,10 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
     ? accounts.some((a) => a.cashEntered)
     : (accounts.find((a) => a.id === scope)?.cashEntered ?? false);
 
-  // ── Section D: 기간 성과 ────────────────────────────────────────────────
-  // 외부 입출금은 스냅샷이 아니라 **현재 cashflow 장부**에서 읽는다. 과거 날짜의 입출금을
-  // 나중에 추가·수정·삭제해도 재스냅샷 없이 그 기간 성과가 즉시 교정된다.
-  const perfCashflows = useMemo<PerformanceCashflow[]>(() => {
-    const out: PerformanceCashflow[] = [];
-    for (const id of ACCOUNT_IDS) {
-      for (const c of state.accounts[id].cashflows ?? []) {
-        // timing 을 같이 넘긴다 — 장마감 후 입금(퇴직연금 25일 저녁)은 날짜를 미루지 않고
-        // 귀속 구간만 조정하기 때문이다(performance.ts isFlowInSegment).
-        out.push({ accountId: id, date: c.date, amount: c.amount, timing: c.timing });
-      }
-    }
-    return out;
-  }, [state.accounts]);
-
-  // ── 과거 구간 복원 ──────────────────────────────────────────────────────
-  // 실제 스냅샷이 쌓이기 전 기간은 DB 에 가짜 행을 넣지 않고, 리밸런싱 history 의 실제
-  // 보유수량 × 그 날 실제 종가로 **조회 시점에** 평가액 행을 만들어 합친다
-  // (historical-performance.ts). 실제 스냅샷은 절대 덮지 않는다.
-  const actualRows = snapshots.data?.rows ?? [];
-  const today = kstDateString();
-  const reconstructionAccounts = useMemo<ReconstructionAccountInput[]>(
-    () => ACCOUNT_IDS.map((id) => ({
-      accountId: id,
-      history: state.accounts[id].history,
-      // 금액이 아니라 **날짜만** 넘긴다 — cashflow 를 복원 평가액에 더하지 않는다.
-      // anchor 이후 입출금이 있으면 그 구간을 approximate 로 표시하는 데만 쓴다.
-      cashflowDates: (state.accounts[id].cashflows ?? []).map((c) => c.date),
-    })),
-    [state.accounts],
-  );
-  // 요청 계획(종목 set + from/to). scope·기간 토글과 무관하므로 토글해도 재요청하지 않는다.
-  const historyPlan = useMemo(
-    () => reconstructionPlan(reconstructionAccounts, library, actualRows, today),
-    [reconstructionAccounts, library, actualRows, today],
-  );
-  const historyPrices = useHistoricalPriceSeries(
-    historyPlan,
-    !!currentUser && !snapshots.isLoading && !snapshots.data?.unavailable,
-  );
-  const timeline = useMemo(
-    () => buildPerformanceTimeline({
-      accounts: reconstructionAccounts,
-      library,
-      actualSnapshots: actualRows,
-      priceSeries: historyPrices.data ?? {},
-    }),
-    [reconstructionAccounts, library, actualRows, historyPrices.data],
-  );
-
-  const perf = useMemo(
-    () => calculatePerformance(
-      timeline,
-      perfCashflows,
-      scopeSelector(perfScope),
-      period,
-    ),
-    [timeline, perfCashflows, perfScope, period],
-  );
-  // 지금 보이는 구간에 복원 행이 섞여 있는가 — 안내 badge 표시 판정
-  const perfHasReconstructed = useMemo(
-    () => timelineHasReconstructed(timeline, perf, scopeSelector(perfScope)),
-    [timeline, perf, perfScope],
-  );
-  const perfChartData = useMemo(
-    () => perf.map((p) => ({ ...p, bar: metric === "pct" ? (p.returnPct ?? 0) : p.profit })),
-    [perf, metric],
-  );
-  // 안내 문구용 — 현재 scope 에서 실제로 쓸 수 있는 날짜 수
-  // (전체 scope 면 네 계좌가 모두 있는 날만 센다).
-  const usableDayCount = useMemo(
-    () => aggregateByDate(timeline, scopeSelector(perfScope)).length,
-    [timeline, perfScope],
-  );
+  // Section D(수익 분석)의 계산은 ProfitAnalysisSection 안에서 한다 —
+  // 원장 replay + OHLC + 유도 예수금을 쓰므로 입력이 이 화면의 나머지와 다르다.
+  // 기존 `performance.ts` / `historical-performance.ts` 경로는 지우지 않았고
+  // 계좌 화면·지수비교가 계속 쓴다.
 
   // ── Section E: 포트폴리오 상태 ──────────────────────────────────────────
   // 새 판정 기준을 만들지 않는다 — 기존 checkSafeAssetValueLimit / 예수금 입력여부 /
@@ -588,115 +519,11 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
         </div>
       </Card>
 
-      {/* ── Section D: 기간 성과 ──────────────────────────────────────── */}
-      <Card className="p-4 md:p-5 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold">기간 성과</h3>
-            {perfHasReconstructed && (
-              <span
-                title="실제 일별 스냅샷이 쌓이기 전 기간은 리밸런싱 기록의 보유수량 × 당시 종가로 복원한 추정값입니다. 그 구간의 예수금은 0원으로 봅니다."
-                className="px-1.5 py-0.5 rounded-md text-[10px] border border-amber-300/60 dark:border-amber-800/60 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-              >
-                과거 구간 추정 포함
-              </span>
-            )}
-          </div>
-          <div className="flex gap-1">
-            {([["daily", "일간"], ["monthly", "월간"], ["yearly", "연간"]] as const).map(([id, label]) => (
-              <button
-                key={id}
-                onClick={() => setPeriod(id)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors ${
-                  period === id
-                    ? "bg-violet-500/15 text-violet-600 dark:text-violet-300 border border-violet-300/60 dark:border-violet-700/60"
-                    : "text-muted-foreground hover:bg-muted border border-transparent"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <ScopeTabs value={perfScope} onChange={setPerfScope} />
-          <div className="flex gap-1 md:ml-auto">
-            {([["pct", "수익률(%)"], ["amount", "수익금(원)"]] as const).map(([id, label]) => (
-              <button
-                key={id}
-                onClick={() => setMetric(id)}
-                className={`px-2.5 py-1 rounded-lg text-xs transition-colors ${
-                  metric === id ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:bg-muted/60"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* 기간 손익 = 기말 총자산 - 기초 총자산 - 기간 중 외부 입출금.
-            수익률은 Modified Dietz (분모 = 기초자산 + 기간 가중 외부흐름) — performance.ts 참고.
-            스냅샷이 2개 이상 쌓여야 구간이 하나 만들어진다. 없는 구간을 0으로 채우지 않는다. */}
-        {snapshots.isLoading ? (
-          <div className="h-48 grid place-items-center text-sm text-muted-foreground">
-            <span className="flex items-center gap-2"><RefreshCw className="w-4 h-4 animate-spin" /> 스냅샷을 불러오는 중…</span>
-          </div>
-        ) : snapshots.data?.unavailable ? (
-          <div className="h-48 rounded-xl border border-dashed grid place-items-center text-center px-4">
-            <div className="space-y-1">
-              <Database className="w-6 h-6 text-muted-foreground/40 mx-auto" />
-              <p className="text-sm text-muted-foreground">일별 스냅샷 저장소가 아직 준비되지 않았습니다</p>
-              <p className="text-[11px] text-muted-foreground/70">migration 003 적용 후 매 거래일 자동으로 쌓입니다</p>
-            </div>
-          </div>
-        ) : perfChartData.length === 0 ? (
-          <div className="h-48 rounded-xl border border-dashed grid place-items-center text-center px-4">
-            <div className="space-y-1">
-              <BarChart3 className="w-6 h-6 text-muted-foreground/40 mx-auto" />
-              <p className="text-sm text-muted-foreground">
-                {usableDayCount === 0
-                  ? "일별 자산 스냅샷을 모으는 중입니다"
-                  : `스냅샷 ${usableDayCount}일치 — 구간을 만들려면 2일 이상 필요합니다`}
-              </p>
-              <p className="text-[11px] text-muted-foreground/70 flex items-center justify-center gap-1">
-                <CalendarClock className="w-3 h-3" />
-                매 거래일 장 마감 후(한국시간 15:40) 하루 한 번 기록됩니다
-              </p>
-            </div>
-          </div>
-        ) : (
-          <>
-            <div className="h-52">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={perfChartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
-                  <XAxis dataKey="label" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
-                  <YAxis
-                    tick={{ fontSize: 11 }}
-                    width={metric === "pct" ? 44 : 56}
-                    tickFormatter={(v: number) => (metric === "pct" ? `${v.toFixed(1)}%` : fmtAxisAmount(v))}
-                  />
-                  <ReferenceLine y={0} stroke="currentColor" opacity={0.35} />
-                  <Tooltip content={<PerfTooltip />} cursor={{ fillOpacity: 0.08 }} />
-                  <Bar dataKey="bar" radius={[3, 3, 0, 0]}>
-                    {perfChartData.map((p) => (
-                      <Cell key={p.key} fill={p.bar >= 0 ? perfUp : perfDown} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-            <p className="text-[11px] text-muted-foreground/80">
-              기간 손익 = 기말 총자산 − 기초 총자산 − 기간 중 외부 입출금.
-              수익률은 기간 중 들어온 돈을 남은 기간만큼만 분모에 반영합니다(Modified Dietz).
-              {perfChartData.some((p) => p.partial) && " 가장 이른 구간은 그 앞 스냅샷이 없어 구간 내부 첫 스냅샷을 기준으로 계산했습니다."}
-              {perfHasReconstructed && " 일별 스냅샷 이전의 과거 구간은 보유수량 × 당시 종가 기준 추정이며, 그 구간의 예수금은 0원으로 봅니다."}
-            </p>
-          </>
-        )}
-      </Card>
+      {/* ── Section D: 수익 분석 (구 "기간 성과") ───────────────────────
+          보유수량 source: 전략시작~각 계좌 ledger cutoff = Transaction Ledger replay,
+          cutoff~오늘 = 기존 rowQuantitiesSnap anchor. 평가는 전 구간 동일 OHLC 엔진.
+          계산은 profit-analysis.ts 순수 모듈이 한다. */}
+      <ProfitAnalysisSection />
 
       {/* ── Section E: 포트폴리오 상태 ────────────────────────────────── */}
       <Card className="p-4 md:p-5 space-y-3">

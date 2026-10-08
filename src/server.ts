@@ -242,7 +242,16 @@ export default {
         const rangeError = historySeriesRangeError(tickers, from, to);
         if (rangeError) return Response.json({ error: rangeError }, { status: 400 });
         const { series, failed, timestamp } = await fetchNaverHistorySeries(tickers, from, to);
-        return Response.json({ series, failed, timestamp }, { headers: { "Cache-Control": "no-store" } });
+        // 응답은 **상위집합**이다 — `price`(종가)를 그대로 두고 `open` 을 더한다.
+        // 기존 소비자(toPriceSeriesByTicker)는 `price` 만 읽으므로 깨지지 않는다.
+        const payload: Record<string, { date: string; price: number; open: number }[]> = {};
+        for (const [ticker, bars] of Object.entries(series)) {
+          payload[ticker] = bars.map((b) => ({ date: b.date, price: b.close, open: b.open }));
+        }
+        return Response.json(
+          { series: payload, failed, timestamp },
+          { headers: { "Cache-Control": "no-store" } },
+        );
       } catch (err) {
         console.error("Naver history series error:", err);
         return Response.json({ error: String(err) }, { status: 500 });

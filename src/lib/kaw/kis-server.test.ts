@@ -7,6 +7,7 @@ import {
   NAVER_MOBILE_PAGE_SIZE,
   NAVER_MAX_PAGE_STEPS,
   pickSeriesInRange,
+  pickBarsInRange,
   collectNaverSeriesByPaging,
   historySeriesRangeError,
   HISTORY_SERIES_MAX_TICKERS,
@@ -183,10 +184,12 @@ describe("parseNaverSiseJson — siseJson 구간 응답 파싱", () => {
 \t\t\t\t["20250902", 55300, 56000, 55100, 55900, 100000, 0.00],
 \t\t\t\t["20250910", 58000, 58900, 58100, 58675, 123456, 0.00]]`;
 
-  it("행을 뽑아 내림차순으로 돌려준다 (종가는 5번째 숫자)", () => {
+  it("행을 뽑아 내림차순으로 돌려준다 (시가는 2번째·종가는 5번째 숫자)", () => {
     const rows = parseNaverSiseJson(real);
-    expect(rows[0]).toEqual({ localTradedAt: "2025-09-10", closePrice: "58675" });
+    expect(rows[0]).toEqual({ localTradedAt: "2025-09-10", closePrice: "58675", openPrice: "58000" });
     expect(rows.map((r) => r.localTradedAt)).toEqual(["2025-09-10", "2025-09-02", "2025-09-01"]);
+    // 시가를 버리지 않는다 — 수익 분석이 "장 시작 → 장 마감"을 쓴다
+    expect(rows.map((r) => r.openPrice)).toEqual(["58000", "55300", "55670"]);
   });
 
   it("목표일 이하 첫 행이 그 날 또는 직전 거래일이다", () => {
@@ -339,6 +342,46 @@ describe("(16) 잘못된 가격 / 빈 series 는 fail closed", () => {
   });
 });
 
+describe("pickBarsInRange — 시가·종가 bar parser (수익 분석 전용)", () => {
+  it("open 또는 close 중 하나만 유효한 행은 버린다 (partial 금지)", () => {
+    const rows = [
+      { localTradedAt: "2026-01-05", closePrice: "1000", openPrice: "990" },
+      { localTradedAt: "2026-01-06", closePrice: "1000" },
+      { localTradedAt: "2026-01-07", openPrice: "990" },
+      { localTradedAt: "2026-01-08", closePrice: "0", openPrice: "990" },
+      { localTradedAt: "2026-01-09", closePrice: "1000", openPrice: "0" },
+    ] as NaverPriceRow[];
+    expect(pickBarsInRange(rows, "2026-01-01", "2026-01-31")).toEqual([
+      { date: "2026-01-05", open: 990, close: 1_000 },
+    ]);
+  });
+
+  it("음수 표기는 open 쪽에서도 버린다", () => {
+    const rows = [
+      { localTradedAt: "2026-01-05", closePrice: "1000", openPrice: "-990" },
+      { localTradedAt: "2026-01-06", closePrice: "-1000", openPrice: "990" },
+    ] as NaverPriceRow[];
+    expect(pickBarsInRange(rows, "2026-01-01", "2026-01-31")).toEqual([]);
+  });
+
+  it("쉼표가 섞인 모바일 JSON 형식도 읽는다", () => {
+    const rows = [
+      { localTradedAt: "2026-01-05", closePrice: "25,860", openPrice: "25,960" },
+    ] as NaverPriceRow[];
+    expect(pickBarsInRange(rows, "2026-01-01", "2026-01-31")).toEqual([
+      { date: "2026-01-05", open: 25_960, close: 25_860 },
+    ]);
+  });
+
+  it("pickSeriesInRange 는 종가 전용 계약을 유지한다 (시가가 없어도 동작)", () => {
+    const rows = [{ localTradedAt: "2026-01-05", closePrice: "1000" }] as NaverPriceRow[];
+    expect(pickSeriesInRange(rows, "2026-01-01", "2026-01-31")).toEqual([
+      { date: "2026-01-05", price: 1_000 },
+    ]);
+    expect(pickBarsInRange(rows, "2026-01-01", "2026-01-31")).toEqual([]);
+  });
+});
+
 describe("historySeriesRangeError — 요청 범위 guard", () => {
   const ok = ["100000", "200000"];
 
@@ -366,8 +409,10 @@ describe("historySeriesRangeError — 요청 범위 guard", () => {
 });
 
 describe("collectNaverSeriesByPaging — 폴백 요청 수가 묶여 있다", () => {
+  // 이 경로는 **bar(시가+종가)** 를 돌려준다 — 수익 분석이 "장 시작 → 장 마감"을 쓰므로
+  // 모바일 JSON 의 `openPrice` 를 같이 읽는다(실측으로 존재 확인).
   const page = (dates: string[]): NaverPriceRow[] =>
-    dates.map((d) => ({ localTradedAt: d, closePrice: "1000" }));
+    dates.map((d) => ({ localTradedAt: d, closePrice: "1000", openPrice: "990" }));
 
   it("fromDate 에 닿으면 더 깊이 들어가지 않는다", async () => {
     const seen: number[] = [];
@@ -399,6 +444,18 @@ describe("collectNaverSeriesByPaging — 폴백 요청 수가 묶여 있다", ()
       return p === 1 ? page(["2026-01-09"]) : null;
     });
     expect(calls).toBe(2);
-    expect(out).toEqual([{ date: "2026-01-09", price: 1_000 }]);
+    expect(out).toEqual([{ date: "2026-01-09", open: 990, close: 1_000 }]);
+  });
+
+  it("시가가 없는 행은 버린다 — 전일 종가로 대신 채우지 않는다", async () => {
+    const out = await collectNaverSeriesByPaging("2026-01-01", "2026-01-09", async (p) =>
+      p === 1
+        ? ([
+            { localTradedAt: "2026-01-09", closePrice: "1000", openPrice: "990" },
+            { localTradedAt: "2026-01-08", closePrice: "1000" },
+            { localTradedAt: "2026-01-07", closePrice: "1000", openPrice: "0" },
+          ] as NaverPriceRow[])
+        : null);
+    expect(out).toEqual([{ date: "2026-01-09", open: 990, close: 1_000 }]);
   });
 });

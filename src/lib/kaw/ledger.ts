@@ -293,6 +293,85 @@ export function replayFinalHoldings(
   return byAccount;
 }
 
+/** 하루치 보유수량 변화 (ticker → 증감) + 그 날 체결 금액·비용. */
+export interface DailyHoldingsDelta {
+  /** YYYY-MM-DD (실효 거래일) */
+  date: string;
+  /** ticker → 증감(매수 +, 매도 −). 0 인 종목도 남긴다 — "그 날 건드렸다"는 사실이다 */
+  deltas: Readonly<Record<string, number>>;
+  /** ticker → 그 날 체결 가중평균 단가. 당일 매매분 손익(②항) 계산에 쓴다 */
+  execPrice: Readonly<Record<string, number>>;
+  /** 순현금 이동 (매도 − 매수). 비용은 별도 */
+  netCashDelta: number;
+  /** 보고된 수수료·세금 합. null 은 0 으로 채우지 않으므로 과소계상될 수 있다 */
+  reportedCosts: number;
+}
+
+/**
+ * 계좌별·날짜별 보유수량 변화 (실효 거래일 오름차순).
+ *
+ * **일중 순서에 의존하지 않는다** — 하루의 순증감만 쓰기 때문이다(`compareIntraDayOrder`
+ * 는 "이전 → 이후" 를 거래 단위로 보여줄 때 필요하고, 하루 합계에는 영향이 없다).
+ * 그래서 입력 순서가 바뀌어도 결과가 같다.
+ *
+ * `execPrice` 는 그 날 그 종목의 **체결 가중평균 단가**다. 같은 날 같은 종목을 여러 번
+ * 사고팔면 수량 가중으로 합친다. 매수와 매도가 섞인 날은 **절댓값 수량 가중**으로
+ * 합친다 — ②항은 `Δq × (종가 − 체결가)` 이고 Δq 가 순증감이므로, 순증감에 대응하는
+ * 대표 단가가 필요하다.
+ *
+ * 제외(`excluded`)된 거래는 반영하지 않고, 정정(`corrected`)된 값을 쓴다.
+ */
+export function replayDailyHoldings(
+  transactions: readonly LedgerTransaction[],
+  corrections: ReadonlyMap<string, TransactionCorrection> = new Map(),
+): Record<string, DailyHoldingsDelta[]> {
+  const byAccount = new Map<string, Map<string, {
+    deltas: Record<string, number>;
+    qtyWeight: Record<string, number>;
+    priceWeight: Record<string, number>;
+    netCashDelta: number;
+    reportedCosts: number;
+  }>>();
+
+  for (const tx of transactions) {
+    const e = effectiveTransaction(tx, corrections.get(tx.id));
+    if (e.excluded) continue;
+    const perDate = byAccount.get(e.accountId) ?? new Map();
+    byAccount.set(e.accountId, perDate);
+    const bucket = perDate.get(e.eventDate) ?? {
+      deltas: {}, qtyWeight: {}, priceWeight: {}, netCashDelta: 0, reportedCosts: 0,
+    };
+    perDate.set(e.eventDate, bucket);
+
+    bucket.deltas[e.ticker] = (bucket.deltas[e.ticker] ?? 0) + signedQty(e);
+    // 절댓값 수량 가중 평균 단가
+    bucket.qtyWeight[e.ticker] = (bucket.qtyWeight[e.ticker] ?? 0) + e.quantity;
+    bucket.priceWeight[e.ticker] = (bucket.priceWeight[e.ticker] ?? 0) + e.quantity * e.price;
+    bucket.netCashDelta += e.side === "sell" ? e.amount : -e.amount;
+    bucket.reportedCosts += (tx.fee ?? 0) + (tx.tax ?? 0);
+  }
+
+  const out: Record<string, DailyHoldingsDelta[]> = {};
+  for (const [accountId, perDate] of byAccount) {
+    out[accountId] = [...perDate.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, b]) => {
+        const execPrice: Record<string, number> = {};
+        for (const t of Object.keys(b.qtyWeight)) {
+          if (b.qtyWeight[t] > 0) execPrice[t] = b.priceWeight[t] / b.qtyWeight[t];
+        }
+        return {
+          date,
+          deltas: b.deltas,
+          execPrice,
+          netCashDelta: b.netCashDelta,
+          reportedCosts: b.reportedCosts,
+        };
+      });
+  }
+  return out;
+}
+
 // ── 중복 적재 방지: 체결의 안정적 신원 ─────────────────────────────────────
 //
 // 같은 원장에 미래에셋 Excel / KIS API / 수동 보정이 모두 들어온다. 같은 거래를 두 번

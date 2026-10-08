@@ -153,6 +153,13 @@ export const NAVER_MAX_PAGE_STEPS = 8;
 export interface NaverPriceRow {
   localTradedAt: string; // YYYY-MM-DD
   closePrice: string;
+  /**
+   * 시가. **두 source 모두 실제로 주는 값이다**(2026-10-08 실측):
+   *   · siseJson 헤더가 `['날짜','시가','고가','저가','종가',…]` 이라 5개 숫자 중 2번째
+   *   · 모바일 JSON 응답에 `openPrice` 필드가 있다 (쉼표 포함 문자열)
+   * **전일 종가를 시가로 대신 쓰지 않는다** — 없으면 그 행을 버린다(fail closed).
+   */
+  openPrice?: string;
 }
 
 /**
@@ -254,7 +261,9 @@ function shiftYmd(ymd: string, days: number): string {
  * siseJson.naver 응답 파싱. 정식 JSON 이 아니라 작은따옴표가 섞인 배열 텍스트라서
  * `JSON.parse` 가 통하지 않는다 → 행 패턴을 직접 긁는다.
  *   [['날짜', '시가', ...], ["20250901", 55670, 55870, 55070, 55205, 116920, 0.0], ...]
- * 종가는 5번째 숫자다.
+ * **시가는 2번째, 종가는 5번째 숫자다**(헤더 순서: 날짜·시가·고가·저가·종가·거래량·외국인소진율).
+ * 예전에는 시가(m[2])를 캡처하고도 버렸다 — 수익 분석이 "장 시작 → 장 마감"을 쓰므로
+ * 이제 보존한다. 추가 네트워크 요청은 없다.
  */
 export function parseNaverSiseJson(text: string): NaverPriceRow[] {
   const out: NaverPriceRow[] = [];
@@ -265,6 +274,7 @@ export function parseNaverSiseJson(text: string): NaverPriceRow[] {
     out.push({
       localTradedAt: `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`,
       closePrice: m[5],
+      openPrice: m[2],
     });
   }
   // 내림차순(최신 먼저)으로 맞춘다 — 모바일 JSON 과 같은 순서로 다루기 위해
@@ -419,8 +429,24 @@ export interface HistoryPricePoint {
   price: number;
 }
 
-/** 한 번에 조회할 수 있는 종목 수 상한 */
-export const HISTORY_SERIES_MAX_TICKERS = 20;
+/**
+ * 한 종목의 한 거래일 **bar**. 수익 분석(장 시작 → 장 마감)이 쓰는 모양이다.
+ * `open` 과 `close` 가 **둘 다 유효할 때만** 만들어진다 — 하나라도 없으면 그 날짜 행을
+ * 버린다(fail closed). 전일 종가로 시가를 대신하지 않는다.
+ */
+export interface HistoryBarPoint {
+  /** YYYY-MM-DD */
+  date: string;
+  open: number;
+  close: number;
+}
+
+/**
+ * 한 번에 조회할 수 있는 종목 수 상한.
+ * 원장 16종목 + 원장에 없는 보유종목(367380)으로 **17종목**이 필요하다 — 20 은 여유가
+ * 3개뿐이라 32 로 올렸다. 네이버 요청은 종목당 1회이므로 subrequest 여유는 충분하다.
+ */
+export const HISTORY_SERIES_MAX_TICKERS = 32;
 /** 한 번에 조회할 수 있는 구간 길이 상한(달력 일수) — 약 6년 */
 export const HISTORY_SERIES_MAX_DAYS = 2200;
 
@@ -460,22 +486,62 @@ export function pickSeriesInRange(
   fromDate: string,
   toDate: string,
 ): HistoryPricePoint[] {
+  // **종가 전용 경로다.** 시가 유무와 무관하게 동작한다 — 기존 과거 복원
+  // (`historical-performance.ts`)의 계약을 바꾸지 않기 위해 `pickBarsInRange` 와
+  // 따로 둔다. 수익 분석은 open 이 필수라 그쪽을 쓴다.
   const byDate = new Map<string, number>();
   for (const r of rows) {
     const date = String(r?.localTradedAt ?? "");
     if (!ISO_DATE_RE.test(date)) continue;
     if (date < fromDate || date > toDate) continue;
     if (byDate.has(date)) continue;
-    // parseKoreanPrice 는 숫자 아닌 문자를 떼어내므로 "-100" 이 100 이 된다. 음수 표기는
-    // 종가로 올 수 없는 값이니 **파싱 전에** 떨어낸다 (공용 파서는 건드리지 않는다).
-    if (typeof r.closePrice === "string" && r.closePrice.includes("-")) continue;
-    const price = parseKoreanPrice(r.closePrice);
-    if (!(price > 0)) continue;
+    const price = parsePositivePrice(r.closePrice);
+    if (price === null) continue;
     byDate.set(date, price);
   }
   return [...byDate.entries()]
     .map(([date, price]) => ({ date, price }))
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * 네이버 응답 행들 → 구간 안의 거래일 **bar**(날짜 오름차순).
+ *
+ * **fail closed 를 open 까지 확장한다**: open 또는 close 중 하나라도 숫자가 아니거나
+ * 0 이하면 **그 날짜 행 전체를 버린다.** 시가가 없다고 전일 종가를 넣지 않는다 —
+ * 그러면 그 날 "장 시작 → 장 마감" 손익이 오버나이트 갭까지 삼켜 틀린 값이 된다.
+ * 같은 날짜가 두 번 오면 먼저 온 쪽(최신 응답 순서)을 쓴다.
+ */
+export function pickBarsInRange(
+  rows: readonly NaverPriceRow[],
+  fromDate: string,
+  toDate: string,
+): HistoryBarPoint[] {
+  const byDate = new Map<string, HistoryBarPoint>();
+  for (const r of rows) {
+    const date = String(r?.localTradedAt ?? "");
+    if (!ISO_DATE_RE.test(date)) continue;
+    if (date < fromDate || date > toDate) continue;
+    if (byDate.has(date)) continue;
+    const close = parsePositivePrice(r.closePrice);
+    const open = parsePositivePrice(r.openPrice);
+    if (close === null || open === null) continue;
+    byDate.set(date, { date, open, close });
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * 가격 문자열 → 양수. 쓸 수 없으면 `null`(0 을 돌려주지 않는다).
+ *
+ * `parseKoreanPrice` 는 숫자 아닌 문자를 떼어내므로 `"-100"` 이 100 이 된다. 음수 표기는
+ * 가격으로 올 수 없는 값이니 **파싱 전에** 떨어낸다(공용 파서는 건드리지 않는다).
+ */
+function parsePositivePrice(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  if (typeof raw === "string" && raw.includes("-")) return null;
+  const n = parseKoreanPrice(raw);
+  return n > 0 ? n : null;
 }
 
 /**
@@ -489,7 +555,7 @@ export async function collectNaverSeriesByPaging(
   fromDate: string,
   toDate: string,
   loadPage: (page: number) => Promise<NaverPriceRow[] | null>,
-): Promise<HistoryPricePoint[]> {
+): Promise<HistoryBarPoint[]> {
   const collected: NaverPriceRow[] = [];
   for (let page = 1; page <= NAVER_MAX_PAGE_STEPS; page += 1) {
     const rows = await loadPage(page);
@@ -499,7 +565,7 @@ export async function collectNaverSeriesByPaging(
     // 이 페이지가 이미 fromDate 이전까지 내려갔으면 더 깊이 들어갈 이유가 없다.
     if (oldest && oldest <= fromDate) break;
   }
-  return pickSeriesInRange(collected, fromDate, toDate);
+  return pickBarsInRange(collected, fromDate, toDate);
 }
 
 const toYmd = (iso: string): string => iso.replaceAll("-", "");
@@ -508,7 +574,7 @@ async function fetchNaverSeriesForTicker(
   ticker: string,
   fromDate: string,
   toDate: string,
-): Promise<{ series: HistoryPricePoint[]; error?: string }> {
+): Promise<{ series: HistoryBarPoint[]; error?: string }> {
   const errors: string[] = [];
 
   // 1) siseJson 구간 조회 — 요청 1회로 구간 전체를 받는다 (주 경로)
@@ -520,9 +586,9 @@ async function fetchNaverSeriesForTicker(
       8000,
     );
     if (res.ok) {
-      const series = pickSeriesInRange(parseNaverSiseJson(await res.text()), fromDate, toDate);
+      const series = pickBarsInRange(parseNaverSiseJson(await res.text()), fromDate, toDate);
       if (series.length) return { series };
-      errors.push("siseJson: 구간 내 종가 없음");
+      errors.push("siseJson: 구간 내 시가·종가 없음");
     } else {
       errors.push(`siseJson: HTTP ${res.status}`);
     }
@@ -546,12 +612,12 @@ async function fetchNaverSeriesForTicker(
       }
     });
     if (series.length) return { series };
-    errors.push("모바일 JSON: 구간 내 종가 없음");
+    errors.push("모바일 JSON: 구간 내 시가·종가 없음");
   } catch (e) {
     errors.push(`모바일 JSON: ${String(e).slice(0, 60)}`);
   }
 
-  return { series: [], error: errors.slice(0, 2).join(" / ") || "종가 없음" };
+  return { series: [], error: errors.slice(0, 2).join(" / ") || "시가·종가 없음" };
 }
 
 /**
@@ -566,11 +632,11 @@ export async function fetchNaverHistorySeries(
   fromDate: string,
   toDate: string,
 ): Promise<{
-  series: Record<string, HistoryPricePoint[]>;
+  series: Record<string, HistoryBarPoint[]>;
   failed: Record<string, string>;
   timestamp: string;
 }> {
-  const series: Record<string, HistoryPricePoint[]> = {};
+  const series: Record<string, HistoryBarPoint[]> = {};
   const failed: Record<string, string> = {};
   const timestamp = new Date().toISOString();
 
