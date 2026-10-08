@@ -1,21 +1,35 @@
-# 수익 분석 (구 "기간 성과") 전면 개편 — 설계안 (rev2)
+# 수익 분석 (구 "기간 성과") 전면 개편 — 설계안 (rev3)
 
 **상태: 설계만. 구현 코드 변경 0건.** production DB write / migration / legacy 삭제는 범위 밖이다.
 
 - 활성 프로젝트: `k-allweather`
 - 선행 문서: `docs/ledger-handoff.md`
-- rev2 변경: **cutoff-aligned 완전성 검증으로 Step 1 게이트를 교체**(§2), cutoff 이후
-  미적재 거래 보충 전략 추가(§3), **cash/income 불확실성 3층 분리**(§6),
-  period 독립 계산 명시(§5), exact/partial 경계 재정의(§9).
 
-### rev1 에서 틀렸던 것
+## rev3 — 목표 재정의 (이 절이 범위를 정한다)
 
-rev1 의 Step 1 게이트는 "원장 재생 최종 보유수량 == **현재** 보유수량" 이었다.
-**이것은 잘못된 게이트다.** 원장에는 계좌별 cutoff 가 있고 그 이후 실제 거래가
-아직 적재되지 않았다. 따라서 현재 수량과의 불일치는 "시작부 불완전"의 증거가 아니라
-"cutoff 이후 미적재"의 증거다. 두 원인을 구분하지 못하는 게이트였다.
+**이번 작업의 목표는 "원장을 오늘까지 최신화"가 아니다.** 대시보드 수익 분석이
+2026-06-26 전후부터만 나오는 문제를 고쳐 **그 이전 과거 성과를 복원**하는 것이다.
 
-올바른 게이트는 **cutoff-aligned 비교**다 — 아래 §2 에서 실제로 돌렸고, **통과했다.**
+| 구간 | 보유수량 source | 상태 |
+|---|---|---|
+| 계좌 개시 ~ **첫 유효 anchor 직전** | **verified Transaction Ledger replay** | **이번에 새로 만든다** |
+| 첫 유효 anchor ~ 오늘 | 기존 legacy `rowQuantitiesSnap` anchor 경로 (+ 마지막 4일 실제 snapshot) | **그대로 유지. 덮어쓰지 않는다** |
+
+- **미래에셋 export 재수집은 보류**(§3). ISA·pension·IRP 의 8월 이후 미적재 거래는
+  이번 backfill 의 blocker 가 아니고 **별도 ledger maintenance 작업**으로 남긴다.
+  `docs/mirae-export-recollection.md` 는 그 작업을 위해 보존한다.
+- **seam reconciliation 이 유일한 blocker 게이트였고 통과했다** — §2.5, 전 계좌
+  18 ticker-position 불일치 **0**.
+- **strategyStartDates 를 성과 시작 경계로 쓴다**(§2.6) — retirement 2025-09-10 /
+  pension 2025-11-10 / irp 2025-12-29 / isa 2026-01-07.
+
+### rev1 → rev2 → rev3 에서 교체된 게이트
+
+| rev | 게이트 | 판정 |
+|---|---|---|
+| rev1 | 원장 재생 최종 보유수량 == **현재** 보유수량 | **틀렸다.** cutoff 이후 미적재와 시작부 불완전을 구분하지 못한다 |
+| rev2 | 원장 재생(cutoff 시점) == **cutoff 당일 checkpoint** | 맞다. 통과(§2) — 원장이 개시일~cutoff 까지 완전함을 증명 |
+| **rev3** | 원장 재생(첫 anchor 시점) == **첫 유효 anchor snapshot** | **이번 작업의 게이트.** 통과(§2.5) — 과거 구간과 기존 구간이 이어짐을 증명 |
 
 ---
 
@@ -105,7 +119,95 @@ ISA 는 cutoff 이후 checkpoint 가 세 개 더 있는데 **2026-07-31 과 2026
 
 ---
 
-## 3. cutoff 이후 미적재 거래 — 실측 차이와 보충 전략
+## 2.5. seam reconciliation — **이번 작업의 게이트. 전 계좌 통과**
+
+seam = 계좌별 **첫 유효 `rowQuantitiesSnap` anchor 날짜**. 그 앞은 ledger replay 가
+담당하고 그 뒤는 기존 경로가 담당한다. 둘이 이어지는지 확인했다
+(production 읽기 전용 조회, 1회용 스크립트 실행 후 삭제).
+
+```
+게이트:  원장을 seam 날짜(당일 포함)까지 재생한 보유수량  ==  그 anchor 의 rowQuantitiesSnap
+```
+
+| 계좌 | seam (첫 유효 anchor) | 그 날 ledger 거래 | ticker | **mismatch** |
+|---|---|---|---|---|
+| retirement | **2026-06-26** | 10건 | 7 | **0** |
+| isa | **2026-06-18** | 2건 | 4 | **0** |
+| pension | **2026-06-26** | 3건 | 3 | **0** |
+| irp | **2026-06-26** | 7건 | 4 | **0** |
+
+**합계 18 ticker-position 불일치 0.** 종목별 실측(전일까지 → 당일포함 == anchorSnap):
+
+```
+retirement 2026-06-26  0072R0 591→633 / 0085P0 0→408 / 0162Z0 1948→1211 / 0167A0 1349→691
+                       0181B0 0→1279 / 360750 571→651 / 484790 0→526
+isa        2026-06-18  0167A0 991→991 / 0181B0 0→978 / 294400 72→0 / 360750 1021→1021
+pension    2026-06-26  0167A0 227→114 / 0181B0 0→245 / 360750 148→148
+irp        2026-06-26  0162Z0 95→98 / 0167A0 69→45 / 0181B0 0→86 / 360750 50→36
+```
+
+anchor 날짜의 보유수량이 **그 날 리밸런싱 이후 상태**라는 것까지 정확히 맞는다
+(전일 수량과 당일 수량이 다른데 당일 수량이 anchor 와 일치한다). 즉 ledger 의
+일중 순서 규칙과 legacy 스냅샷 시점 정의가 서로 일관된다.
+
+> rev2 §2 에서 **cutoff 쪽 anchor**(2026-07-31 / 08-28 / 10-01 / 10-02)도 전부
+> 일치했다. 즉 ledger 와 legacy anchor 는 **양쪽에서 겹치는 모든 checkpoint 에서
+> 일치한다** — seam 을 어디에 두어도 안전하다는 뜻이고, 이번에 고른 seam(첫 anchor)은
+> 그중 "기존 경로가 커버하지 못하는 가장 이른 지점"이다.
+
+### 실제 daily snapshot 은 4일뿐이다 (merge 설계에 중요)
+
+`kaw_daily_portfolio_snapshots` 는 계좌당 **2026-10-04 ~ 2026-10-07, 4행**이다.
+따라서 "기존 경로"의 거의 전부는 실제 스냅샷이 아니라 **legacy anchor carry-forward**다.
+merge 설계(§8.5)가 이 사실을 전제로 한다.
+
+---
+
+## 2.6. strategyStartDates — 성과 시작 경계
+
+verified 데이터셋의 `strategyStartDates` 를 K-올웨더 **전략 성과**의 시작 경계로 쓴다.
+
+| 계좌 | 전략 시작 | 계좌 개시 | 그 날 상태 |
+|---|---|---|---|
+| retirement | **2025-09-10** | 2025-03-25 | 전략 전환일 — 아래 참고 |
+| pension | **2025-11-10** | 2025-11-10 | 개시일 == 첫 거래일 (그 전 보유 없음) |
+| irp | **2025-12-29** | 2025-12-29 | 개시일 == 첫 거래일 |
+| isa | **2026-01-07** | 2026-01-06 | 입금 다음 날 첫 거래 (그 전 보유 없음) |
+
+retirement 만 전략 시작 전에 거래가 있다(12건, 매수 22,889,580 / 매도 0).
+**2025-09-10 에 그 pre-strategy 보유가 전량 매도되고 9자산 배분이 매수됐다**(당일 15건):
+
+```
+2025-09-09 보유   133690 73 / 232080 10 / 360750 565          ← pre-strategy
+2025-09-10 보유   283580 372 / 294400 89 / 360750 696 / 385560 114 / 449170 29
+                  453810 389 / 484790 501 / 0072R0 1116 / 0085P0 444   ← K-올웨더 9자산
+```
+
+즉 전략 시작일은 **깨끗한 전환일**이다. 그래서 "pre-strategy 거래를 전략 수익 분석에
+포함하지 않는다"를 다음으로 구현한다:
+
+- **retirement 의 첫 성과 구간은 2025-09-11(전환 다음 거래일) 시가부터** 시작한다.
+  2025-09-10 을 포함하면 그 날 `V_open` 이 pre-strategy 보유이고, 당일 손익에
+  pre-strategy 청산 손익이 섞인다 — 그것이 바로 제외하려는 것이다.
+- 2025-09-10 은 차트에서 **"전략 전환일(성과 구간 제외)"** 로 표시만 한다.
+- pre-strategy 거래는 **ledger 에 그대로 두고 보유수량 재생에는 쓴다** — 그 수량이
+  전환일 매도 대상이므로 빼면 재생이 깨진다. "제외"는 **표시 구간의 경계**이지
+  데이터 삭제가 아니다.
+- 다른 세 계좌는 전략 시작 전 보유가 0 이라 이 문제가 없다. 전략 시작일 **당일부터**
+  구간을 만든다.
+
+> 전체(4계좌 합산) scope 의 시작은 **2025-09-11** 이다. pension·irp·isa 는 각자
+> 전략 시작일에 **외부 입금으로 합류**한다(그 입금은 cashflow 장부에 있으므로 수익률
+> 분자에서 제외되고 분모에만 가중된다 — §5.4).
+
+---
+
+## 3. (보류) cutoff 이후 미적재 거래 — 별도 ledger maintenance 작업
+
+> **rev3: 이 절은 이번 작업의 범위가 아니다.** ISA·pension·IRP 의 2026-08-29 이후
+> 미적재 거래를 원장에 넣는 작업은 과거 backfill 의 blocker 가 아니므로 분리했다.
+> 실행 계획은 `docs/mirae-export-recollection.md` 에 그대로 보존돼 있고, 아래 내용은
+> 그 작업을 재개할 때의 근거 자료다. **지금 새 export 를 요구하지 않는다.**
 
 ### 3.1 현재 보유수량과 ledger final 의 차이 (= 미적재 거래의 효과)
 
@@ -435,56 +537,141 @@ cashflow 체크섬은 계좌별로 일치 확인됨: 72,691,626 / 10,500,000 / 6
         · 개시했는데 그 날짜가 그 계좌의 exact 구간 밖(cutoff 초과) → point 를 만들지 않는다
 ```
 
-세 번째 줄이 rev2 추가분이다. "미개설 = 0" / "데이터 결측" / "원장 미적재"를 서로
-다른 상태로 구분한다. 화면에서도 구분해 안내한다.
+세 번째 줄은 **원장이 보유수량 source 인 구간(= seam 이전)에만** 적용된다.
+seam 이후에는 legacy anchor 가 보유수량을 주므로 cutoff 와 무관하다.
+"미개설 = 0" / "데이터 결측" / "원장 미적재"를 서로 다른 상태로 구분한다.
 
 ---
 
-## 9. exact / partial 경계 — rev2 재정의
+## 8.5. merge 설계 — 하나의 timeline 을 어떻게 만드는가 (rev3 핵심)
 
-두 축이 서로 독립이다.
+**원칙: 갈리는 것은 "보유수량 source" 하나뿐이고, 평가 엔진은 전 구간 동일하다.**
 
 ```
-exact   : 그 구간 전체가 [계좌 개시일, 계좌 cutoff] 안에 있는가   (원장 완전성)
-partial : 그 구간이 달력상 period 전체를 덮는가                  (기간 완결성)
+                계좌 개시        전략시작      seam(첫 anchor)              10-04   오늘
+                    │               │               │                        │       │
+보유수량 source  ────┼───── ledger replay ───────────┼──── legacy anchor carry-forward ─┤
+                    │               │               │   (+ 10-04~07 실제 snapshot 대조)  │
+표시 구간       (제외)│◀──────────── 수익 분석 표시 구간 ─────────────────────────────────▶│
+평가 엔진       ◀────────── 동일: 보유수량 × 네이버 OHLC + 유도 예수금 ──────────────────▶
 ```
 
-### 계좌별 exact 구간 (§2 검증 통과분)
+### 왜 평가 엔진을 나누지 않는가
 
-| 계좌 | exact 구간 | 오늘까지 연장 가능? |
+수익 분석은 **open 가격**이 필요하다. legacy 경로(`historical-performance.ts`)와 실제
+daily snapshot 은 **둘 다 종가만** 만든다(스냅샷은 15:40 고정). 그래서 seam 이후
+구간에도 open 평가가 없으면 "장 시작 → 장 마감"을 계산할 수 없다.
+
+→ **보유수량만 각 구간의 source 에서 가져오고, 평가(open·close)는 같은 OHLC 엔진으로
+한다.** 이것이 "기존 6월 이후 데이터를 덮어쓰지 않는다"와 양립한다 — seam 이후의
+**보유수량은 legacy anchor 그대로**이고, 바뀌는 것은 "그 수량에 시가를 곱한 값도
+계산한다"는 것뿐이다. 기존 `historical-performance.ts` 는 **한 줄도 고치지 않고**
+`validAnchors` / `anchorAsOf` / `anchorTickers`(이미 export 돼 있다)만 재사용한다.
+
+### 구간별 보유수량 규칙
+
+| 구간 | 보유수량 | 비고 |
 |---|---|---|
-| retirement | 2025-03-25 ~ **2026-10-01** | **가능** — cutoff 이후 거래·흐름 0건, `liveQuantities == 10-01 snapshot` |
-| isa | 2026-01-06 ~ **2026-08-28** | 불가 — 08-28 ~ 10-02 사이 미적재 매수 +2주 |
-| pension | 2025-11-10 ~ **2026-08-28** | 불가 — 미적재 대폭 재구성 + 09-28 입금 |
-| irp | 2025-12-29 ~ **2026-08-28** | 불가 — 동일 |
+| ~ 전략시작 직전 | — | 표시 구간 밖. 단 ledger replay 는 돌려야 한다(전략시작일 보유수량이 여기서 나온다) |
+| 전략시작 ~ seam 직전 | **ledger replay** (거래일마다 정확) | 신규 |
+| seam ~ 오늘 | **legacy anchor carry-forward** (anchor 사이 수량 고정) | 기존 그대로 |
 
-### 전체 scope exact 구간
+seam 날짜는 양쪽이 같은 값을 주므로(§2.5) **어느 쪽을 써도 같다.** 구현에서는
+`date < seam → ledger`, `date >= seam → legacy` 로 **겹치지 않게** 나눈다.
 
-날짜 D 가 exact 이려면 D 까지 개시된 **모든** 계좌가 자기 exact 구간 안이어야 한다.
+### 예수금 규칙 (구간별로 정확도가 다르다)
 
-| 구간 | 개시된 계좌 | binding cutoff | exact? |
-|---|---|---|---|
-| 2025-03-25 ~ 2026-01-05 | retirement (+11/10 pension, +12/29 irp) | 2026-08-28 | **exact** |
-| 2026-01-06 ~ 2026-08-28 | 네 계좌 전부 | 2026-08-28 (isa) | **exact** |
-| 2026-08-29 ~ 오늘 | 네 계좌 전부 | — | **exact 아님** (세 계좌 미적재) |
+실측한 유도 예수금(보수 모델):
 
-→ **전체 scope exact = 2025-03-25 ~ 2026-08-28.**
+| 계좌 | 전략시작 시점 | seam 시점 |
+|---|---|---|
+| retirement | **0** | 11,679 |
+| pension | 2,299 | 11,585 |
+| irp | 5,400 | 6,724 |
+| isa | 2,607 | 8,972 |
 
-### 연간 표시 판정
+**전략시작·seam 양 끝에서 예수금이 사실상 0 이다** — 즉 §6 의 예수금 불확실성이
+이번 표시 구간에서는 매우 작다(최대 11,679원). rev2 가 걱정한 retirement 60.9M 유휴
+현금은 **전략시작(2025-09-10) 전액 투입일 이전**이라 표시 구간 밖으로 빠진다.
+
+그래도 **구간 내부에서는 유도 예수금이 필요하다.** 월 납입금이 입금일부터 다음
+리밸런싱까지 현금으로 머물기 때문이다(retirement 580k~688k, pension 500k, irp 250k).
+`cashBalance: 0` 으로 두면 입금일에 가짜 손실, 리밸런싱일에 가짜 이익이 생긴다
+(F 는 입금일에 귀속되는데 자산 증가는 리밸런싱일에 나타나므로).
+보수 모델이 이것을 정확히 재현하는 것도 확인했다 — retirement 2025-09-25 입금일
+모델 예수금 = **580,423원**(= 그 달 납입금), 다음 거래일 2025-09-26 리밸런싱 후 **0원**.
+
+| 구간 | 예수금 | 표시 |
+|---|---|---|
+| 전략시작 ~ 각 계좌 ledger cutoff | **유도 예수금(보수 모델)** | 정상 |
+| ledger cutoff ~ 오늘 | 유도 불가(미적재 매매의 현금효과를 모른다) → **0 으로 두고 `cash-unknown` 표시** | 오늘 실제 예수금이 2,352~28,531원이라 오차는 작다 |
+| 단, cutoff 이후 **입금이 있고** 그 뒤 anchor 까지 사이 | `cashflow-pending` 로 **별도 표시** | pension `2026-09-28 +500,000`, irp `+250,000` 이 여기 해당 |
+
+`cashflow-pending` 구간은 입금은 장부에 있는데 그 돈으로 한 매수가 원장에 없어서
+자산이 비어 보이는 구간이다. 숨기지 않고 표시하고, **보류된 ledger maintenance(§3)가
+끝나면 자동으로 사라진다.**
+
+### 실제 daily snapshot 의 역할
+
+2026-10-04 ~ 2026-10-07 4일분은 **계산에 쓰지 않고 대조에만 쓴다**(§13-1 승인 방향).
+같은 날 `유도 종가자산` vs `스냅샷 총자산` 차이를 리포트해 엔진을 상시 자가검증한다.
+이 4일은 실제 예수금도 들어 있어서 `cash-unknown` 구간의 오차를 직접 측정할 수 있다.
+
+---
+
+## 9. 표시 구간 경계 — rev3 재정의
+
+rev2 는 "원장 cutoff 를 넘으면 계산하지 않는다"였다. rev3 에서는 **cutoff 이후에도
+legacy anchor 가 보유수량을 주므로 계산한다** — 다만 정확도 등급을 다르게 표시한다.
+
+세 축이 독립이다.
+
+```
+holdings : ledger(정확)  |  anchor(리밸런싱 사이 carry-forward)
+cash     : derived(보수모델)  |  unknown(0 가정)  |  cashflow-pending
+span     : full  |  strategy-start  |  in-progress
+```
+
+### 계좌별 구간 (실측)
+
+| 계좌 | 전략시작 | seam | ledger cutoff | 표시 구간 |
+|---|---|---|---|---|
+| retirement | 2025-09-10 → 첫 구간 **2025-09-11** | 2026-06-26 | 2026-10-01 | 2025-09-11 ~ 오늘 |
+| pension | **2025-11-10** | 2026-06-26 | 2026-08-28 | 2025-11-10 ~ 오늘 |
+| irp | **2025-12-29** | 2026-06-26 | 2026-08-28 | 2025-12-29 ~ 오늘 |
+| isa | **2026-01-07** | 2026-06-18 | 2026-06-26 | 2026-01-07 ~ 오늘 |
+
+| 구간 | holdings | cash |
+|---|---|---|
+| 전략시작 ~ seam 직전 | **ledger** | **derived** |
+| seam ~ ledger cutoff | anchor (기존 경로) | **derived** |
+| ledger cutoff ~ 오늘 | anchor (기존 경로) | `cash-unknown` (+ pension·irp 는 09-28~10-02 `cashflow-pending`) |
+
+### 전체(4계좌 합산) scope
+
+시작 = **2025-09-11** (retirement 전략시작 다음 거래일). pension·irp·isa 는 각자
+전략시작일에 외부 입금으로 합류한다. "미개설/전략시작 전 = 0"은 사실이고,
+"데이터 결측"과 구분한다(§8).
+
+### 연간 표시 판정 (rev3)
 
 | scope | 2025 | 2026 |
 |---|---|---|
-| **전체** | **partial + exact** — 포트폴리오 개시가 2025-03-25. 라벨 `2025년 (3/25~12/30)`, 배지 `계좌 개시 이후` | **partial + exact 아님** — 1월 첫 거래일부터 가능하지만 2026-08-29 이후가 미적재. 원장 최신화 전에는 `2026년 (1/2~8/28) · 원장 최신화 필요` 로만 표시 |
-| retirement | partial(3/25~) + exact | **full YTD + exact** — 1/2 시가 → 최신 거래일 종가. 요구사항대로 성립 |
-| pension | partial(11/10~) + exact | partial(~8/28) + exact 아님 |
-| irp | **표시 제외** — 2025 거래일 2~3일뿐 | partial(~8/28) + exact 아님 |
-| isa | 구간 없음 | partial(~8/28) + exact 아님 |
+| **전체** | **partial** — `2025년 (9/11~12/30)`, 배지 `전략 시작 이후` | **full YTD** — `2026년 (1/2~최신)`. 단 cutoff 이후 구간에 `cash-unknown` 배지 |
+| retirement | partial `(9/11~)` | **full YTD** |
+| pension | partial `(11/10~)` | **full YTD** (holdings 는 anchor, cash 는 8/29 이후 unknown) |
+| irp | **연간 표시 제외** — 2025 거래일 2~3일뿐 | **full YTD** (동일) |
+| isa | 구간 없음 | **full YTD** (동일) |
 
-**"2026 full YTD" 는 원장을 최신화하면 전체 scope 에서도 성립한다.** 지금 성립하는 것은
-retirement 뿐이다. 이것이 §3.3 보충을 구현 전에 끝내야 하는 이유다.
+**2026 full YTD 가 전체 scope 에서 성립한다** — rev2 와 달라진 점이다. holdings 를
+legacy anchor 가 메우므로 원장 최신화를 기다리지 않아도 된다. 보류된 ledger
+maintenance(§3)가 끝나면 `cash-unknown`·`cashflow-pending` 배지가 사라지고 그
+구간의 cash 가 derived 로 승격된다.
 
-플래그는 두 개로 분리한다:
-`coverage: "exact" | "unledgered"` / `span: "full" | "account-inception" | "in-progress"`.
+플래그:
+`holdingsSource: "ledger" | "anchor"` /
+`cashQuality: "derived" | "unknown" | "cashflow-pending"` /
+`span: "full" | "strategy-start" | "in-progress"`.
 
 ---
 
@@ -498,13 +685,15 @@ retirement 뿐이다. 이것이 §3.3 보충을 구현 전에 끝내야 하는 �
 | `src/lib/kaw/profit-analysis.test.ts` | 위 테스트 |
 | `src/lib/kaw/derived-cash.ts` | `derivedCash` / `incomeLB` / `R`(anchor 가능 여부 포함) |
 | `src/lib/kaw/derived-cash.test.ts` | 위 테스트 |
-| `src/lib/kaw/ledger-coverage.ts` | 계좌별 개시일·cutoff·exact 구간 판정(§9), 전체 scope 교집합 |
+| `src/lib/kaw/holdings-timeline.ts` | **rev3 핵심.** seam 계산(계좌별 첫 유효 anchor) + 구간별 보유수량 source 병합(§8.5). `date < seam → ledger replay`, `>= seam → anchor carry-forward` |
+| `src/lib/kaw/holdings-timeline.test.ts` | 위 테스트 (seam 고정값 포함) |
+| `src/lib/kaw/ledger-coverage.ts` | 계좌별 전략시작·seam·cutoff 판정(§9), 품질 플래그 3종 |
 | `src/lib/kaw/ledger-coverage.test.ts` | 위 테스트 |
 | `src/components/kaw/ProfitAnalysisSection.tsx` | Section D 대체 UI(§12) |
-| `scripts/verify-ledger-cutoff.ts` | **Step 1 게이트의 영속 버전** — §2 비교를 재현 가능하게. 읽기 전용 |
+| `scripts/verify-ledger-seam.ts` | **§2.5 게이트의 영속 버전.** 읽기 전용. seam·cutoff 양쪽 checkpoint 를 모두 대조 |
 
 > rev1 의 `scripts/verify-ledger-holdings.ts`(현재 보유수량 대조)는 **만들지 않는다.**
-> 게이트 자체가 틀렸다(rev2 서두).
+> 게이트 자체가 틀렸다(rev3 서두 표).
 
 ### 수정
 
@@ -515,53 +704,65 @@ retirement 뿐이다. 이것이 §3.3 보충을 구현 전에 끝내야 하는 �
 | `src/lib/kaw/useHistoricalPrices.ts` | `open` 파싱, `PriceBarsByTicker` 추가. 기존 `toPriceSeriesByTicker` 는 그대로 남긴다 |
 | `src/lib/kaw/ledger.ts` | `replayDailyHoldings()` 추가. 기존 함수 무수정 |
 | `src/components/kaw/Dashboard.tsx` | Section D → `ProfitAnalysisSection`, 제목 "기간 성과" → **"수익 분석"**, `useLedger` 추가 |
-| `data/verified-transactions.v1.json` → `v2` | §3.3 보충분 (별 작업. 원장 원본 463행은 불변, append only) |
 
-### 손대지 않는 것
+### 손대지 않는 것 (rev3 에서 범위가 더 줄었다)
 
 `kaw_transaction_ledger` 원본 / 모든 migration / 스냅샷 쓰기 경로 / legacy
-`kaw_data.data->'history'` / `performance.ts` / `historical-performance.ts` /
+`kaw_data.data->'history'` / `performance.ts` / **`historical-performance.ts`** /
 `benchmark-series.ts` / `backtest.ts` / `snapshot.ts` / `AccountPage` 히스토리 탭 /
+`data/verified-transactions.v1.json`(463건 그대로) /
 사용자 로컬 작업 스크립트(`verify-cashflow-principal.ts` 등).
+
+> **`historical-performance.ts` 는 한 줄도 고치지 않는다.** seam 이후 보유수량은 그
+> 모듈의 `validAnchors` / `anchorAsOf` / `anchorTickers`(이미 export 돼 있다)를
+> **읽기만** 해서 쓴다. 기존 기간 성과 경로도 그대로 돌아간다 — 숫자 대조가 끝날
+> 때까지 두 경로를 병행한다(R12).
 
 ---
 
 ## 11. 수정된 단계별 구현 계획
 
 ```
-Step 0   사전 실측 (코드 변경 없음)
+Step 1   ✅ 완료 — cutoff-aligned 완전성 검증 (§2)
+         전 계좌 통과(16 ticker-position 불일치 0). 원장이 개시일~cutoff 까지 완전함.
+
+Step 1b  ✅ 완료 — **seam reconciliation** (§2.5) ← rev3 의 실제 게이트
+         전 계좌 통과(18 ticker-position 불일치 0).
+         seam: retirement·pension·irp 2026-06-26 / isa 2026-06-18.
+         부수 확인: 실제 daily snapshot 은 2026-10-04~07 4일뿐 / 전략시작·seam
+         시점 예수금이 모두 거의 0 / retirement 전략시작일은 깨끗한 전환일.
+
+Step 1c  사전 실측 (코드 변경 없음) ← **구현 첫 작업**
          · 모바일 JSON 폴백 응답에 openPrice 가 있는지
-         · siseJson 이 2025-03-25~오늘(약 560일) 구간을 1회 요청으로 주는지
+         · siseJson 이 2025-09-01~오늘(약 400일) 구간을 1회 요청으로 주는지
          · 17종목(원장 16 + 367380) 조회가 상한 안에서 되는지
 
-Step 1   ✅ 완료 — cutoff-aligned 완전성 검증 (§2)
-         전 계좌 통과(16 ticker-position 불일치 0). 1회용 스크립트는 삭제했고,
-         scripts/verify-ledger-cutoff.ts 로 영속화하는 것은 Step 2 에 포함한다.
+Step 2   (보류) 원장 보충 — **이번 작업의 blocker 가 아니다**
+         별도 ledger maintenance 작업. 계획은 docs/mirae-export-recollection.md.
+         끝나면 cash-unknown / cashflow-pending 배지가 사라진다.
 
-Step 2   원장 보충 — **구현의 실질적 blocker이며 사용자가 먼저 하기로 확정됨**
-         → 준비 문서: **`docs/mirae-export-recollection.md`** (받을 파일·조회기간·
-            필요 컬럼·dedupe 방식·A~J 실행 순서)
-         미래에셋 export 재수집 → v2 데이터셋 → dry-run → 승인 → import(멱등)
-         → 최신 checkpoint 기준 cutoff-aligned 재검증 0 불일치
-         → 그때 isa/pension/irp 의 R 도 계산 가능해진다(§6.5)
-         이 단계가 끝난 뒤에 Step 3 으로 간다 (UI 먼저 만들지 않는다).
+Step 3   유도 예수금 모듈 + 테스트 (§6.4~6.6, §8.5)
+         실측 고정값: 전략시작 시점 retirement 0 / pension 2,299 / irp 5,400 / isa 2,607
+                      seam 시점 11,679 / 11,585 / 6,724 / 8,972
+                      retirement 2025-09-25 입금일 580,423 → 09-26 리밸런싱 후 0
+                      최대결손 −1,658,004 @2026-08-28, R(retirement) 1,087
 
-Step 3   유도 예수금 모듈 + 테스트 (§6.4~6.6)
-         실측 고정값: retirement 보수모델 2,534 / R 1,087 / 최대결손 −1,658,004 @2026-08-28
-
-Step 4   ledger-coverage 모듈 (§9)
-         개시일·cutoff·exact 구간·전체 교집합. 날짜가 전부 데이터에서 나오게 한다
-         (하드코딩 금지 — Step 2 로 cutoff 가 움직인다)
+Step 4   ledger-coverage + holdings-timeline (§8.5, §9)
+         seam 계산 / 구간별 보유수량 병합 / 품질 플래그 3종.
+         **날짜를 하드코딩하지 않는다** — seam·cutoff 가 데이터에서 나오게 한다
+         (Step 2 가 나중에 cutoff 를 움직인다).
+         고정값 테스트는 "지금 데이터에서 그 값이 나온다"로 쓴다.
 
 Step 5   OHLC 가격 파이프라인 (§4)
-         요청 구간을 계좌 개시일(min 2025-03-25)부터로 확장
+         요청 구간을 **전략시작 최솟값(2025-09-10)** 부터로 확장. 17종목.
 
 Step 6   profit-analysis.ts (§5, §6) — 최대 단계
-         segmentProfit(O,C) 를 period 별로 독립 호출. L1/L2/L3 분리.
+         segmentProfit(O,C) 를 period 독립 호출. L1/L2/L3 분리.
          ①②③ 분해를 별도 함수로 구현해 V_close−V_open−F 와 교차검증
 
 Step 7   스냅샷 대조 (검증 전용, UI 아님)
-         유도 종가자산 vs 실제 daily snapshot. 차이가 L3 범위로 설명되는지
+         2026-10-04~07 4일 × 4계좌 = 16행. 유도 종가자산 vs 스냅샷 총자산.
+         이 4일은 실제 예수금이 있어서 cash-unknown 구간 오차를 직접 측정할 수 있다.
 
 Step 8   UI (§12)
 
