@@ -237,7 +237,8 @@ function PeriodDetail({ r }: { r: PeriodResult | null }) {
           <span className={(rangeLow ?? 0) >= 0 ? "text-emerald-500" : "text-rose-500"}>
             {rangeLow === null ? "—" : `${rangeLow >= 0 ? "+" : ""}${rangeLow.toFixed(2)}%`}
             {hasRange && ` ~ ${rangeHigh! >= 0 ? "+" : ""}${rangeHigh!.toFixed(2)}%`}
-            {!hasRange && r.incomeHeadroom === null && " 이상"}
+            {/* 숫자 뒤에 "이상"을 붙이지 않는다 — 정확도는 badge·tooltip·아래 설명으로만
+                표현한다(상한 미정이면 "더 있을 수 있는 미관측 수입" 행이 그것을 말해준다). */}
           </span>
         </div>
         <Row
