@@ -211,19 +211,24 @@ function PeriodDetail({ r }: { r: PeriodResult | null }) {
           value={`${r.netCashflow >= 0 ? "+" : "-"}${formatKRW(Math.abs(r.netCashflow))}`}
         />
         <Row
-          label="시장·매매 손익"
+          label="기간 손익"
           value={`${r.knownProfit >= 0 ? "+" : "-"}${formatKRW(Math.abs(r.knownProfit))}`}
           strong
           tone={r.knownProfit >= 0 ? "up" : "down"}
         />
+        {/* 아래 두 줄은 위 손익의 **내역**이다 — 더하는 값이 아니다.
+            기간 손익에는 보수 모델이 인정한 미관측 수입이 이미 들어 있다. */}
         <Row
-          label="미관측 현금수입 (이자·분배금)"
+          label="└ 그중 미관측 현금수입 (이자·분배금)"
+          value={`+${formatKRW(r.incomeLowerBound)}`}
+          muted
+        />
+        <Row
+          label="└ 더 있을 수 있는 미관측 수입"
           value={
-            r.incomeUpperBound === null
-              ? `+${formatKRW(r.incomeLowerBound)} 이상`
-              : Math.abs(r.incomeUpperBound - r.incomeLowerBound) < 1
-                ? `+${formatKRW(r.incomeLowerBound)}`
-                : `+${formatKRW(r.incomeLowerBound)} ~ +${formatKRW(r.incomeUpperBound)}`
+            r.incomeHeadroom === null
+              ? "미정 (원장 최신화 필요)"
+              : `+${formatKRW(r.incomeHeadroom)}`
           }
           muted
         />
@@ -232,10 +237,14 @@ function PeriodDetail({ r }: { r: PeriodResult | null }) {
           <span className={(rangeLow ?? 0) >= 0 ? "text-emerald-500" : "text-rose-500"}>
             {rangeLow === null ? "—" : `${rangeLow >= 0 ? "+" : ""}${rangeLow.toFixed(2)}%`}
             {hasRange && ` ~ ${rangeHigh! >= 0 ? "+" : ""}${rangeHigh!.toFixed(2)}%`}
-            {!hasRange && r.incomeUpperBound === null && " 이상"}
+            {!hasRange && r.incomeHeadroom === null && " 이상"}
           </span>
         </div>
-        <Row label="평균투자원금 (분모)" value={formatKRW(r.averageCapital)} muted />
+        <Row
+          label="평균투자원금 (분모 = 기초자산 + 기간가중 입출금)"
+          value={formatKRW(r.averageCapital)}
+          muted
+        />
       </div>
     </div>
   );

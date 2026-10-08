@@ -477,12 +477,27 @@ export interface PeriodResult {
   endingTotal: number;
   /** L2 — 구간에 귀속되는 순외부흐름 */
   netCashflow: number;
-  /** L1 — 알려진 시장·매매 손익 (정확) */
+  /**
+   * 기간 손익 = `V_close − V_open − F`.
+   *
+   * **이미 L3 하한을 포함하고 있다.** 예수금이 `derivedCash + incomeLB` 라서
+   * `V_close − V_open` 안에 그 구간의 `ΔincomeLB` 가 들어 있기 때문이다. 그래서
+   * 수익률을 낼 때 `incomeLowerBound` 를 **다시 더하면 이중계산**이다(실제로 그랬다).
+   * 보수 모델 기준의 **총수익 하한**이라고 읽으면 된다.
+   */
   knownProfit: number;
-  /** L3 하한 — 강제되는 최소 미관측 현금수입 */
+  /**
+   * 이 구간 손익 안에 들어 있는 **미관측 현금수입(이자·분배금)의 하한**.
+   * `knownProfit` 의 부분집합이며 따로 더하는 값이 아니다 — 설명용이다.
+   */
   incomeLowerBound: number;
-  /** L3 상한. anchor(cash checkpoint)가 없으면 null */
+  /**
+   * 미관측 현금수입의 **상한** = 하한 + 아직 설명되지 않은 잔차 R.
+   * cutoff 정렬 cash checkpoint 가 없는 계좌가 섞이면 `null`(상한 미정).
+   */
   incomeUpperBound: number | null;
+  /** 상한까지 갔을 때 손익에 **추가로** 더해질 수 있는 금액 (= R 합). 상한 미정이면 null */
+  incomeHeadroom: number | null;
   /** 분모 (Modified Dietz) */
   averageCapital: number;
   /** 수익률 하한 % */
@@ -515,15 +530,22 @@ export interface FlowPoint {
  *
  *   profit = V_close(C) − V_open(O) − F
  *
- * 이것이 **L1 과 같다**(①+②−③) — 단일 거래일에서는 정확히, 여러 날 구간에서는 갭이
- * 더해진 값이다. 그래서 여기서는 **endpoint 기반으로 계산**하고(갭 포함) `knownProfit`
- * 으로 보고한다. daily 와의 bridge 항등식은 테스트가 고정한다.
+ * **분모는 이 구간의 시작자본 + 시간가중 외부흐름뿐이다.** 일간 구간의 자본을 합산해
+ * 만들지 않는다 — 260 거래일을 더하면 수백억이 나와 수익률이 0 에 수렴한다.
+ *
+ * **분자에 `incomeLowerBound` 를 더하지 않는다.** 예수금이 `derivedCash + incomeLB` 라서
+ * `V_close − V_open` 안에 이미 그 구간의 `ΔincomeLB` 가 들어 있다. 더하면 이중계산이고,
+ * 실제로 2026 전체가 −0.82% 대신 −0.02% 로 나왔다.
  */
 export function segmentProfit(
   seg: Segment,
   scopeDays: readonly ScopeDay[],
   flows: readonly FlowPoint[],
-  income: { lowerBound: number; upperBound: number | null },
+  /**
+   * `recognized` — 이 구간 손익에 **이미 포함된** 미관측 수입 하한(설명용).
+   * `headroom`   — 상한까지 갔을 때 **추가로** 더해질 수 있는 금액(= R 합). 모르면 null.
+   */
+  income: { recognized: number; headroom: number | null },
   span: SpanKind,
 ): PeriodResult {
   const byDate = new Map(scopeDays.map((d) => [d.date, d]));
@@ -562,11 +584,13 @@ export function segmentProfit(
     endingTotal: closeDay.vClose,
     netCashflow,
     knownProfit,
-    incomeLowerBound: income.lowerBound,
-    incomeUpperBound: income.upperBound,
+    incomeLowerBound: income.recognized,
+    incomeUpperBound: income.headroom === null ? null : income.recognized + income.headroom,
+    incomeHeadroom: income.headroom,
     averageCapital,
-    returnPctLow: pct(knownProfit + income.lowerBound),
-    returnPctHigh: income.upperBound === null ? null : pct(knownProfit + income.upperBound),
+    // 하한 = 손익 그대로(이미 ΔincomeLB 포함). 상한 = 아직 설명 안 된 잔차만큼 더한 값.
+    returnPctLow: pct(knownProfit),
+    returnPctHigh: income.headroom === null ? null : pct(knownProfit + income.headroom),
     holdingsSources: sources,
     cashQuality,
     span,
@@ -610,11 +634,11 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
   const sources = input.incomeSources.filter((s) => inScope.has(s.accountId));
 
   return segments.map((seg) => {
-    let lower = 0;
+    let recognized = 0;
     let capSum = 0;
     let anyCapMissing = false;
     for (const s of sources) {
-      lower += incomeLowerBoundBetween(s.derived, seg.openDate, seg.closeDate);
+      recognized += incomeLowerBoundBetween(s.derived, seg.openDate, seg.closeDate);
       if (s.cap === null) anyCapMissing = true;
       else capSum += s.cap;
     }
@@ -622,7 +646,7 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
       seg,
       scopeDays,
       input.flows,
-      { lowerBound: lower, upperBound: anyCapMissing ? null : lower + capSum },
+      { recognized, headroom: anyCapMissing ? null : capSum },
       spanOfSegment(seg, input.period, first, last),
     );
   });

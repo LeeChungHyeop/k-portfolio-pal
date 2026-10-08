@@ -526,7 +526,7 @@ describe("손익 분해와 항등식", () => {
       "daily",
     );
     const seg = segs.find((s) => s.openDate === "2026-01-05")!;
-    const r = segmentProfit(seg, scope, [], { lowerBound: 0, upperBound: 0 }, "full");
+    const r = segmentProfit(seg, scope, [], { recognized: 0, headroom: 0 }, "full");
     expect(r.netCashflow).toBe(0); // 그 날 외부 입출금이 없다
     expect(r.knownProfit).toBeCloseTo(
       vals.find((v) => v.date === "2026-01-05")!.vClose -
@@ -543,7 +543,7 @@ describe("손익 분해와 항등식", () => {
       scope.map((d) => d.date),
       "monthly",
     );
-    const m = segmentProfit(month, scope, flows, { lowerBound: 0, upperBound: 0 }, "full");
+    const m = segmentProfit(month, scope, flows, { recognized: 0, headroom: 0 }, "full");
 
     const byDate = new Map(scope.map((d) => [d.date, d]));
     let dailySum = 0,
@@ -553,7 +553,7 @@ describe("손익 분해와 항등식", () => {
       "daily",
     );
     ds.forEach((s, i) => {
-      const r = segmentProfit(s, scope, flows, { lowerBound: 0, upperBound: 0 }, "full");
+      const r = segmentProfit(s, scope, flows, { recognized: 0, headroom: 0 }, "full");
       dailySum += r.knownProfit;
       if (i > 0) gapSum += gapProfit(byDate.get(ds[i - 1].openDate)!, byDate.get(s.openDate)!);
     });
@@ -820,14 +820,14 @@ describe("구간 경계", () => {
       seg,
       scope,
       [{ date: "2026-01-02", amount: 100_000 }],
-      { lowerBound: 0, upperBound: 0 },
+      { recognized: 0, headroom: 0 },
       "full",
     );
     const atClose = segmentProfit(
       seg,
       scope,
       [{ date: "2026-01-30", amount: 100_000 }],
-      { lowerBound: 0, upperBound: 0 },
+      { recognized: 0, headroom: 0 },
       "full",
     );
     expect(atOpen.averageCapital).toBe(1_100_000);
@@ -852,7 +852,7 @@ describe("구간 경계", () => {
       seg,
       scope,
       [{ date: "2026-01-02", amount: 300_000 }],
-      { lowerBound: 0, upperBound: 0 },
+      { recognized: 0, headroom: 0 },
       "full",
     );
     expect(r.averageCapital).toBe(500_000);
@@ -978,5 +978,168 @@ describe("미관측 현금수입(L3) 범위", () => {
     expect(res[0].returnPctLow).toBeCloseTo(2.0, 6); // 20,000 / 1,000,000
     expect(res[0].returnPctHigh).toBeCloseTo(2.5, 6); // 25,000 / 1,000,000
     expect(res[0].exact).toBe(true);
+  });
+});
+
+// ── 수익률 분모/분자 회귀 ───────────────────────────────────────────────────
+//
+// 2026 전체가 −0.82% 대신 **−0.02%** 로 나왔던 버그의 재발 방지.
+// 원인은 분모가 아니라 분자였다 — 예수금이 `derivedCash + incomeLB` 라서
+// `V_close − V_open − F` 안에 이미 ΔincomeLB 가 들어 있는데, 수익률을 낼 때
+// 그 값을 **한 번 더** 더하고 있었다.
+
+describe("수익률 분모·분자 회귀", () => {
+  const dates = ["2026-01-02", "2026-02-02", "2026-03-02"];
+  const mk = (date: string, vOpen: number, vClose: number) => ({
+    date,
+    vOpen,
+    vClose,
+    term1: vClose - vOpen,
+    term2: 0,
+    costs: 0,
+    holdingsSources: ["ledger" as const],
+    cashQuality: "derived" as const,
+  });
+
+  it("★ 분모 = 기초자산 + Σ(가중 외부흐름) — 일간 자본을 누적하지 않는다", () => {
+    const scope = [
+      mk("2026-01-02", 100_000_000, 100_000_000),
+      mk("2026-02-02", 100_000_000, 100_000_000),
+      mk("2026-03-02", 100_000_000, 100_000_000),
+    ];
+    const [seg] = buildSegments(dates, "yearly");
+    const flows = [{ date: "2026-02-02", amount: 10_000_000 }];
+    const r = segmentProfit(seg, scope, flows, { recognized: 0, headroom: 0 }, "full");
+    // T = 1/2 ~ 3/2 = 59일, ti = 31일 → w = (59-31)/59
+    const w = (59 - 31) / 59;
+    expect(r.averageCapital).toBeCloseTo(100_000_000 + 10_000_000 * w, 6);
+    // 일간 vOpen 합(3억)과는 분명히 다르다 — 그게 버그의 모양이었다
+    const sumDaily = scope.reduce((s, d) => s + d.vOpen, 0);
+    expect(r.averageCapital).toBeLessThan(sumDaily);
+  });
+
+  it("★ 분모는 현실적인 자본 규모를 벗어나지 않는다 (기초자산 + 총유입 상한)", () => {
+    const scope = [
+      mk("2026-01-02", 81_575_665, 81_575_665),
+      mk("2026-02-02", 90_000_000, 90_000_000),
+      mk("2026-03-02", 148_174_504, 148_174_504),
+    ];
+    const [seg] = buildSegments(dates, "yearly");
+    const flows = [
+      { date: "2026-01-02", amount: 30_000_000 },
+      { date: "2026-02-02", amount: 37_595_443 },
+    ];
+    const r = segmentProfit(seg, scope, flows, { recognized: 0, headroom: 0 }, "full");
+    const grossIn = flows.reduce((s, f) => s + Math.max(0, f.amount), 0);
+    // 가중치가 [0,1] 이므로 분모는 반드시 이 사이다
+    expect(r.averageCapital).toBeGreaterThanOrEqual(scope[0].vOpen);
+    expect(r.averageCapital).toBeLessThanOrEqual(scope[0].vOpen + grossIn);
+    // 260 거래일을 더한 규모(수백억)가 절대 나오면 안 된다
+    expect(r.averageCapital).toBeLessThan(1_000_000_000);
+  });
+
+  it("★ 외부흐름 가중치는 **일수** 기준이고 [0,1] 안에 있다 (ms 단위 아님)", () => {
+    const scope = [
+      mk("2026-01-02", 1_000_000, 1_000_000),
+      mk("2026-02-02", 1_000_000, 1_000_000),
+      mk("2026-03-02", 1_000_000, 1_000_000),
+    ];
+    const [seg] = buildSegments(dates, "yearly");
+    // 구간 첫날 입금 → w=1, 마지막날 입금 → w=0, 중간 → 0<w<1
+    const atOpen = segmentProfit(
+      seg,
+      scope,
+      [{ date: "2026-01-02", amount: 500_000 }],
+      { recognized: 0, headroom: 0 },
+      "full",
+    );
+    const atClose = segmentProfit(
+      seg,
+      scope,
+      [{ date: "2026-03-02", amount: 500_000 }],
+      { recognized: 0, headroom: 0 },
+      "full",
+    );
+    const mid = segmentProfit(
+      seg,
+      scope,
+      [{ date: "2026-02-02", amount: 500_000 }],
+      { recognized: 0, headroom: 0 },
+      "full",
+    );
+    expect(atOpen.averageCapital).toBe(1_500_000); // w = 1
+    expect(atClose.averageCapital).toBe(1_000_000); // w = 0
+    expect(mid.averageCapital).toBeGreaterThan(1_000_000);
+    expect(mid.averageCapital).toBeLessThan(1_500_000);
+    // ms 단위였다면 가중금액이 천문학적이 된다
+    expect(mid.averageCapital).toBeLessThan(2_000_000);
+  });
+
+  it("★ 분자에 미관측 수입 하한을 **다시 더하지 않는다** (이중계산 금지)", () => {
+    const scope = [
+      mk("2026-01-02", 100_000_000, 100_000_000),
+      mk("2026-02-02", 100_000_000, 100_000_000),
+      mk("2026-03-02", 99_000_000, 99_000_000),
+    ];
+    const [seg] = buildSegments(dates, "yearly");
+    // 손익 −1,000,000 인데 recognized(이미 손익에 포함된 수입) 가 971,226 이라고 하자
+    const r = segmentProfit(seg, scope, [], { recognized: 971_226, headroom: 0 }, "full");
+    expect(r.knownProfit).toBe(-1_000_000);
+    // 하한 수익률은 손익 그대로를 분모로 나눈 값이어야 한다
+    expect(r.returnPctLow).toBeCloseTo((-1_000_000 / 100_000_000) * 100, 9);
+    // 버그 당시 값(= (profit + recognized)/denom ≈ −0.03%)이 아니다
+    expect(r.returnPctLow).not.toBeCloseTo(((-1_000_000 + 971_226) / 100_000_000) * 100, 4);
+    // headroom 은 **상한에만** 더해진다
+    const withHead = segmentProfit(
+      seg,
+      scope,
+      [],
+      { recognized: 971_226, headroom: 500_000 },
+      "full",
+    );
+    expect(withHead.returnPctHigh).toBeCloseTo(((-1_000_000 + 500_000) / 100_000_000) * 100, 9);
+    expect(withHead.incomeUpperBound).toBe(971_226 + 500_000);
+  });
+
+  it("★ 수익률은 비율이 아니라 **퍼센트**다 (/100 을 두 번 하지 않는다)", () => {
+    const scope = [
+      mk("2026-01-02", 1_000_000, 1_000_000),
+      mk("2026-02-02", 1_000_000, 1_000_000),
+      mk("2026-03-02", 1_100_000, 1_100_000),
+    ];
+    const [seg] = buildSegments(dates, "yearly");
+    const r = segmentProfit(seg, scope, [], { recognized: 0, headroom: 0 }, "full");
+    expect(r.knownProfit).toBe(100_000);
+    expect(r.returnPctLow).toBeCloseTo(10, 9); // 0.1 이 아니라 10(%)
+  });
+
+  it("★ 월간 분모는 그 달 자체의 분모다 — 일간 분모의 합이 아니다", () => {
+    const d = ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-30"];
+    const scope = d.map((x, i) => mk(x, 100_000_000 + i, 100_000_000 + i));
+    const [month] = buildSegments(d, "monthly");
+    const m = segmentProfit(month, scope, [], { recognized: 0, headroom: 0 }, "full");
+    const dailies = buildSegments(d, "daily").map((s) =>
+      segmentProfit(s, scope, [], { recognized: 0, headroom: 0 }, "full"),
+    );
+    const sumDailyCapital = dailies.reduce((s, x) => s + x.averageCapital, 0);
+    expect(m.averageCapital).toBeCloseTo(100_000_000, 0);
+    expect(sumDailyCapital).toBeGreaterThan(m.averageCapital * 3); // 합산하면 4배 규모
+    expect(m.averageCapital).not.toBeCloseTo(sumDailyCapital, 0);
+  });
+
+  it("실데이터 — 2026 전체 분모가 자본 규모 안이고 수익률이 손익/분모와 일치한다", () => {
+    // 분모가 50억대로 튀면(일간 누적 버그) 여기서 걸린다.
+    const scope = [
+      mk("2026-01-02", 81_575_665, 81_575_665),
+      mk("2026-06-01", 120_000_000, 120_000_000),
+      mk("2026-10-08", 148_174_504, 148_174_504),
+    ];
+    const [seg] = buildSegments(["2026-01-02", "2026-06-01", "2026-10-08"], "yearly");
+    const flows = [{ date: "2026-06-01", amount: 67_595_443 }];
+    const r = segmentProfit(seg, scope, flows, { recognized: 971_226, headroom: null }, "full");
+    expect(r.averageCapital).toBeGreaterThan(80_000_000);
+    expect(r.averageCapital).toBeLessThan(200_000_000);
+    expect(r.returnPctLow).toBeCloseTo((r.knownProfit / r.averageCapital) * 100, 9);
+    expect(r.returnPctHigh).toBeNull(); // headroom 미정 → 상한 없음
   });
 });
