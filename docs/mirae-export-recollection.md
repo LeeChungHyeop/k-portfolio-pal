@@ -371,129 +371,169 @@ J.  그 다음에만 profit-analysis 구현 (설계 문서 Step 3~10)
 
 ---
 
-## 9. IRP 2026-08-28 이후 — 조사 종료 기록 (2026-10-09)
+## 9. IRP 2026-08-28 이후 — 조사 기록 (최종 개정 2026-10-10)
 
-**결론: 이 구간은 `checkpoint-confirmed holdings transition / aggregate cost evidence,
-actual execution unavailable` 상태로 남긴다. 거래 원장(Transaction Ledger) 신규 적재
-0 건이다.** 조사는 read-only 로 끝났고 production write / migration / import 는 없었다.
+**상태: `checkpoint + broker-historical-balance confirmed holdings/settlement transition,
+aggregate net settlement confirmed, individual execution unavailable`.
+거래 원장(Transaction Ledger) 신규 actual execution 적재 0 건.**
+조사는 전 과정 read-only 였고 production write / migration / import 는 없었다.
 
-조사 경로 네 가지: production Supabase(service_role read) / `data/verified-transactions.v2.json`
-/ KIS Open API 실계좌 read 조회(ACNT_PRDT_CD=29) / 네이버 일봉.
+조사 경로: production Supabase(service_role read) / `data/verified-transactions.v2.json` /
+KIS Open API 실계좌 read(ACNT_PRDT_CD=29) / 한국투자 앱 화면 / **미래에셋 웹 날짜별
+과거잔고(IRP 계좌행 "자산총액")** / 네이버·KRX 일봉.
+
+> **이 절은 ROBUST(§9-4)와 PROVISIONAL/CANDIDATE(§9-5)를 엄격히 나눈다.
+> candidate 를 확정 사실로 쓰지 않는다.** 등급 명칭은 §9-2.
 
 ### 9-1. 왜 §2-2 의 재수집으로 메울 수 없는가
 
 미래에셋 IRP → **한국투자 IRP 로 2026-10-09 실물이전 완료**(사용자 직접 확인, 매도·재매수
-없음). 이전 후 미래에셋 매매내역 조회가 사실상 닫혀서 §2-2 의 `IRP.xlsx` 재수집 경로가
-막혔다. 대체 경로도 없다 — **KIS 는 퇴직연금계좌 체결내역을 영구 거부한다**
-(`inquire-daily-ccld`, TTTC8001R·TTTC0081R 모두 `rt_cd=7 / APBK1744
-"퇴직연금계좌는 해당 서비스가 불가합니다"`). KIS 가 주는 것은 잔고와 취득원가뿐이다.
+없음). 이전 후 미래에셋 매매내역 조회가 사실상 닫혀 §2-2 의 `IRP.xlsx` 재수집 경로가 막혔다.
+**KIS 는 퇴직연금계좌 체결내역을 거부한다** — `inquire-daily-ccld`, TTTC8001R·TTTC0081R
+모두 `rt_cd=7 / APBK1744 "퇴직연금계좌는 해당 서비스가 불가합니다"`. KIS 가 주는 것은
+잔고와 취득원가뿐이다.
 
-### 9-2. 근거 분류 — `A-exec` 와 `P` 를 섞지 않는다
+**다만 종료·이전된 계좌도 "날짜별 과거잔고"의 계좌 요약(자산총액)에는 남아 있다.**
+이 경로가 §9-3 의 복원을 가능하게 했다. 화면에 "국내주식: KRX시세 기준, 과거일자는
+KRX 정규장 종가 기준"이 명시돼 있다. 단 그 화면의 종목 상세표에는 ISA·연금저축 종목이
+섞여 나오므로 **IRP holdings source 로 쓰지 않는다** — holdings 는 원장과 앱 checkpoint
+에서만 가져왔다.
+
+### 9-2. 근거 분류 — `A-exec` 와 account-state 증거를 섞지 않는다
 
 | 코드 | 명칭 | 뜻 |
 |---|---|---|
-| **A-exec** | *actual broker execution evidence* | 체결 1건 = 원장 1행. 수량·단가·금액·거래일·결제일이 증권사 기록으로 확인된 것 |
-| **P** | *broker-confirmed current position / account evidence* | 증권사가 확인해 준 **현재 상태**(보유수량·취득원가 집계·예수금). **체결 증거가 아니다** |
-| **T** | *transfer evidence* | 계좌이전 방식·완료일. P 의 해석 근거(원가 승계 여부)를 준다 |
-| **AGG** | *aggregate-confirmed (derived)* | P + T + 기존 원장으로 산술적으로 닫히는 집계값. **체결 단위로 쪼갤 수 없다** |
+| **A-exec** | *actual broker execution evidence* | 체결 1 건 = 원장 1 행. 수량·단가·금액·거래일·결제일이 증권사 체결기록으로 확인된 것 |
+| **P** | *broker-confirmed current position / account evidence* | 증권사가 확인해 준 **현재 상태**(보유수량·취득원가 집계·예수금). 체결 증거가 아니다 |
+| **T** | *transfer evidence* | 계좌이전 방식·완료일 |
+| **H** | *broker historical-balance (transition) evidence* | 증권사가 날짜별로 보고한 **계좌 상태와 그 전환**. 체결 증거가 아니다 |
+| **AGG** | *aggregate-confirmed (derived)* | 위 + 기존 원장으로 산술적으로 닫히는 집계값. **체결 단위로 쪼갤 수 없다** |
 | **B** | *app checkpoint evidence* | 앱이 기록한 수량 스냅샷·내부 타임스탬프 |
 
 > **2026-08-28 이후 IRP 의 `A-exec` 는 0 건이다.** 원장의 IRP 65 건은 전부 8/28 까지다.
-> `P`/`AGG` 를 `A-exec` 로 승격시키지 않는다 — 이게 이 절의 존재 이유다.
+> `P`/`H`/`AGG` 를 `A-exec` 로 승격시키지 않는다 — 이 절의 존재 이유다.
 
-### 9-3. 확정된 것
+### 9-3. historical-balance accounting model 과 control validation
 
-**holdings delta (B, 구간 `(2026-08-28, 2026-10-02]`)** — 10-02 checkpoint
-`rowQuantitiesSnap` = `liveQuantities` = 현재 한국투자 잔고(P)로 양 끝이 고정된다.
+모델 **V1**: 「자산총액 = 결제기준(settlement-basis) holdings × 당일 종가 + residual」.
+holdings 는 원장 replay(PRE) 와 10-02 checkpoint·10-09 KIS(POST) 에서만 가져왔고,
+가격은 네이버·KRX 일봉으로 직접 조회했다.
 
-| ticker | ETF | delta | 성격 |
+| 기준일 | 요일 | 적용 holdings | market value | 자산총액(실측) | residual | 전구간 대비 |
+|---|---|---|---|---|---|---|
+| 2026-08-28 | 금 | PRE-8/28 (39/98/52/92) | 4,090,340 | 4,351,157 | **260,817** | — |
+| 2026-08-31 | 월 | PRE-8/28 | 4,090,840 | 4,351,678 | **260,838** | +21 |
+| **2026-09-01** | 화 | **POST-8/28** (67/93/37/67) | 4,328,905 | 4,341,748 | **12,843** | **−247,995** ← 결제 |
+| 2026-09-23 | 수 | POST-8/28 | 4,449,785 | 4,462,639 | 12,854 | +11 |
+| 2026-09-28 | 월 | POST-8/28 | 4,392,080 | 4,654,955 | 262,875 | **+250,021** ← 입금 |
+| 2026-10-01 | 목 | POST-8/28 | 4,453,990 | 4,716,927 | **262,937** | +62 |
+| 2026-10-02 | 금 | POST-8/28 | 4,423,590 | 4,686,612 | 263,022 | +85 |
+| 2026-10-06 | 화 | POST-8/28 | 4,429,675 | 4,692,718 | **263,043** | +21 |
+| **2026-10-07** | 수 | **POST-10/02** (91/103/29) | 4,710,090 | 4,712,548 | **2,458** | **−260,585** ← 결제 |
+
+2026-10-08 은 **조회 불가**(10/09 타사 이전으로 과거계좌 목록에서 소멸).
+
+**CONTROL EVENT — 2026-08-28 리밸런싱.** 이미 `A-exec` 가 완전한 이벤트라
+(tradeDate 2026-08-28 / settlementDate 2026-09-01 / 체결 8 건 전부 원장에 존재)
+V1 을 **정답지로 채점**할 수 있다. 네 항목 모두 통과:
+
+1. 8/28·8/31 이 **PRE** holdings 로 설명된다 (두 가설 간 mv 간격 230,255~246,275 원)
+2. 9/01 이 **POST** holdings 로 설명된다
+3. 전환 시점이 **known settlementDate 2026-09-01 과 정확히 일치**한다 (8/31 은 아직 PRE)
+4. residual 변화가 known 현금이동과 **1 원 단위로 일치**한다 —
+   `260,838 − 12,843 = 247,995 = 2,044,030(매수 gross) − 1,796,035(매도 gross)`
+
+**이것이 이 조사에서 가장 강한 증거다.** 10/06→10/07 전환은 더 이상 단일 사건에 대한
+귀납이 아니라, known broker event 에서 검증된 모델의 적용이다.
+
+**대안 holdings 가설은 궤적을 만들지 못한다**: 10/06 에 POST 를 넣으면 residual 이
+**−12,822**(음수·불가능)가 되고, 10/07 에 PRE 를 넣으면 338,368 이 되어 10/09 이전수량
+(POST)과 모순된다.
+
+**9/01 의 정합이 증명하는 것의 범위(중요).**
+`감소 = (gross매수 − gross매도) + F − c` 이고 gross 차가 247,995 이므로 나오는 결론은
+**`F = c` (reported gross 를 넘는 net settlement adjustment = 0)** 하나뿐이다.
+수수료·세금 `F` 와 당일 미관측 cash credit `c` 가 **각각 얼마인지는 미확정**이며,
+둘이 동시에 존재해 상계됐을 가능성을 과거잔고 snapshot 만으로 배제할 수 없다.
+**다른 날짜에서 관측된 credit 최대값(85 원)은 9/01 당일 `c` 의 상한이 아니다 —
+따라서 `F` 의 upper bound 는 이 증거로 얻을 수 없다.**
+
+### 9-4. ROBUST
+
+| # | 항목 | 내용 |
+|---|---|---|
+| R1 | **historical-balance settlement-basis model control validation** | V1 이 known broker execution event 로 검증됨. 9 개 기준일이 하나의 규칙으로 닫히고 대안 가설은 궤적을 만들지 못한다. 미래에셋의 공식 "자산총액" 정의를 문서로 읽은 것은 아니다 — **검증된 모델이지 확인된 정의는 아니다** |
+| R2 | **8/28 → 9/01 known-event validation** | 8/28·8/31 = PRE, 9/01 = POST. 전환이 known settlementDate 와 정확히 일치. residual 변화 −247,995 가 보고 gross 차와 1 원 단위 일치 |
+| R3 | **10/06 PRE → 10/07 POST transition** | 10/06 = PRE + 263,043, 10/07 = POST + 2,458. 10/07 residual 2,458 은 10/09 한국투자 KIS·앱화면(2 채널)과 원 단위 일치 |
+| R4 | **holdings delta (구간 `(2026-08-28, 2026-10-02]`)** | 360750 **+24** / 438080 **+10** / 367380 **+29**(신규) / 0167A0 **−37**(전량) / 0181B0 **−67**(전량) |
+| R5 | **tradeDate = 2026-10-02 (high-confidence reconstructed)** | ① 결제 10/07 + 증권사 보고 T+2 앵커(retirement 2026-10-01 → 결제 2026-10-06, 주문일 직접 보고) ⟹ 10/02 유일 ② 10/02 residual 이 아직 PRE ⟹ 거래일에 미결제, 정합 ③ 앱 자산·행 생성 2026-10-02 11:19:20 / 11:20:23 KST ④ 같은 날 연금저축의 broker-backed 10/02 이벤트. **A-exec 아님** |
+| R6 | **settlementDate = 2026-10-07 (high-confidence)** | R3. 전환 메커니즘이 R2 에서 캘리브레이션됐다. **A-exec 아님** |
+| R7 | **net settlement cash outflow = 260,585** | 독립 2 경로 일치: (a) `263,043 − 2,458` (10/06→10/07 결제기준 residual) (b) `262,937 − 2,352` (10/01 residual − 10/02 app checkpoint cashBalance). **net 값이며 buy / sell / fee / tax 로 분해되지 않는다** |
+| R8 | **9/28 external deposit control** | `residual(09-28) − residual(09-23) = +250,021` = verified 납입내역 **250,000** + 소액 credit 21. 외부입금이 residual 에 원 단위로 반영된다 |
+| R9 | **+106 은 settlement amount 변경으로 설명되지 않는다** | R7 의 두 경로가 **완전히 같다**. settlement adjustment 였다면 정확히 106 만큼 달랐어야 한다 |
+| R10 | **settlement-independent recurring small cash-like credit pattern** | residual 이 결제 없는 구간에서 반복적으로 소폭 증가: +21(8/28→8/31) · +11(9/01→9/23) · +21(9/23→9/28, 입금과 별개) · +62(9/28→10/01) · +85(10/01→10/02) · +21(10/02→10/06). **10/01~10/06 합계 +106.** 단순 일별 이자 적립과 맞지 않는다(22 일·잔고 12.8 천 = +11 vs 1 일·잔고 263 천 = +85). **정체는 이자 / 분배금 / 기타 cash credit 중 미확정.** 측정량은 엄밀히 residual 변화다 |
+| R11 | **settled cash-like balance (residual) 실측값** | 2026-08-28 **260,817** · 2026-08-31 **260,838** · 2026-09-01 settlement 후 **12,843** · 2026-10-06 **263,043** · 2026-10-07 **2,458** |
+| R12 | **10/02 app checkpoint cashBalance 2,352 의 수치 정합** | 10/01 settled cash-like residual(262,937)에서 10/02 리밸런싱의 confirmed net settlement cash(260,585)를 차감한 **projected / post-trade cash state 와 원 단위로 일치**한다. 이 값이 미래에셋의 특정 broker field(주문가능금액·D+2 예수금 등)를 직접 의미하는지는 **provenance 가 없어 미확정** |
+| R13 | **observed rebalance event = 2026-10-02 1 개** | 관측된 5 종목 net holdings transition 이 2026-10-07 의 단일 settlement transition 으로 반영됐다. **관측에 흔적을 남기지 않는 중간 round-trip 거래가 없었다는 증명은 아니다.** 앱의 event grouping 기준으로 observed rebalance event date 는 하나다 |
+| R14 | **현재 포지션 / 승계 취득원가 / 예수금 (P)** | 보유수량 360750 **91** / 438080 **103** / 367380 **29**. 취득원가 집계 **2,382,946 / 1,444,850 / 918,285** (합 4,746,081). 예수금 **2,458**. KIS `pchs_amt` · `pchs_avg_pric`×수량 · 요약 `pchs_amt_smtl_amt` · 한국투자 앱 화면(평가금액−평가손익) **4 경로 일치** |
+| R15 | **계좌이전 전후 관측된 cash balance 변화 = 0 원 (T)** | 2026-10-07 미래에셋 historical residual **2,458**, 2026-10-09 한국투자 KIS/current cash **2,458**. **개별 이전 처리 과정에 어떤 내부 transaction 이 있었는지는 증명하지 않았다** |
+| R16 | **individual executions unavailable** | 개별 execution 개수 / 각 fill 수량 / 각 fill 체결단가 / broker execution timestamp 미복원. 앱 타임스탬프 11:19:20 · 11:20:23 은 **app configuration / rebalance timestamp 이며 broker execution timestamp 가 아니다** |
+| R17 | **Transaction Ledger 신규 actual execution = 0 건** | §9-6 |
+| R18 | **S_gross 의 robust 제약** | `S_gross ∈ [1,412,275, 1,432,315]` (37 주·67 주, 호가 5 원, 10/02 일중범위만으로). 그리고 `S_gross = B_gross − 260,585 + (F − c)` — **B_gross 가 확정되면 즉시 따라 나온다** |
+
+### 9-5. PROVISIONAL / CANDIDATE — 확정 사실로 쓰지 않는다
+
+| # | 항목 | 값 | 필요한 미확인 전제 |
 |---|---|---|---|
-| 360750 | TIGER 미국S&P500 | **+24** | 67 → 91 |
-| 438080 | ACE 미국S&P500미국채혼합50액티브 | **+10** | 93 → 103 |
-| 367380 | ACE 미국나스닥100 | **+29** | 신규 편입 (원장 첫 등장) |
-| 0167A0 | SOL AI반도체TOP2플러스 | **−37** | 전량 청산 |
-| 0181B0 | HANARO 미국AI메모리반도체TOP4+ | **−67** | 전량 청산 |
+| C1 | fee / tax = 0 | — | 9/01 의 `F = c` 를 `F = c = 0` 으로 특정 |
+| C2 | fee / tax upper bound | **없음** | — |
+| C3 | KIS `pchs_amt` = pure execution gross | — | acquisition fee 의 capitalize 여부 / 이전 시 원가 반올림 방식 |
+| C4 | 360750 buy gross | **621,485** | C1 + C3 |
+| C5 | aggregate sell gross | **≈ 1,417,385** | C1 + C3 |
+| C6 | 개별 매도가 | 0167A0 @19,430 / 0181B0 @10,425 | C1 + C3 + **종목별 단일가 가정** |
+| C7 | fill structure (개수 · 수량 · 가격) | — | 복원 경로 없음 |
+| C8 | 360750 호가단위 불일치의 원인 | 수수료 capitalize / 승계·이동평균 원가 반올림 / 복수 fill **세 가지가 분리되지 않음** | — |
 
-**transfer (T)**: 2026-10-09 실물이전 완료. 10-02 의 수량 변화는 **미래에셋 계좌에서**
-발생했고, 한국투자 잔고는 그 포지션의 이전 후 상태다. 취득원가는 승계된 값이다.
+**C6 의 민감도**: `F ∈ [0, 100]` 만 허용해도 종목별 단일가 해가 **10 개**로 늘고
+(그중 하나는 0167A0 @19,440 = 같은 날 연금저축 실체결가), 복수 fill 을 허용하면
+**연속 무한**이다. → **C6 은 유일해가 아니다.** 어떤 candidate 도 원장에 넣지 않는다.
 
-**current position / account (P)** — KIS 와 한국투자 앱 화면 2 채널 일치. 취득원가는
-KIS `pchs_amt` / `pchs_avg_pric`×수량 / 요약 `pchs_amt_smtl_amt` / 앱 화면(평가금액−평가손익)
-**4 경로가 모두 같다.**
+**aggregate acquisition-cost increment(AGG)를 settlement buy gross 와 동일시하지 않는다.**
+AGG ≈ 1,677,969 가 R18 의 robust 구간과 정합한다는 것은 **모순이 없다는 뜻이지
+determination 이 아니다.**
 
-| 항목 | 값 |
-|---|---|
-| 보유수량 | 360750 **91** / 438080 **103** / 367380 **29** |
-| 승계 취득원가 | **2,382,946** / **1,444,850** / **918,285** (합 **4,746,081**) |
-| 현재 예수금 | **2,458** |
-| 10-02 app `cashBalance` | **2,352** |
-| **미설명 내부 수입 상한** | **106 원** (2026-10-02 ~ 10-09, 미래에셋 계좌에서 발생. 이자·분배금 후보, 근거 없음) |
-
-**aggregate 취득원가 증분 (AGG)** = 현재 원가(P) − 8/28 원장 이동평균 원가:
-
-| ticker | 8/28 원장 원가 | 증분 | 정확도 |
-|---|---|---|---|
-| 367380 | 0 (신규) | **918,285** (29주) | 정확 — 분모 0 |
-| 438080 | 1,306,650 (= 93×14,050) | **138,200** (10주) | 정확 |
-| 360750 | 1,761,461.69 (매도 2회 이동평균 잔여) | **≈621,484** (24주) | ±1 원 |
-| 합계 | | **≈1,677,969** | |
-
-**외부 cashflow**: 8/28 이후 1 건뿐 — **2026-09-28 입금 250,000**
-(`verified-cashflows.ts` IRP seed = production, 일치). 원장과 섞지 않는다.
-
-### 9-4. 미복원 — 확정적으로 복원할 수 없는 것
-
-- **개별 execution 개수**
-- **각 fill 의 수량**
-- **각 fill 의 체결단가**
-- **broker execution timestamp**
-- **정확한 settlement row**(결제일. 10-02 체결이면 T+2 가 10-05 대체공휴일을 건너 10-07 이
-  되지만 이건 추론이다)
-- **0167A0 / 0181B0 매도 체결가격**
-
-종목별로 더 적을 것:
-
-**360750 (+24)** — 수량과 aggregate 증분(≈621,484)만 확정이다. 이를 24 로 나눈 값
-(≈25,895.18)은 호가단위와 맞지 않는다. 그 불일치의 원인이 ① `pchs_amt` 의 수수료 포함
-여부 ② 승계·이동평균 원가의 반올림 ③ 복수 fill 중 **어느 것인지 분리할 수 없다.**
-→ **개별 execution 단가 및 fill 구조를 복원할 수 없음**으로 기록한다.
-**복수 체결이라고 단정하지 않는다.**
-
-**367380 (+29)** — `trade date = 2026-10-02` 는 **high-confidence reconstructed date** 로
-둔다(확정이 아니다). 근거: 앱 자산 생성 2026-10-02 11:19:20 KST / 리밸런싱 행 생성
-11:20:23 KST(=`custom_1790907560917`, `…_1790907623899` id 에 박힌 epoch ms) · 10-02
-checkpoint 에 29 주 존재 · 사용자 기억상 같은 날 연금저축과 거의 같은 시간대 리밸런싱 ·
-연금저축 actual event 도 10-02 · 10-09 실물이전 전까지 미래에셋 계좌에 존재.
-**11:19 / 11:20 은 app configuration / rebalance timestamp 이며 broker execution
-timestamp 가 아니다 — 후자는 미확정이다.** aggregate 단가 918,285 ÷ 29 = 31,665 는
-10-02 일봉 범위(31,495~31,855) 안이고 연금저축 동일 시간대 체결 31,660 과 5 원 차이지만,
-**`29주 @31,665` 단일 행을 만들지 않는다.**
-
-**438080 (+10)** — 증분 138,200 은 정확하지만 거래일·건수·fill 단가 미확정.
-
-**0167A0 / 0181B0 매도** — 청산돼 승계 원가가 남지 않는다. 현금식
-`37·P₁ + 67·P₂ = 1,430,321 + 수수료 − 예수금(8/28)` 은 미지수 3 · 식 1 이고,
-**8/28 시점 예수금이 어디에도 없다** — `history.cashBalance` 필드는 10-02 기록에서 처음
-등장하고 `kaw_daily_portfolio_snapshots` 는 2026-10-04 부터다. 실물이전도 이 값을 주지 않는다.
-
-### 9-5. 왜 "거의 확실한" 것조차 원장에 넣지 않는가
+### 9-6. 왜 "거의 확실한" 것조차 원장에 넣지 않는가
 
 원장의 단위는 **체결 1 건**이고 `source_fingerprint` 가
-(source·계좌·종목·구분·**수량·단가·금액·거래일·결제일**)로 구성된다(§6). 집계값이나
-추정 날짜로 1 행을 만들면 나중에 실제 매매내역이 들어올 때 **같은 체결이 두 번 적재되는
-유일한 경로**가 열린다. 367380 은 수량·aggregate 원가·거래일 세 칸이 찼지만 **체결 단위가
-비어 있어 원장 행이 되지 못한다.**
+(source · 계좌 · 종목 · 구분 · **수량 · 단가 · 금액 · 거래일 · 결제일**)로 구성된다(§6).
+집계값이나 candidate 로 1 행을 만들면 나중에 실제 체결기록이 들어올 때
+**같은 체결이 두 번 적재되는 유일한 경로**가 열린다.
 
-### 9-6. reopening 조건
+매수 3 종목은 수량 · 거래일 · 결제일 · 총액 네 칸이 찼지만 **체결 단위가 비어 있다.**
+매도 2 종목은 **종목별 총액조차 분리되지 않는다**(제약식이 두 종목 합계에만 걸린다).
+→ **synthetic execution 을 만들지 않는다. 신규 actual execution 적재 0 건.**
 
-**미래에셋 원본 매매내역이 확보될 때만 이 구간을 다시 연다.** 들어오면 §9-3 의 delta 와
-§9-4 의 공백을 **1:1 대조**한 뒤 actual Transaction Ledger 를 보충한다
-(source kind·fingerprint 가 기존과 같아 겹쳐 받아도 중복 적재되지 않는다 — §6).
+### 9-7. 미복원 — 현재 확보된 evidence 만으로 복원 불가
 
-받아볼 가치가 있는 순서: ① IRP 연금 매매내역(주문일 컬럼 있는 화면) 2026-07-01 ~ 조회
-가능한 최대 미래일 ② 부담금·입출금내역 2026-08-01 ~ 10-09 (매도대금 입금액이 보이면 매도
-2 건이 복원 가능해지고, 8/28 예수금이 보이면 위 현금식이 닫힌다) ③ 고객센터 서면 발급 /
-이전 시 교부 명세.
+- 개별 execution 개수
+- 각 fill 수량
+- 각 fill 체결단가
+- broker execution timestamp
+- `buy gross / sell gross / fee / tax` 의 개별 분해
+- 0167A0 · 0181B0 **종목별** 매도대금 (제약식이 두 종목 합계에만 걸린다)
 
-**고객센터 자료를 기다리느라 개발을 멈추지 않는다.** 수익 분석은 이 구간을 `AGG` 로만
-취급하고 진행한다 — IRP 2026-09~10 구간의 미설명 수입 상한은 **106 원**이다.
+### 9-8. reopening 조건
+
+**미래에셋 IRP 의 execution-level broker evidence(예: 원본 매매·체결내역, 공식 거래확인
+자료 등)를 확보하는 경우** 이 구간을 다시 연다. 확보되면:
+
+1. **R4 holdings delta 와 대조**
+2. **tradeDate / settlementDate 검증** (R5 · R6)
+3. **fill count / fill quantity / fill price 확인**
+4. **기존 candidate(§9-5)와 분리** — candidate 를 근거로 삼지 않고 폐기 또는 확인만 한다
+5. **실제 execution 만 Transaction Ledger 에 보충** (source kind · fingerprint 가 기존과
+   같아 겹쳐 받아도 중복 적재되지 않는다 — §6)
+
+**자료를 기다리느라 개발을 멈추지 않는다.** 수익 분석은 이 구간을 **§9-4(ROBUST)로만**
+처리하고 **§9-5(PROVISIONAL/CANDIDATE)는 쓰지 않는다.** R10 의 소액 credit 은
+정체가 미확정이므로 **external cashflow 로 넣지 않는다.**
