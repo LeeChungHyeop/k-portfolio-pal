@@ -20,6 +20,7 @@ import {
 import {
   handleRebalancePlanGet, handleRebalancePlanPost,
 } from "./lib/kaw/plan-server";
+import { handleHistoryMergePost } from "./lib/kaw/history-server";
 
 // Cloudflare Workers environment bindings
 export interface Env {
@@ -276,6 +277,14 @@ export default {
     // ── 계좌 데이터 (세션 토큰 필요) ──────────────────────────────────────
     if (pathname === "/api/data" && request.method === "GET") return handleDataGet(request, env);
     if (pathname === "/api/data" && request.method === "POST") return handleDataPost(request, env);
+
+    // 기록 1건 병합 (Phase 1B-2A). /api/data 는 계좌 문서를 **통째로** 교체하는
+    // last-writer-wins upsert 라서, 그 기록이 없던 시점의 문서가 뒤에 도착하면 기록이
+    // 사라진다. 이 경로는 HistoryEntry 1건만 보내고, 서버(migration 006 의
+    // kaw_data_merge_history)가 읽기-수정-쓰기를 한 트랜잭션 안에서 처리한다 —
+    // 동시 요청에서도 둘 다 남는다. 같은 id + 같은 경제값은 멱등 성공, 다른 경제값은 409.
+    // **기존 자동저장 경로는 그대로 둔다** — 호출부 전환은 1B-2B 다.
+    if (pathname === "/api/data/history" && request.method === "POST") return handleHistoryMergePost(request, env);
 
     // ── 일별 자산 스냅샷 읽기 (기간 성과용, 세션 토큰 필요) ─────────────────
     if (pathname === "/api/snapshots" && request.method === "GET") return handleSnapshotsGet(request, env);

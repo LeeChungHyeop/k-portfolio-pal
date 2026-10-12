@@ -1,0 +1,68 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 006 되돌리기 — HistoryEntry 병합 RPC / kaw_data.revision 제거
+--
+-- **006 은 데이터를 만들지 않는다.** 함수와 컬럼 하나뿐이고, 병합된 HistoryEntry 는
+-- `kaw_data.data -> 'history'` 안의 **계좌 문서 자체**라서 이 롤백으로 사라지지 않는다.
+-- 그래서 004/005 와 달리 "되살릴 수 없는 백업"이 없다 — 단 하나, `revision` 카운터는
+-- 지우면 복원할 수 없다(몇 번 병합됐는지는 다른 어디에도 없다).
+--
+-- ── 1단계: 백업 (revision 을 지울 때만 필요하다) ─────────────────────────────
+--
+--   select json_agg(t) from (
+--     select family_code, profile, account_type, revision, updated_at
+--       from public.kaw_data
+--      where revision > 0
+--   ) t;
+--
+-- ── 2단계: 먼저 호출부를 끈다 ───────────────────────────────────────────────
+--
+-- 함수를 지우기 전에 `POST /api/data/history` 가 배포에서 빠져 있어야 한다. 순서가
+-- 거꾸로면 그 경로가 42883(undefined_function)으로 실패한다 — `history-server.ts` 는
+-- 이것을 503 `unavailable` 로 번역하므로 데이터가 깨지지는 않지만, 클라이언트는
+-- 완료 저장을 재시도 대기로 끌고 간다.
+--
+-- ── 3단계: 삭제 ─────────────────────────────────────────────────────────────
+-- 아래 블록의 주석을 풀고 실행한다. 실수로 통째 실행되는 것을 막기 위해 주석 처리해 둔다.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- -- 함수. GRANT/REVOKE 는 함수와 함께 사라지므로 따로 되돌릴 것이 없다.
+-- drop function if exists public.kaw_data_merge_history(text, text, text, jsonb);
+--
+-- -- revision 컬럼. **기본값이 0 이라 다시 만들면 카운터가 전부 0 으로 돌아간다.**
+-- -- 함수만 지우고 컬럼은 남겨도 아무 경로도 이 값을 읽지 않으므로, 급한 롤백에서는
+-- -- 컬럼을 건드리지 않는 쪽을 권한다.
+-- alter table public.kaw_data drop column if exists revision;
+
+-- ── 4단계: audit CHECK 복원 (조건부) ────────────────────────────────────────
+--
+-- 먼저 센다. **0 이 아니면 아래 복원을 실행하지 않는다** — audit 은 append-only 라
+-- 행을 지울 수 없고, 확장된 CHECK 는 005 의 다섯 값을 그대로 허용하므로 그냥 두면 된다.
+--
+--   select count(*) from public.kaw_ledger_audit where target_type = 'history';
+--
+-- 0행일 때만:
+--
+-- -- alter table public.kaw_ledger_audit
+-- --   drop constraint if exists kaw_ledger_audit_target_chk;
+-- -- alter table public.kaw_ledger_audit
+-- --   add constraint kaw_ledger_audit_target_chk
+-- --   check (target_type in ('transaction', 'event', 'import', 'plan', 'observation'));
+
+-- ── 5단계: 확인 ─────────────────────────────────────────────────────────────
+--
+-- (a) 함수가 사라졌는가 — 0행이어야 한다
+--   select p.oid::regprocedure from pg_proc p
+--     join pg_namespace n on n.oid = p.pronamespace
+--    where n.nspname = 'public' and p.proname = 'kaw_data_merge_history';
+--
+-- (b) **계좌 문서가 그대로인가** — 병합된 기록은 남아 있어야 한다
+--   select profile, account_type, jsonb_array_length(data -> 'history') as history_count
+--     from public.kaw_data
+--    where account_type in ('retirement','isa','pension','irp')
+--    order by profile, account_type;
+--
+-- (c) 001~005 의 객체가 그대로 있는가
+--   select table_name from information_schema.tables
+--    where table_schema = 'public' and table_name like 'kaw_%'
+--    order by table_name;
+--   select proname from pg_proc where proname = 'kaw_touch_updated_at';
