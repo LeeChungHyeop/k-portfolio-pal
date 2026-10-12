@@ -17,6 +17,9 @@ import {
   handleLedgerGet, handleLedgerEventPost, handleLedgerAssignPost,
   handleLedgerCorrectPost, handleLedgerAuditGet,
 } from "./lib/kaw/ledger-server";
+import {
+  handleRebalancePlanGet, handleRebalancePlanPost,
+} from "./lib/kaw/plan-server";
 
 // Cloudflare Workers environment bindings
 export interface Env {
@@ -289,6 +292,15 @@ export default {
     if (pathname === "/api/ledger/event" && request.method === "POST") return handleLedgerEventPost(request, env);
     if (pathname === "/api/ledger/assign" && request.method === "POST") return handleLedgerAssignPost(request, env);
     if (pathname === "/api/ledger/correct" && request.method === "POST") return handleLedgerCorrectPost(request, env);
+
+    // ── 리밸런싱 계획 (세션 토큰 필요) ────────────────────────────────────
+    // 완료 1건 = kaw_rebalance_plan 1행이고, 그 행은 **immutable** 이다
+    // (migration 005 가 service_role 의 UPDATE/DELETE 를 회수한다). 그래서 POST 는
+    // insert 만 하고 PK 충돌을 "이미 있다"는 ACK 로 번역한다 — 같은 완료를 몇 번
+    // 재전송해도 1행이다. GET 은 completionId 들의 존재 여부만 돌려준다
+    // (세션 복구의 durablePlanKnown 판정 근거).
+    if (pathname === "/api/rebalance/plan" && request.method === "POST") return handleRebalancePlanPost(request, env);
+    if (pathname === "/api/rebalance/plan" && request.method === "GET") return handleRebalancePlanGet(request, env);
 
     // ── TanStack Start app (SSR + static) ───────────────────────────────
     try {

@@ -1,0 +1,89 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 005 되돌리기 — 리밸런싱 계획 / 결제 관측 제거
+--
+-- **이 스크립트는 005 가 만든 데이터를 전부 지운다.** 저장된 리밸런싱 계획(완료의
+-- durable 증거)과 결제 관측·void 가 함께 사라진다. 실행 전에 반드시 아래 백업을 뜬다.
+--
+-- 005 는 기존 객체를 **거의** 건드리지 않는다. 단 하나의 예외가 004 의
+-- `kaw_ledger_audit.target_type` CHECK 확장이라, 되돌릴 때는 그것도 004 의 값으로
+-- 복원한다 — 단, **'plan' / 'observation' target 의 audit 행이 남아 있으면 복원이
+-- 실패한다**(CHECK 위반). 그래서 3단계에서 먼저 그 행 수를 센다. audit 은 append-only
+-- 이므로 행을 지우지 않는다 — 남아 있으면 **CHECK 를 되돌리지 않고 확장된 채로 둔다**
+-- (확장은 기존 세 값을 그대로 허용하므로 004 코드와 호환된다).
+--
+-- 001/002/003/004 의 테이블·뷰·함수는 건드리지 않는다. 특히
+-- `public.kaw_touch_updated_at()` 는 003/004 가 쓰고 있으므로 **삭제하지 않는다.**
+-- `kaw_data.data -> 'history'`(legacy 이력)도 그대로 남는다.
+--
+-- ── 1단계: 백업 (롤백 전에 반드시 실행하고 결과를 내려받는다) ───────────────
+--
+--   select json_agg(t) from public.kaw_rebalance_plan t;
+--   select json_agg(t) from public.kaw_settlement_observation t;
+--   select json_agg(t) from public.kaw_settlement_observation_void t;
+--
+-- **이 세 백업은 되살릴 수 있는 다른 소스가 없다.** 004 의 원장은
+-- `data/verified-transactions.v1.json` 에서 재적재할 수 있지만, plan 은 "사용자가
+-- 그 때 무엇을 하려 했는가"라서 어디에도 복본이 없다 — legacy history 에서
+-- 추론해 재구성하는 것도 **금지**다(completion-envelope.ts: 한쪽에서 다른 쪽을
+-- 추론하지 않는다). 백업을 건너뛰지 않는다.
+--
+-- ── 2단계: 삭제 ─────────────────────────────────────────────────────────────
+-- 아래 블록의 주석을 풀고 실행한다. 실수로 통째 실행되는 것을 막기 위해 주석 처리해 둔다.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- -- 트리거 (테이블과 함께 사라지지만 명시해 둔다)
+-- drop trigger if exists kaw_settlement_observation_void_touch
+--   on public.kaw_settlement_observation_void;
+--
+-- -- overlay 먼저. FK 는 없지만 "제외 대상이 사라진 void" 를 먼저 치운다는 순서다.
+-- drop table if exists public.kaw_settlement_observation_void;
+-- drop table if exists public.kaw_settlement_observation;
+-- drop table if exists public.kaw_rebalance_plan;
+--
+-- -- public.kaw_touch_updated_at() 는 **지우지 않는다** — 003 의 스냅샷 트리거와
+-- -- 004 의 overlay 트리거가 쓰고 있다.
+--
+-- -- 005 가 건 GRANT/REVOKE 와 CHECK 제약·인덱스는 테이블과 함께 사라지므로 따로
+-- -- 되돌릴 것이 없다. 다시 적용할 때는 005 를 그대로 실행하면 된다 — 권한 블록이
+-- -- "전부 회수 후 재부여" 라서 몇 번을 실행해도 같은 least-privilege 상태로 수렴한다.
+
+-- ── 3단계: audit CHECK 복원 (조건부) ────────────────────────────────────────
+--
+-- 먼저 센다. **0 이 아니면 아래 복원을 실행하지 않는다** — audit 은 append-only 라
+-- 행을 지울 수 없고, 확장된 CHECK 는 004 의 세 값을 그대로 허용하므로 그냥 두면 된다.
+--
+--   select target_type, count(*) from public.kaw_ledger_audit
+--    where target_type in ('plan','observation')
+--    group by target_type;
+--
+-- 0행일 때만:
+--
+-- -- alter table public.kaw_ledger_audit
+-- --   drop constraint if exists kaw_ledger_audit_target_chk;
+-- -- alter table public.kaw_ledger_audit
+-- --   add constraint kaw_ledger_audit_target_chk
+-- --   check (target_type in ('transaction', 'event', 'import'));
+
+-- ── 4단계: 확인 ─────────────────────────────────────────────────────────────
+--
+-- (a) 테이블이 사라졌는가 — 0행이어야 한다
+--   select table_name from information_schema.tables
+--    where table_schema = 'public'
+--      and table_name in ('kaw_rebalance_plan','kaw_settlement_observation',
+--                         'kaw_settlement_observation_void');
+--
+-- (b) 004 의 테이블 6개가 그대로 있는가 — 6행이어야 한다
+--   select table_name from information_schema.tables
+--    where table_schema = 'public'
+--      and table_name in ('kaw_transaction_ledger','kaw_transaction_correction',
+--                         'kaw_transaction_event_override','kaw_rebalance_event',
+--                         'kaw_ledger_audit','kaw_ledger_import_batch')
+--    order by table_name;
+--
+-- (c) 공용 트리거 함수가 살아 있는가 — 1행이어야 한다
+--   select proname from pg_proc where proname = 'kaw_touch_updated_at';
+--
+-- (d) 003 / 004 의 트리거가 살아 있는가
+--   select tgname, tgrelid::regclass from pg_trigger
+--    where not tgisinternal and tgname like 'kaw_%touch%'
+--    order by 2, 1;
