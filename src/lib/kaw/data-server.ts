@@ -453,11 +453,15 @@ export async function handleDataPost(request: Request, env: DataEnv): Promise<Re
     family_code: session.code, profile: r.profile, account_type: r.account_type,
     data: r.data, updated_at: new Date().toISOString(),
   }));
-  if (!sanitized.length) return json({ ok: true });
+  // `accepted` = 실제로 upsert 에 들어간 행 수. 클라이언트가 **영속을 확인**하는 유일한
+  // 근거다(store.ts saveAccountRowWithAck) — 세션과 안 맞아 전부 걸러진 요청도
+  // 아래에서 ok:true 를 받으므로, ok 만으로는 "저장했다"를 구분할 수 없다.
+  // 기존 호출부(dbSave)는 이 필드를 읽지 않으므로 동작이 바뀌지 않는다.
+  if (!sanitized.length) return json({ ok: true, accepted: 0 });
 
   const { error } = await client.from("kaw_data").upsert(sanitized, { onConflict: "family_code,profile,account_type" });
   if (error) return json({ error: error.message }, 500);
-  return json({ ok: true });
+  return json({ ok: true, accepted: sanitized.length });
 }
 
 // ── 시세 캐시용 ticker 화이트리스트 ────────────────────────────────────────

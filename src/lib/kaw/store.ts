@@ -11,6 +11,8 @@ import {
   confirmContribution, upsertAmountVersion, createInitialSchedule,
   type RecurringContributionSchedule, type ContributionAmountVersion,
 } from "./contribution";
+import type { RebalanceSessionMirror } from "./rebalance-journal";
+import { createWriteQueue } from "./write-queue";
 
 // 액세스 코드: 환경변수에 없으면 "soye" 고정
 export const ACCESS_CODE: string = import.meta.env.VITE_ACCESS_CODE || "soye";
@@ -111,6 +113,10 @@ export interface AccountState {
   rowHoldings?: Record<string, number>;  // row instance ID → current market value
   rowMemos?: Record<string, string>;     // key: `${profileKey}:${rowId}`
   liveQuantities?: Record<string, number>; // rowId → 보유수량 (실시간 계산용, 영속화)
+  // 진행 중 리밸런싱 세션의 **mirror**. 정본은 StoreState 밖 dedicated journal 이다
+  // (rebalance-journal.ts) — 이 필드는 기기 간 동기화·화면 상태용이고, 원격 폴링이
+  // memState 를 통째로 교체할 때 지워질 수 있다. PRE 를 이 값만 믿고 쓰지 않는다.
+  rebalanceSession?: RebalanceSessionMirror;
   history: HistoryEntry[];
 }
 export interface StoreState {
@@ -264,6 +270,25 @@ function recalcReturns(history: HistoryEntry[]): HistoryEntry[] {
  */
 interface MigrationResult {
   createdContributionSchedule: boolean;
+}
+
+/**
+ * HistoryEntry 1건을 **id 기준 upsert** 한다 (append 가 아니다).
+ *
+ * 완료 1회의 identity 는 `hist:<completionId>` 이고(completion-envelope.ts), 부분
+ * 실패 후 재시도나 완료 버튼 중복 클릭이 같은 id 로 다시 들어온다. append 하면 한
+ * 번의 리밸런싱이 히스토리에 2건이 되어 수익률·백테스트 체인까지 어긋난다.
+ * 기존 `crypto.randomUUID()` id 는 충돌하지 않으므로 그 경로의 동작은 그대로다.
+ *
+ * 정렬은 날짜 기준 안정 정렬이고, 교체는 **제자리**다 — 같은 날짜의 다른 기록들
+ * 사이에서 순서가 바뀌면 "최신 기록" 판정이 흔들린다.
+ */
+export function upsertHistoryEntry(history: HistoryEntry[], entry: HistoryEntry): HistoryEntry[] {
+  const replaced = history.some((h) => h.id === entry.id);
+  const merged = replaced
+    ? history.map((h) => (h.id === entry.id ? entry : h))
+    : [...history, entry];
+  return merged.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 /** 저장된 상태를 현재 스키마로 올린다. `injectSeed` 는 hyeobi profile 여부다. (테스트용 export) */
@@ -442,9 +467,31 @@ const POLL_INTERVAL_MS = 20_000;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 // 폴링으로 받아온 데이터를 memState에 반영하는 동안 dbSave가 그 반영 자체를 다시 저장하지 않도록 막는 플래그
 let isApplyingRemote = false;
-// 로컬 변경이 아직 서버에 저장되지 않은 동안, 폴링/가시성 복귀로 받아온 (그 변경 이전) 서버 데이터가
-// memState를 덮어써서 방금 입력한 내용을 날려버리는 것을 막는 플래그 (예: 보유수량 입력 직후 폴링과 겹치는 경우)
-let pendingLocalSave = false;
+
+// ── 서버 write 직렬화 ──────────────────────────────────────────────────────
+//
+// 모든 서버 write(자동저장 dbSave + 완료 ACK write)가 **이 큐 하나**를 지난다.
+// `/api/data` 는 계좌 JSON 문서를 통째로 교체하는 last-writer-wins upsert 라서,
+// 두 요청이 겹치면 먼저 보낸 오래된 요청이 나중에 도착해 최신 기록을 지울 수 있다
+// (재현 경로는 write-queue.ts 상단).
+//
+// 계좌별로 쪼개지 않는 이유: `dbSave` 는 _meta + _assetLib + **네 계좌 전부**를 한
+// 요청으로 보내는 전체 문서 write 다. 계좌별 큐로 나누면 그 요청이 모든 큐에 걸쳐야
+// 해서 직렬화가 성립하지 않는다. 대기 비용은 자동저장이 800ms 디바운스로 합쳐지기
+// 때문에 실측상 요청 1~2건 수준이다.
+const writes = createWriteQueue();
+
+/**
+ * 아직 서버에 올라가지 않은 로컬 변경이 있는가. 폴링·가시성 복귀가 이 값을 보고
+ * **오래된 서버 상태로 memState 를 덮어쓰지 않는다.**
+ *
+ * boolean 플래그를 여러 비동기 요청이 각자 true/false 로 뒤집으면, 한 요청이 끝날 때
+ * 다른 요청이 아직 비행 중인데도 플래그가 내려가 폴링이 끼어든다. 그래서 **공유
+ * in-flight 카운터**(큐)와 대기 중 디바운스 타이머를 같이 본다.
+ */
+export function hasPendingLocalWrite(): boolean {
+  return writes.inFlight() > 0 || saveTimer !== null;
+}
 
 function notify() { listeners.forEach((l) => l()); }
 
@@ -564,19 +611,115 @@ async function dbSave(code: string, user: string, state: StoreState) {
   }
 }
 
+// ── 전체 상태 저장을 큐에 넣는다 ───────────────────────────────────────────
+//
+// **payload 시점: 읽기-최신(read-latest).** 큐가 이 작업을 실행하는 순간의 `memState`
+// 를 보낸다. 예약 시점 스냅샷을 굳혀 들고 있으면, 그 사이에 확정된 리밸런싱을
+// 모르는 오래된 문서가 나중에 서버를 덮는다(write-queue.ts 상단의 R0 사고).
+function enqueueFullSave(): Promise<void> {
+  if (!familyCode || !currentUser) return Promise.resolve();
+  return writes
+    .enqueue(async () => {
+      if (familyCode && currentUser && memState) {
+        await dbSave(familyCode, currentUser, memState);
+      }
+    })
+    .catch((e) => { console.error("[kaw] 저장 큐 실패:", e); });
+}
+
+// ── 서버 응답을 돌려주는 단건 write 경로 ───────────────────────────────────
+//
+// `dbSave` 는 모든 실패를 안에서 삼키고 `void` 를 돌려주며 호출부도 await 하지 않는다
+// (finalizeRebalance / addHistory). 그래서 **그 경로로는 결과를 알 수 없다** —
+// 예외 부재는 ACK 가 아니다(completion-envelope.ts 상단).
+//
+// 여기서는 기존 자동저장 로직을 그대로 두고, 계좌 1행만 보내 **서버 응답을 그대로**
+// 돌려주는 경로를 따로 둔다. `accepted` 는 서버가 upsert 에 넣은 행 수다 —
+// `/api/data` 는 요청 행이 세션과 안 맞아 전부 걸러져도 `ok:true` 를 주므로
+// `ok` 만 보면 "거른 것"을 "저장한 것"으로 읽는다.
+//
+// **다만 이 응답은 durable final-state 확인이 아니다.** 문서 전체 교체 upsert 라서
+// 다른 기기의 더 오래된 저장이 뒤에 도착하면 그대로 지워진다. 그래서 호출부는 이것을
+// `historyPersistence='confirmed'` 로 승격하지 않는다(rebalance-session.ts
+// historyOutcomeOfAck). write accepted 텔레메트리로만 쓴다.
+export const ACK_WRITE_TIMEOUT_MS = 15_000;
+
+export type DataWriteAck =
+  /** accepted 가 null 이면 **서버가 보고하지 않았다**(구버전 서버) */
+  | { ok: true; accepted: number | null }
+  | { ok: false; error: string; status?: number; timedOut?: boolean };
+
+async function postAccountRow(
+  row: DbRow,
+  token: string,
+  timeoutMs: number,
+): Promise<DataWriteAck> {
+  // fetch 는 자체 타임아웃이 없다. 걸어두지 않으면 응답이 안 오는 회선에서 완료
+  // 버튼이 무기한 비활성 상태로 남고, 큐 뒤의 저장도 전부 막힌다.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch("/api/data", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ rows: [row] }),
+      signal: controller.signal,
+    });
+    if (res.status === 401) {
+      clearSessionProfile();
+      return { ok: false, error: "세션이 만료됐어요. 다시 로그인해주세요.", status: 401 };
+    }
+    const body = (await res.json().catch(() => ({}))) as { error?: string; accepted?: unknown };
+    if (!res.ok) return { ok: false, error: body.error ?? `HTTP ${res.status}`, status: res.status };
+    return { ok: true, accepted: typeof body.accepted === "number" ? body.accepted : null };
+  } catch (e) {
+    const aborted = (e as Error)?.name === "AbortError";
+    return {
+      ok: false,
+      error: aborted ? `${timeoutMs}ms 안에 응답이 없었습니다` : (e as Error).message,
+      ...(aborted ? { timedOut: true } : {}),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 계좌 1행을 보내고 서버 응답을 돌려준다.
+ *
+ * **payload 시점: 예약-고정(frozen).** 지금 이 순간의 계좌 행을 굳혀 큐에 넣는다 —
+ * "이 완료의 상태가 서버에 올라갔는가"를 물어야 하므로 실행 시점의 최신값을 읽으면
+ * 질문이 달라진다. 큐가 FIFO 라서 이보다 먼저 예약된 자동저장은 먼저 실행되며 그때의
+ * 최신 상태(= 이 완료 포함)를 보내고, 뒤에 예약된 자동저장은 이 요청 다음에 실행된다.
+ */
+export function saveAccountRowWithAck(
+  id: AccountId,
+  timeoutMs: number = ACK_WRITE_TIMEOUT_MS,
+): Promise<DataWriteAck> {
+  if (!familyCode || !currentUser || !memState) {
+    return Promise.resolve({ ok: false, error: "세션이 없습니다." });
+  }
+  const token = getSessionToken();
+  if (!token) return Promise.resolve({ ok: false, error: "세션 토큰이 없습니다." });
+  const row: DbRow = {
+    family_code: familyCode, profile: currentUser, account_type: id,
+    data: memState.accounts[id], updated_at: new Date().toISOString(),
+  };
+  return writes
+    .enqueue(() => postAccountRow(row, token, timeoutMs))
+    .catch((e) => ({ ok: false as const, error: (e as Error).message }));
+}
+
 function scheduleSave() {
   if (!familyCode || !currentUser) return;
-  pendingLocalSave = true;
   if (saveTimer) clearTimeout(saveTimer);
+  // 타이머가 살아 있는 동안은 `hasPendingLocalWrite()` 가 true 다 — 플래그를 따로
+  // 세우지 않는다(여러 요청이 각자 뒤집으면 폴링이 끼어든다).
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    if (familyCode && memState && currentUser) {
-      dbSave(familyCode, currentUser, memState)
-        .catch(console.error)
-        .finally(() => { pendingLocalSave = false; });
-    } else {
-      pendingLocalSave = false;
-    }
+    // saveTimer 를 비운 직후 **동기적으로** 큐에 넣는다. enqueue 가 카운터를 바로
+    // 올리므로 둘 사이에서 `hasPendingLocalWrite()` 가 false 로 내려가지 않는다.
+    void enqueueFullSave();
   }, 800);
 }
 
@@ -604,11 +747,11 @@ function startPolling(code: string) {
   pollTimer = setInterval(async () => {
     if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
     if (!familyCode || !currentUser || familyCode !== code) return;
-    if (pendingLocalSave) return; // 아직 서버에 안 올라간 로컬 변경이 있으면 이번 폴링 결과로 덮어쓰지 않음
+    if (hasPendingLocalWrite()) return; // 아직 서버에 안 올라간 로컬 변경이 있으면 이번 폴링 결과로 덮어쓰지 않음
     try {
       const state = await dbLoad(code, currentUser);
       if (!state) return;
-      if (pendingLocalSave) return; // 조회하는 동안 새로 로컬 변경이 생겼으면 이 (더 오래된) 결과는 버림
+      if (hasPendingLocalWrite()) return; // 조회하는 동안 새로 로컬 변경이 생겼으면 이 (더 오래된) 결과는 버림
       isApplyingRemote = true;
       memState = migrateState(state, currentUser === "hyeobi", hydrationMigration);
       saveLocal(memState);
@@ -664,7 +807,7 @@ export async function activateProfile(profileId: string): Promise<void> {
 
   try {
     if (memState && currentUser && currentUser !== profileId) {
-      await dbSave(familyCode, currentUser, memState).catch(() => {});
+      await enqueueFullSave();
     }
 
     // currentUser를 먼저 설정해야 loadLocal()이 올바른 키로 읽음
@@ -754,9 +897,9 @@ function setupVisibilityRefresh() {
     // 백그라운드에 있는 동안 폴링이 멈춰있었을 수 있으므로 재시작
     startPolling(familyCode);
     // 최신 데이터 강제 로드 (단, 아직 서버에 안 올라간 로컬 변경은 덮어쓰지 않음)
-    if (pendingLocalSave) return;
+    if (hasPendingLocalWrite()) return;
     dbLoad(familyCode, currentUser).then((state) => {
-      if (!state || pendingLocalSave) return;
+      if (!state || hasPendingLocalWrite()) return;
       memState = migrateState(state, false, hydrationMigration);
       saveLocal(memState);
       notify();
@@ -839,7 +982,7 @@ export function usePortfolioStore() {
     });
     // 리밸런싱 저장은 즉시 DB에 반영 (디바운스 누락 방지)
     if (familyCode && currentUser && memState) {
-      dbSave(familyCode, currentUser, memState).catch(console.error);
+      void enqueueFullSave();
     }
   }, []);
 
@@ -867,7 +1010,8 @@ export function usePortfolioStore() {
         rowHoldingsSnap: { ...args.rowHoldings },
         returnPct: null,
       };
-      const sorted = [...acc.history, nextEntry].sort((a, b) => a.date.localeCompare(b.date));
+      // 같은 id 는 append 가 아니라 replace 다 (upsertHistoryEntry 주석).
+      const sorted = upsertHistoryEntry(acc.history, nextEntry);
       // 과거 날짜로 소급 기록하는 경우(dateMode === "past")에는 계좌의 **현재** 상태를
       // 건드리지 않는다. cashBalance / liveQuantities / rowHoldings 는 "지금" 값이므로,
       // 몇 달 전 리밸런싱을 채워 넣었다고 오늘의 실제 예수금을 과거 값으로 덮어쓰면
@@ -893,7 +1037,7 @@ export function usePortfolioStore() {
     // setState 는 memState 를 동기적으로 갱신한다. 완료 버튼 직후 바로 서버에도 반영해
     // 다른 기기/대시보드가 오래된 예수금을 보는 시간을 최소화한다.
     if (familyCode && currentUser && memState) {
-      dbSave(familyCode, currentUser, memState).catch(console.error);
+      void enqueueFullSave();
     }
   }, []);
   const removeHistory   = useCallback((id: AccountId, hid: string) =>
@@ -916,7 +1060,7 @@ export function usePortfolioStore() {
       return { ...s, accounts: { ...s.accounts, [id]: { ...acc, history: patched } } };
     });
     if (familyCode && currentUser && memState) {
-      dbSave(familyCode, currentUser, memState).catch(console.error);
+      void enqueueFullSave();
     }
   }, []);
   const resetAll        = useCallback(() => {
@@ -932,6 +1076,16 @@ export function usePortfolioStore() {
       return { ...s, accounts: { ...s.accounts, [id]: {
         ...acc, rowHoldings: { ...(acc.rowHoldings ?? {}), [rowId]: value },
       }}};
+    }), []);
+  // 리밸런싱 세션 mirror. **정본이 아니다** — journal(localStorage 전용 키)이 정본이고
+  // 이 값은 기기 간 동기화·화면 상태용이다. null 을 넘기면 필드를 지운다.
+  const setRebalanceSessionMirror = useCallback((id: AccountId, mirror: RebalanceSessionMirror | null) =>
+    setState((s) => {
+      const acc = s.accounts[id];
+      const next = { ...acc } as AccountState;
+      if (mirror) next.rebalanceSession = mirror;
+      else delete next.rebalanceSession;
+      return { ...s, accounts: { ...s.accounts, [id]: next } };
     }), []);
   // 기존 값과 병합 저장(통째로 덮어쓰지 않음) — 리밸런싱 탭이 재마운트되는 순간(히스토리 탭 이동 후 복귀 등)
   // quantities state가 account.liveQuantities보다 먼저/불완전하게 초기화돼 있으면, 통째로 덮어쓸 경우
@@ -1090,6 +1244,7 @@ export function usePortfolioStore() {
     updateRowHolding,
     updateRowMemo,
     saveAccountQuantities,
+    setRebalanceSessionMirror,
     addCashflow, removeCashflow,
     confirmContributionDeposit, updateContributionSchedule,
     setContributionAmount, removeContributionAmountVersion,

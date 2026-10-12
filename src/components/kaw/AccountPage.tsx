@@ -1,6 +1,6 @@
-import { useMemo, useState, useEffect, useCallback } from "react";
+import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import { ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS, ACCOUNT_LABELS, ACCOUNT_LABELS_SHORT, MIN_SAFE_ASSET_PCT, type AccountId, type AssetKey } from "@/lib/kaw/constants";
-import { usePortfolioStore, formatKRW, formatPct, getOrDefaultLibrary, type HistoryEntry } from "@/lib/kaw/store";
+import { usePortfolioStore, saveAccountRowWithAck, formatKRW, formatPct, getOrDefaultLibrary, type HistoryEntry } from "@/lib/kaw/store";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,12 @@ import {
   pendingContributions,
   type PendingContribution,
 } from "@/lib/kaw/contribution";
+import {
+  beginCompletion, capturePre, historyOutcomeOfAck, hydrateSession, mirrorNeedsSync, mirrorOf,
+  normalizeAssertedCash, resolveSessionAccountInstance, settleHistoryWrite,
+  type SessionContext,
+} from "@/lib/kaw/rebalance-session";
+import type { PlanPriceEvidence, PlanRowMeta } from "@/lib/kaw/rebalance-plan";
 
 // YYYY-MM-DD 문자열 ↔ Date 변환 (로컬 자정 기준 — UTC 파싱으로 하루 밀리는 것 방지)
 function ymdToDate(ymd: string): Date {
@@ -223,7 +229,8 @@ export function AccountPage({ accountId }: { accountId: AccountId }) {
    리밸런싱 탭
 ───────────────────────────────────────────── */
 function RebalanceTab({ accountId }: { accountId: AccountId }) {
-  const { state, updateAccount, updateRowHolding, finalizeRebalance, saveAccountQuantities, setHistoryBacktest,
+  const { state, familyCode, currentUser, updateAccount, updateRowHolding, finalizeRebalance,
+    saveAccountQuantities, setHistoryBacktest, setRebalanceSessionMirror,
     confirmContributionDeposit } = usePortfolioStore();
   const account = state.accounts[accountId];
   const library = getOrDefaultLibrary(state);
@@ -498,8 +505,113 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     [accountId, effectiveRows, account.cashBalance, library],
   );
 
+  // ── 리밸런싱 세션 추적 (feature flag: 기본 OFF) ──────────────────────────
+  //
+  // 켜져 있을 때만 PRE snapshot(journal) · completion envelope(outbox) 를 쓴다.
+  // 꺼져 있으면 아래 호출들은 전부 `disabled` / `not_tracked` 로 즉시 돌아가고
+  // 리밸런싱은 기존과 **완전히 같은 경로**로 저장된다(판정은 모듈 안에서 한다).
+  const sessionCtx: SessionContext | null = useMemo(
+    () => (familyCode && currentUser
+      ? { familyCode, profile: currentUser, accountType: accountId }
+      : null),
+    [familyCode, currentUser, accountId],
+  );
+
+  // broker account 레지스트리는 **Phase 1B** 에 `_meta.brokerAccounts` 로 들어온다.
+  // 지금은 없으므로 논리계좌 1개짜리 sentinel 이 나온다 — 어느 증권사 계좌인지에 대한
+  // 주장이 아니고, 레지스트리가 생기는 순간 PRE 는 instance 불일치로 버려진다(fail closed).
+  const instance = useMemo(
+    () => resolveSessionAccountInstance(accountId, account.rebalanceDate || today, undefined),
+    [accountId, account.rebalanceDate, today],
+  );
+
+  // 행별 freeze 메타 — 비교의 식별자는 ticker 다(rowId 는 투자성향에 따라 교체된다).
+  const planRowMeta = useMemo((): Record<string, PlanRowMeta> => Object.fromEntries(
+    rows.map((r) => [r.rowId, {
+      assetId: r.assetId, etfName: r.etfName, label: r.label,
+      ticker: r.ticker || null, orphaned: r.orphaned,
+    }]),
+  ), [rows]);
+
+  // 캡처 경고는 한 번만 띄운다 — 캡처 실패는 키 입력마다 재시도되므로 toast 가 쏟아진다.
+  // (완료 쪽 경고는 별도 ref 를 쓴다. 한쪽이 먼저 떴다고 다른 쪽이 묻히면 안 된다.)
+  const captureWarnedRef = useRef(false);
+  const warnCaptureOnce = (message: string) => {
+    if (captureWarnedRef.current) return;
+    captureWarnedRef.current = true;
+    toast.error(message);
+  };
+
+  /** 첫 변경 **직전**에 호출한다 — 인자로 넘기는 값이 PRE 가 된다. */
+  function captureIfFirstChange(trigger: "quantity" | "cash" | "row") {
+    if (!sessionCtx) return;
+    const result = capturePre(sessionCtx, {
+      trigger, dateMode,
+      quantities, cash: account.cashBalance,
+      rowMeta: planRowMeta, profileKey: profile, instance,
+    });
+    switch (result.kind) {
+      case "captured":
+        setRebalanceSessionMirror(accountId, mirrorOf(result.entry));
+        break;
+      case "already_captured":
+        // 폴링이 mirror 를 지웠거나 재마운트로 어긋났으면 journal 기준으로 되돌린다.
+        if (mirrorNeedsSync(result.entry, account.rebalanceSession)) {
+          setRebalanceSessionMirror(accountId, mirrorOf(result.entry));
+        }
+        break;
+      case "journal_write_failed":
+        // 조용히 성공으로 넘기지 않는다 — 이 상태에서는 PRE 가 보존되지 않는다.
+        warnCaptureOnce("변경 전 상태를 이 기기에 기록하지 못했습니다. 리밸런싱 전 보유수량 근거가 남지 않습니다.");
+        break;
+      case "instance_mismatch":
+        warnCaptureOnce("진행 중인 리밸런싱이 다른 증권사 계좌의 것입니다. 변경 전 상태를 이어쓰지 않습니다.");
+        break;
+      default:
+        break; // disabled / skipped — 아무것도 쓰지 않는다
+    }
+  }
+
+  // 마운트 / 폴링 복귀 후 세션 복원. plan API 가 없으므로 durable 상태는 **unknown** 이고,
+  // 그래서 completing mirror 는 자동 복원하지 않는다(ghost session 차단).
+  useEffect(() => {
+    if (!sessionCtx) return;
+    const { decision } = hydrateSession(sessionCtx, {
+      mirror: account.rebalanceSession ?? null,
+      durablePlanKnown: "unknown",
+      ...(instance.kind === "unresolved" ? {} : { expectedAccountInstanceId: instance.accountInstanceId }),
+    });
+    if (decision.kind !== "use_journal" && decision.kind !== "restore_from_mirror") return;
+    if (mirrorNeedsSync(decision.entry, account.rebalanceSession)) {
+      setRebalanceSessionMirror(accountId, mirrorOf(decision.entry));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionCtx, accountId, account.rebalanceSession, instance]);
+
   // ── 리밸런싱 완료 ────────────────────────────────────────────────────────
-  function completeRebalance(finalCash: number) {
+  // 중복 클릭 차단은 ref 로 한다 — state 는 같은 tick 의 두 번째 클릭을 막지 못한다.
+  const completingRef = useRef(false);
+  const [completing, setCompleting] = useState(false);
+
+  // 같은 완료를 두 번 적용하지 않는다. (HistoryEntry 는 id 로 멱등하지만, 백테스트
+  // 재계산과 서버 write 까지 중복으로 돌 이유가 없다.)
+  async function completeRebalance(finalCash: number) {
+    if (completingRef.current) return;
+    completingRef.current = true;
+    setCompleting(true);
+    try {
+      await runCompletion(finalCash);
+    } finally {
+      completingRef.current = false;
+      setCompleting(false);
+    }
+  }
+
+  async function runCompletion(rawFinalCash: number) {
+    // 확정 예수금은 **한 번 정규화해 모든 소비처가 같은 값을 쓴다** — store 가 저장할 때
+    // 적용하는 식과 같다(store.ts finalizeRebalance). frozen payload 만 원값을 들고
+    // 있으면 복구가 최초 저장과 다른 예수금을 쓴다.
+    const finalCash = normalizeAssertedCash(rawFinalCash);
     // 비중 규칙 위반 여부와 무관하게 실제 완료 상태는 저장한다. 이 화면은 주문 계획이 아니라
     // "실제 체결 후 계좌 상태"를 확정하는 마지막 단계다.
     const holdingsSnap: Partial<Record<AssetKey, number>> = {};
@@ -511,8 +623,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     });
 
     const rowHoldingsSnap = Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.value]));
-    const entryBase = {
-      id: crypto.randomUUID(),
+    const entryFields = {
       date: account.rebalanceDate,
       baseAmount: effectiveBase,
       totalValue: effectiveTotal,
@@ -522,6 +633,55 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       rowLabelSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.label])),
       rowAssetSnap: Object.fromEntries(effectiveRows.map((r) => [r.rowId, r.assetId])),
     };
+    const frozenHistoryPayload = (historyEntryId: string) => ({
+      ...entryFields,
+      id: historyEntryId,
+      cashBalance: finalCash,
+      rowHoldingsSnap,
+      rowQuantitiesSnap: { ...quantities },
+      returnPct: null,
+    });
+
+    // 완료 identity 를 **한 번** 정한다. 추적이 꺼져 있거나 instance 가 확정되지
+    // 않으면 기존대로 임의 id 를 쓴다 — 완료를 막지 않는다.
+    const priceEvidence: Record<string, PlanPriceEvidence> = Object.fromEntries(
+      effectiveRows.map((r) => [r.rowId, {
+        ticker: r.ticker || null,
+        price: r.livePrice > 0 ? r.livePrice : null,
+        source: !isLiveActive ? "manual"
+          : r.livePrice > 0 ? (dateMode === "past" ? "naver-history" : "kis-live")
+          : "unavailable",
+        asOf: dateMode === "past" ? (historyFetchDate || null) : null,
+      } satisfies PlanPriceEvidence]),
+    );
+    const begun = sessionCtx
+      ? beginCompletion(sessionCtx, {
+          dateMode, instance,
+          planDate: account.rebalanceDate,
+          profileKey: profile,
+          plannedQuantities: { ...quantities },
+          assertedPostCash: finalCash,
+          projectedPostCash: estimatedRemainingCash,
+          appStateQuantities: { ...(account.liveQuantities ?? {}) },
+          ...(account.cashBalance === undefined ? {} : { appStateCash: account.cashBalance }),
+          rowMeta: planRowMeta,
+          priceMode: !isLiveActive ? "manual" : dateMode === "past" ? "history" : "live",
+          priceEvidence,
+          targetWeights: profileAlloc,
+          frozenInvested,
+          frozenInvestedBasis: frozenInvested === null ? "unknown" : "entry_freeze",
+          baseAmount: effectiveBase,
+          // 증권사·상품코드는 레지스트리(Phase 1B)에서 온다. 추측해서 적지 않는다.
+          broker: "unknown",
+          actor: currentUser || "unknown",
+          buildHistoryPayload: frozenHistoryPayload,
+        })
+      : { kind: "not_tracked" as const, reason: "disabled" as const };
+    if (begun.kind === "ready" && !begun.outboxWritten) {
+      toast.error("완료 기록을 이 기기에 보관하지 못했습니다. 저장이 실패하면 자동 복구되지 않습니다.");
+    }
+    const historyEntryId = begun.kind === "ready" ? begun.ids.historyEntryId : crypto.randomUUID();
+    const entryBase = { ...entryFields, id: historyEntryId };
 
     finalizeRebalance(accountId, {
       cashBalance: finalCash,
@@ -534,14 +694,22 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     toast.success(`리밸런싱 완료 · 예수금 ${formatKRW(finalCash)}원 반영`);
     setFrozenInvested(null);
 
+    // 서버 write 결과 기록. **별도 단건 write 경로**로만 한다 — 기존 dbSave 는 실패를
+    // 삼키고 반환값이 없어서 결과를 알 수 없다(store.ts saveAccountRowWithAck 주석).
+    //
+    // 이 응답으로 `confirmed` 를 만들지 않는다. `/api/data` 는 계좌 JSON 문서를 통째로
+    // 교체하는 last-writer-wins upsert 라서, 단건 수용은 "최종 상태로 남는다"를 증명하지
+    // 못한다(같은 탭 순서는 write queue 가 보장하지만 **다른 기기는 아직 아니다**).
+    // 그래서 historyPersistence 는 unknown/failed 에 머물고, plan 도 API 가 없어 pending
+    // 이며, 결과적으로 journal/outbox 는 Phase 1A 에서 **정리되지 않는다**(의도된 동작).
+    if (begun.kind === "ready" && sessionCtx) {
+      const ack = await saveAccountRowWithAck(accountId);
+      settleHistoryWrite(sessionCtx, begun.completionId, historyOutcomeOfAck(ack));
+      if (!ack.ok) toast.error(`서버 저장을 확인하지 못했습니다: ${ack.error}`);
+    }
+
     // 성장형 백테스트도 "완료된 실제 상태"와 같은 히스토리 시점에 저장한다.
-    const backtestEntry: HistoryEntry = {
-      ...entryBase,
-      cashBalance: finalCash,
-      rowHoldingsSnap,
-      rowQuantitiesSnap: { ...quantities },
-      returnPct: null,
-    };
+    const backtestEntry: HistoryEntry = frozenHistoryPayload(historyEntryId) as HistoryEntry;
     // 지수비교 화면과 **같은 맥락**으로 계산해야 한다. 장부(원금)와 퇴직연금/IRP 안전자산 혼합을
     // 빼고 저장하면, schemaVersion 이 같아서 재계산도 안 되는 어긋난 스냅샷이 영구히 남는다.
     syncGrowthBacktest([...account.history, backtestEntry], {
@@ -842,7 +1010,11 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           <div>
             <label className="text-xs text-muted-foreground">현재 예수금 (매매 전)</label>
             <NumberInput value={cashBalance}
-              onChange={(v) => updateAccount(accountId, { cashBalance: v })}
+              onChange={(v) => {
+                // PRE 캡처가 **먼저**다 — updateAccount 는 디바운스 없이 즉시 덮어쓴다.
+                captureIfFirstChange("cash");
+                updateAccount(accountId, { cashBalance: v });
+              }}
               placeholder={cashEntered ? "0" : "입력 필요"}
               className={`mt-1 font-semibold ${cashEntered ? "" : "border-amber-500/60"}`} />
             <p className={`text-[10px] mt-1 ${cashEntered ? "text-muted-foreground" : "text-amber-500 font-medium"}`}>
@@ -981,7 +1153,11 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
                       <TableCell className="text-right py-2 px-1 sm:px-3">
                         <QuantityInput
                           value={quantities[r.rowId] ?? 0}
-                          onChange={(qty) => setQuantities((prev) => ({ ...prev, [r.rowId]: qty }))}
+                          onChange={(qty) => {
+                            // PRE 캡처가 **먼저**다 — 여기서 넘기는 quantities 가 변경 전 값이다.
+                            captureIfFirstChange("quantity");
+                            setQuantities((prev) => ({ ...prev, [r.rowId]: qty }));
+                          }}
                           className="h-7 w-16 text-xs text-right tabular-nums rounded-md border border-input bg-background px-2 focus:outline-none focus:ring-1 focus:ring-violet-500"
                         />
                       </TableCell>
@@ -1042,7 +1218,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         <div className="flex items-center justify-end gap-3">
           <Button
             onClick={openFinalizeDialog}
-            disabled={effectiveTotal <= 0 || dateMode === "future"}
+            disabled={effectiveTotal <= 0 || dateMode === "future" || completing}
           >
             <Check className="w-4 h-4 mr-1.5" /> 리밸런싱 완료
           </Button>
@@ -1092,9 +1268,9 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
             </div>
 
             <DialogFooter>
-              <Button variant="ghost" onClick={() => setFinalizeOpen(false)}>취소</Button>
-              <Button onClick={() => completeRebalance(finalCashBalance)}>
-                <Check className="w-4 h-4 mr-1" /> 완료 저장
+              <Button variant="ghost" onClick={() => setFinalizeOpen(false)} disabled={completing}>취소</Button>
+              <Button onClick={() => void completeRebalance(finalCashBalance)} disabled={completing}>
+                <Check className="w-4 h-4 mr-1" /> {completing ? "저장 중…" : "완료 저장"}
               </Button>
             </DialogFooter>
           </DialogContent>
