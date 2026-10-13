@@ -19,6 +19,7 @@ import {
   discardMismatchedSession,
   finalizeArgsFromFrozenPayload,
   frozenHistoryPayload,
+  frozenPlanPayload,
   historyOutcomeOfAck,
   hydrateSession,
   normalizeAssertedCash,
@@ -27,6 +28,8 @@ import {
   pendingCompletions,
   recoveryHistoryEntryId,
   resolveSessionAccountInstance,
+  sessionCompletionId,
+  settleHistoryMergeWrite,
   settleHistoryWrite,
   settlePlanWrite,
   unregisteredInstanceId,
@@ -708,6 +711,110 @@ describe("normalizeAssertedCash — 완료 저장과 frozen payload 가 같은 �
     for (const v of [-5, -0.4, 0, 0.5, 1.4, 2457.6, 688_074]) {
       expect(normalizeAssertedCash(v)).toBe(Math.max(0, Math.round(v)));
     }
+  });
+});
+
+// ── 병합 write ACK (Phase 1B-3A) ───────────────────────────────────────────
+
+describe("병합 write 결과 반영 — ACK 만 confirmed 로 올린다", () => {
+  beforeEach(enableTracking);
+
+  function begin() {
+    capturePre(ctx, captureInput(), deps());
+    const r = beginCompletion(ctx, completionInput(), deps("done"));
+    if (r.kind !== "ready") throw new Error("ready 가 아니다");
+    return r;
+  }
+  const envOf = (id: string) => readOutbox("soye", "hyeobi")[id];
+
+  it.each(["created", "already_exists"] as const)("ack(%s) 는 confirmed 다", (outcome) => {
+    const r = begin();
+    settleHistoryMergeWrite(ctx, r.completionId, { kind: "ack", outcome }, deps());
+    expect(envOf(r.completionId).historyPersistence).toBe("confirmed");
+    // 재전송 ACK 도 ACK 다 — attempts 를 늘리지 않는다
+    expect(envOf(r.completionId).attempts).toBe(0);
+  });
+
+  it("failed(409·404)는 attempts 를 늘리고 사유를 남긴다", () => {
+    const r = begin();
+    settleHistoryMergeWrite(ctx, r.completionId, { kind: "failed", error: "history_hash_mismatch" });
+    const env = envOf(r.completionId);
+    expect(env.historyPersistence).toBe("failed");
+    expect(env.attempts).toBe(1);
+    expect(env.lastError).toContain("history_hash_mismatch");
+  });
+
+  it("unknown(503·네트워크)은 실패로 적지 않고 attempts 도 늘리지 않는다", () => {
+    const r = begin();
+    settleHistoryMergeWrite(ctx, r.completionId, { kind: "unknown", reason: "네트워크" });
+    const env = envOf(r.completionId);
+    expect(env.historyPersistence).toBe("unknown");
+    expect(env.attempts).toBe(0);
+  });
+
+  it("**실패해도 envelope 은 outbox 에 남는다** (성공 처리하지 않는다)", () => {
+    const r = begin();
+    settleHistoryMergeWrite(ctx, r.completionId, { kind: "failed", error: "409" });
+    settlePlanWrite(ctx, r.completionId, { kind: "failed", error: "422" }, deps());
+    expect(envOf(r.completionId)).toBeDefined();
+    expect(cleanupCompletion(ctx, r.completionId).kind).toBe("kept");
+    expect(pendingCompletions(ctx)).toHaveLength(1);
+  });
+
+  it("같은 완료에 여러 번 ACK 가 와도 1건이고 confirmed 그대로다 (멱등)", () => {
+    const r = begin();
+    for (let i = 0; i < 3; i++) {
+      settleHistoryMergeWrite(ctx, r.completionId, { kind: "ack", outcome: "already_exists" }, deps());
+    }
+    expect(Object.keys(readOutbox("soye", "hyeobi"))).toHaveLength(1);
+    expect(envOf(r.completionId).historyPersistence).toBe("confirmed");
+  });
+
+  it("legacy /api/data 수용은 여전히 confirmed 가 아니다 (두 경로를 섞지 않는다)", () => {
+    const r = begin();
+    settleHistoryWrite(ctx, r.completionId, { kind: "accepted" });
+    expect(envOf(r.completionId).historyPersistence).toBe("unknown");
+    // 병합 ACK 가 와야 confirmed 로 올라간다
+    settleHistoryMergeWrite(ctx, r.completionId, { kind: "ack", outcome: "created" }, deps());
+    expect(envOf(r.completionId).historyPersistence).toBe("confirmed");
+  });
+
+  it("양쪽 ACK 면 frozen payload 가 그대로 남아 있다 (재전송 시 같은 본문)", () => {
+    const r = begin();
+    settleHistoryMergeWrite(ctx, r.completionId, { kind: "ack", outcome: "created" }, deps());
+    settlePlanWrite(ctx, r.completionId, { kind: "ack", outcome: "created" }, deps());
+    const env = envOf(r.completionId);
+    expect(frozenHistoryPayload(env)).toEqual(r.envelope.historyEntryPayload);
+    expect(frozenPlanPayload(env)).toEqual(r.envelope.planPayload);
+  });
+});
+
+describe("sessionCompletionId — GET plan 조회 대상", () => {
+  beforeEach(enableTracking);
+
+  it("완료 전에는 null 이다 (조회할 것이 없다)", () => {
+    capturePre(ctx, captureInput(), deps());
+    expect(sessionCompletionId(ctx, null)).toBeNull();
+  });
+
+  it("journal 의 completionId 를 돌려준다", () => {
+    capturePre(ctx, captureInput(), deps());
+    const r = beginCompletion(ctx, completionInput(), deps("done"));
+    if (r.kind !== "ready") throw new Error("ready 가 아니다");
+    expect(sessionCompletionId(ctx, null)).toBe(r.completionId);
+  });
+
+  it("journal 이 없으면 mirror 의 값을 쓴다", () => {
+    expect(sessionCompletionId(ctx, {
+      schemaVersion: 1, phase: "completing", completionId: "c-mirror",
+      snapshot: { accountInstanceId: "bai:x", startedAt: "2026-10-12T00:00:00.000Z",
+        profileKey: "growth", preQuantities: {}, preCash: null, dateMode: "today" },
+    } as never)).toBe("c-mirror");
+  });
+
+  it("flag OFF 면 null 이다 (조회 자체를 하지 않는다)", () => {
+    store.clear();
+    expect(sessionCompletionId(ctx, { completionId: "c-1" } as never)).toBeNull();
   });
 });
 

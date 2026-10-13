@@ -933,6 +933,21 @@ export function getDataConflict(): DataConflictState | null {
   return dbConflict;
 }
 
+/**
+ * **서버가 알려준 행 1개의 revision 을 표에 반영한다.**
+ *
+ * history 병합 RPC(006)는 계좌 문서의 revision 을 올린다. 그 값을 반영하지 않으면
+ * 바로 다음 자동저장이 **자기 자신이 만든 변경** 때문에 409 를 받는다(1B-2B 가드 ON).
+ * 가드가 꺼져 있으면 아무 효과가 없다(표를 쓰지 않는다).
+ *
+ * 표에 그 키가 아직 없으면 **만들지 않는다** — `canGuard()` 가 false 인 상태(= 아직
+ * 조회로 base 를 받지 못함)를 이 경로로 뚫어서는 안 된다.
+ */
+export function noteServerRevision(accountType: string, revision: number | undefined): void {
+  if (revision === undefined || !revisions || !(accountType in revisions)) return;
+  revisions = applySavedRevisions(revisions, { [accountType]: revision });
+}
+
 /** 지금 저장 보류(fail-closed). 있는 동안 자동저장이 멈추고 로컬 입력은 유지된다. */
 export function getDataHold(): DataHoldState | null {
   return dbHold;

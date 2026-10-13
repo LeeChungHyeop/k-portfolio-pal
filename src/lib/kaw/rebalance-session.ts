@@ -45,6 +45,7 @@ import {
   COMPLETION_SCHEMA_VERSION,
   canDeleteEnvelope,
   completionIds,
+  confirmHistoryPersistence,
   confirmPlanPersistence,
   markHistoryFailed,
   markHistoryUnknown,
@@ -520,9 +521,30 @@ export type HistoryWriteOutcome =
 
 /** plan write(`POST /api/rebalance/plan`, Phase 1B)의 결과. 여기엔 ACK 가 있다. */
 export type PlanWriteOutcome =
-  /** created = 200, already_exists = PK 충돌(409). 둘 다 행이 있다는 증거다 */
+  /** created = 200, already_exists = 같은 completionId 재전송. 둘 다 행이 있다는 증거다 */
   | { kind: "ack"; outcome: "created" | "already_exists" }
-  | { kind: "unknown" }
+  /** 응답을 받지 못했거나 해석하지 못했다. `reason` 은 화면·로그 문구용이다 */
+  | { kind: "unknown"; reason?: string }
+  | { kind: "failed"; error: string };
+
+/**
+ * **history 병합 write(`POST /api/data/history`, 006)의 결과. 여기엔 ACK 가 있다.**
+ *
+ * legacy `/api/data` 문서 교체(`HistoryWriteOutcome`)와 **다른 타입**인 이유는 ACK 의
+ * 유무다. 병합 RPC 는 기록 1건 단위로 응답하므로 "서버가 이 기록을 받았다"를 증명한다.
+ *
+ * 다만 그것이 **최종 영속의 보장은 아니다** — 무가드 문서 교체 경로가 아직 남아 있어서
+ * (1B-2B flag 기본 OFF) 나중에 도착한 오래된 문서가 그 기록을 덮을 수 있다. 그래서
+ * 이 ACK 로 journal/outbox 를 지우는 경로는 이 단계에서 **연결하지 않는다.**
+ */
+export type HistoryMergeOutcome =
+  /**
+   * `revision` 은 병합 후 그 계좌 문서의 버전이다. 병합 RPC 가 **revision 을 올리므로**
+   * (006), 이 값을 쓰기 가드의 표에 반영하지 않으면 바로 다음 자동저장이 자기 자신이
+   * 만든 변경 때문에 409 가 된다(1B-2B). 영속 판정에는 쓰이지 않는다.
+   */
+  | { kind: "ack"; outcome: "created" | "already_exists"; revision?: number }
+  | { kind: "unknown"; reason?: string }
   | { kind: "failed"; error: string };
 
 /** `/api/data` 단건 write 응답의 구조적 모양 (store.ts DataWriteAck 과 호환). */
@@ -584,6 +606,32 @@ export function settleHistoryWrite(
   });
 }
 
+/**
+ * **병합 write 결과를 envelope 에 반영한다. ACK 면 confirmed 로 올린다.**
+ *
+ * `settleHistoryWrite`(legacy `/api/data`)와 달리 여기에는 ack 분기가 있다 —
+ * 병합 RPC 응답이 기록 1건에 대한 서버의 답이기 때문이다. unknown(503·네트워크)은
+ * 실패로 적지 않는다: outbox 에 그대로 남아 다음 시도의 대상이 된다.
+ */
+export function settleHistoryMergeWrite(
+  ctx: SessionContext,
+  completionId: string,
+  outcome: HistoryMergeOutcome,
+  deps: SessionDeps = defaultSessionDeps,
+): CompletionEnvelope | null {
+  return patchEnvelope(ctx, completionId, (env) => {
+    if (outcome.kind === "ack") {
+      return confirmHistoryPersistence(env, {
+        kind: "server_ack",
+        outcome: outcome.outcome,
+        at: deps.now(),
+      });
+    }
+    if (outcome.kind === "failed") return markHistoryFailed(env, outcome.error);
+    return markHistoryUnknown(env);
+  });
+}
+
 export function settlePlanWrite(
   ctx: SessionContext,
   completionId: string,
@@ -632,6 +680,22 @@ export function cleanupCompletion(ctx: SessionContext, completionId: string): Cl
       ? clearJournal(ctx.familyCode, ctx.profile, ctx.accountType)
       : false;
   return { kind: "cleaned", journalCleared };
+}
+
+/**
+ * 지금 이 계좌 세션이 들고 있는 completionId. **GET plan 조회의 대상**이다.
+ *
+ * journal 이 정본이고 mirror 는 사본이다(rebalance-journal.ts) — 그래서 journal 을
+ * 먼저 본다. 폴링이 mirror 를 지워도 journal 이 남아 있으면 조회 대상은 그대로다.
+ * 완료 단계가 아니면 null 이고, 그때는 조회할 것도 없다.
+ */
+export function sessionCompletionId(
+  ctx: SessionContext,
+  mirror: RebalanceSessionMirror | null,
+): string | null {
+  if (!isSessionTrackingEnabled()) return null;
+  const journal = readJournal(ctx.familyCode, ctx.profile, ctx.accountType);
+  return journal?.completionId ?? mirror?.completionId ?? null;
 }
 
 /** 지금 복구가 필요한 완료들 (생성순). 화면이 재시도 UI 를 띄울 근거다. */

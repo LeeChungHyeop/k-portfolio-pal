@@ -119,27 +119,47 @@ describe("단건 write 타임아웃", () => {
   });
 });
 
-describe("history confirmed 승격 경로가 코드에 없다", () => {
+describe("legacy /api/data 경로는 history 를 confirmed 로 올리지 않는다", () => {
   it("settleHistoryWrite 안에서 confirmHistoryPersistence 를 부르지 않는다", () => {
     const start = sessionSrc.indexOf("export function settleHistoryWrite");
     const body = sessionSrc.slice(
       start,
-      sessionSrc.indexOf("export function settlePlanWrite", start),
+      sessionSrc.indexOf("export function settleHistoryMergeWrite", start),
     );
     expect(body).not.toContain("confirmHistoryPersistence");
     expect(body).toContain("markHistoryUnknown");
     expect(body).toContain("markHistoryFailed");
   });
 
-  it("세션 모듈이 confirmHistoryPersistence 를 아예 import 하지 않는다", () => {
-    expect(sessionSrc).not.toContain("confirmHistoryPersistence");
+  it("**confirmHistoryPersistence 는 병합 경로에서만** 쓰인다 (1B-3A)", () => {
+    // 문서 전체 교체(`/api/data`)의 수용은 ACK 가 아니다. 기록 1건 단위로 응답하는
+    // 병합 RPC(`/api/data/history`, 006)만 confirmed 로 올릴 수 있다.
+    const uses = [...sessionSrc.matchAll(/confirmHistoryPersistence/g)].map((m) => m.index!);
+    const mergeStart = sessionSrc.indexOf("export function settleHistoryMergeWrite");
+    const mergeEnd = sessionSrc.indexOf("export function settlePlanWrite", mergeStart);
+    const importEnd = sessionSrc.indexOf('} from "./completion-envelope"');
+    expect(uses.length).toBeGreaterThan(0);
+    for (const at of uses) {
+      const inImport = at < importEnd;
+      const inMerge = at > mergeStart && at < mergeEnd;
+      expect(inImport || inMerge).toBe(true);
+    }
   });
 
-  it("history outcome 타입에 ack 변종이 없다", () => {
+  it("legacy history outcome 타입에 ack 변종이 없다", () => {
     const start = sessionSrc.indexOf("export type HistoryWriteOutcome");
     const body = sessionSrc.slice(start, sessionSrc.indexOf("export type PlanWriteOutcome"));
     expect(body).toContain('{ kind: "accepted" }');
     expect(body).not.toContain('"ack"');
+  });
+
+  it("병합 outcome 타입에는 ack 가 있다 (기록 1건에 대한 서버의 답이다)", () => {
+    const start = sessionSrc.indexOf("export type HistoryMergeOutcome");
+    expect(start).toBeGreaterThan(-1);
+    const body = sessionSrc.slice(start, sessionSrc.indexOf(";", sessionSrc.indexOf("failed", start)));
+    expect(body).toContain('kind: "ack"');
+    expect(body).toContain('kind: "unknown"');
+    expect(body).toContain('kind: "failed"');
   });
 
   it("plan 쪽은 ACK 로 confirmed 가 된다 (PK 단위라 blob 저장에 지워지지 않는다)", () => {
@@ -148,9 +168,11 @@ describe("history confirmed 승격 경로가 코드에 없다", () => {
     expect(body).toContain("confirmPlanPersistence");
   });
 
-  it("AccountPage 는 응답을 historyOutcomeOfAck 로만 해석한다", () => {
+  it("AccountPage 는 계좌 문서 응답을 historyOutcomeOfAck 로만 해석한다", () => {
     expect(accountPageSrc).toContain("historyOutcomeOfAck(ack)");
+    // 문서 저장 응답으로 ACK 를 만들지 않는다 — ACK 는 병합 응답에서만 온다.
     expect(accountPageSrc).not.toContain('outcome: "written"');
+    expect(accountPageSrc).not.toMatch(/settleHistoryMergeWrite\([^)]*historyOutcomeOfAck/);
   });
 });
 

@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import { ASSET_ORDER, ASSET_GROUPS, GROUP_COLORS, ACCOUNT_LABELS, ACCOUNT_LABELS_SHORT, MIN_SAFE_ASSET_PCT, type AccountId, type AssetKey } from "@/lib/kaw/constants";
-import { usePortfolioStore, saveAccountRowWithAck, formatKRW, formatPct, getOrDefaultLibrary, type HistoryEntry } from "@/lib/kaw/store";
+import { usePortfolioStore, saveAccountRowWithAck, noteServerRevision, formatKRW, formatPct, getOrDefaultLibrary, type HistoryEntry } from "@/lib/kaw/store";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -21,10 +21,17 @@ import {
   type PendingContribution,
 } from "@/lib/kaw/contribution";
 import {
-  beginCompletion, capturePre, historyOutcomeOfAck, hydrateSession, mirrorNeedsSync, mirrorOf,
-  normalizeAssertedCash, resolveSessionAccountInstance, settleHistoryWrite,
+  beginCompletion, capturePre, frozenHistoryPayload as frozenHistoryOf,
+  frozenPlanPayload as frozenPlanOf, historyOutcomeOfAck, hydrateSession, mirrorNeedsSync,
+  mirrorOf, normalizeAssertedCash, resolveSessionAccountInstance, sessionCompletionId,
+  settleHistoryMergeWrite, settleHistoryWrite, settlePlanWrite,
   type SessionContext,
 } from "@/lib/kaw/rebalance-session";
+import type { DurablePlanKnown } from "@/lib/kaw/rebalance-journal";
+import {
+  describeOutcome, fetchDurablePlanKnown, postHistoryMergeWrite, postPlanWrite,
+} from "@/lib/kaw/completion-api";
+import { completionDisplayState } from "@/lib/kaw/completion-envelope";
 import type { PlanPriceEvidence, PlanRowMeta } from "@/lib/kaw/rebalance-plan";
 
 // YYYY-MM-DD 문자열 ↔ Date 변환 (로컬 자정 기준 — UTC 파싱으로 하루 밀리는 것 방지)
@@ -572,13 +579,39 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     }
   }
 
-  // 마운트 / 폴링 복귀 후 세션 복원. plan API 가 없으므로 durable 상태는 **unknown** 이고,
-  // 그래서 completing mirror 는 자동 복원하지 않는다(ghost session 차단).
+  // 진행 중인 완료가 **서버에 남았는가**(GET /api/rebalance/plan). 세션 복원 판정의
+  // `durablePlanKnown` 근거다.
+  //
+  //   exists  → 이미 서버에 있다. mirror/journal 은 잔재이므로 **복원하지 않는다**
+  //   missing → 서버에 없다. 복원해서 재시도해야 한다
+  //   unknown → 조회 실패. **캐시하지 않는다** — 다음 기회에 다시 묻는다
+  //
+  // **unknown 을 missing 으로 읽지 않는다**(completion-api.ts) — 이미 저장된 완료를
+  // 다시 복원하면 ghost session 이 된다.
+  const [durablePlan, setDurablePlan] = useState<Record<string, DurablePlanKnown>>({});
+  const pendingCompletionId = sessionCtx
+    ? sessionCompletionId(sessionCtx, account.rebalanceSession ?? null)
+    : null;
+  useEffect(() => {
+    if (!pendingCompletionId || durablePlan[pendingCompletionId] !== undefined) return;
+    let alive = true;
+    void fetchDurablePlanKnown(pendingCompletionId).then((known) => {
+      if (alive && known !== "unknown") {
+        setDurablePlan((m) => ({ ...m, [pendingCompletionId]: known }));
+      }
+    });
+    return () => { alive = false; };
+  }, [pendingCompletionId, durablePlan]);
+
+  // 마운트 / 폴링 복귀 후 세션 복원. durable 상태를 모르면 completing mirror 는
+  // 자동 복원하지 않는다(ghost session 차단).
   useEffect(() => {
     if (!sessionCtx) return;
     const { decision } = hydrateSession(sessionCtx, {
       mirror: account.rebalanceSession ?? null,
-      durablePlanKnown: "unknown",
+      durablePlanKnown: pendingCompletionId
+        ? (durablePlan[pendingCompletionId] ?? "unknown")
+        : "unknown",
       ...(instance.kind === "unresolved" ? {} : { expectedAccountInstanceId: instance.accountInstanceId }),
     });
     if (decision.kind !== "use_journal" && decision.kind !== "restore_from_mirror") return;
@@ -586,7 +619,7 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       setRebalanceSessionMirror(accountId, mirrorOf(decision.entry));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionCtx, accountId, account.rebalanceSession, instance]);
+  }, [sessionCtx, accountId, account.rebalanceSession, instance, pendingCompletionId, durablePlan]);
 
   // ── 리밸런싱 완료 ────────────────────────────────────────────────────────
   // 중복 클릭 차단은 ref 로 한다 — state 는 같은 tick 의 두 번째 클릭을 막지 못한다.
@@ -691,7 +724,13 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     });
 
     setFinalizeOpen(false);
-    toast.success(`리밸런싱 완료 · 예수금 ${formatKRW(finalCash)}원 반영`);
+    // 로컬 확정 사실만 말한다. **서버 기록 결과는 아래에서 따로 알린다** —
+    // 서버 응답을 받기 전에 전체 성공으로 말하면 그게 무조건 성공 처리다.
+    toast.success(
+      begun.kind === "ready"
+        ? `리밸런싱 완료 저장 · 예수금 ${formatKRW(finalCash)}원 반영 (서버 수신 확인 중…)`
+        : `리밸런싱 완료 · 예수금 ${formatKRW(finalCash)}원 반영`,
+    );
     setFrozenInvested(null);
 
     // 서버 write 결과 기록. **별도 단건 write 경로**로만 한다 — 기존 dbSave 는 실패를
@@ -703,9 +742,43 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     // 그래서 historyPersistence 는 unknown/failed 에 머물고, plan 도 API 가 없어 pending
     // 이며, 결과적으로 journal/outbox 는 Phase 1A 에서 **정리되지 않는다**(의도된 동작).
     if (begun.kind === "ready" && sessionCtx) {
+      // ① 계좌 문서 저장(기존 경로). 예수금·보유수량 같은 **기록 밖의 상태**는 이 경로로만
+      //    올라간다. 이 응답은 텔레메트리일 뿐이라 historyPersistence 를 confirmed 로
+      //    올리지 않는다(settleHistoryWrite 에 ack 분기가 없다).
       const ack = await saveAccountRowWithAck(accountId);
       settleHistoryWrite(sessionCtx, begun.completionId, historyOutcomeOfAck(ack));
-      if (!ack.ok) toast.error(`서버 저장을 확인하지 못했습니다: ${ack.error}`);
+      if (!ack.ok) toast.error(`계좌 저장을 확인하지 못했습니다: ${ack.error}`);
+
+      // ② 기록 1건 병합(006) + ③ plan 1행(005). **둘 다 frozen payload 그대로** 보낸다 —
+      //    지금 시세·보유수량을 다시 읽지 않는다(재계산하면 같은 completionId 에 다른
+      //    경제값이 올라가 409/422 가 된다). 순서는 의미가 없지만(둘 다 멱등) 계좌 문서가
+      //    먼저 올라가야 병합이 404 를 받지 않으므로 ① 뒤에 보낸다.
+      const env = begun.envelope;
+      const [mergeOutcome, planOutcome] = await Promise.all([
+        postHistoryMergeWrite(env.accountType, frozenHistoryOf(env)),
+        postPlanWrite(frozenPlanOf(env)),
+      ]);
+      // 실패/미확인이어도 envelope 은 outbox 에 **그대로 남는다**(삭제 판정은 양쪽
+      // confirmed 뿐이고, 이 단계에서는 정리 자체를 호출하지 않는다).
+      settleHistoryMergeWrite(sessionCtx, begun.completionId, mergeOutcome);
+      // 병합이 올린 revision 을 가드 표에 반영한다 — 하지 않으면 다음 자동저장이
+      // **자기 자신이 만든 변경** 때문에 409 가 된다(1B-2B).
+      if (mergeOutcome.kind === "ack") noteServerRevision(env.accountType, mergeOutcome.revision);
+      const settled = settlePlanWrite(sessionCtx, begun.completionId, planOutcome);
+
+      if (mergeOutcome.kind !== "ack") {
+        toast.error(`기록 서버 저장: ${describeOutcome(mergeOutcome)}`);
+      }
+      if (planOutcome.kind !== "ack") {
+        toast.error(`계획 서버 저장: ${describeOutcome(planOutcome)}`);
+      }
+      // 성공 문구는 **양쪽 ACK 일 때만**(completion-envelope R5). ACK 는 "서버가 받았다"
+      // 까지의 증거이고 최종 영속 보장은 아니다 — 무가드 문서 교체 경로가 남아 있어 나중에
+      // 도착한 오래된 저장이 이 기록을 덮을 수 있다. 문구도 그 선을 넘지 않는다
+      // ("저장 완료/확정/보존" 같은 표현을 쓰지 않는다).
+      if (settled && completionDisplayState(settled) === "all_confirmed") {
+        toast.success("서버가 계획·기록을 수신했습니다 (수신 확인까지이며 최종 보존을 보장하지는 않습니다)");
+      }
     }
 
     // 성장형 백테스트도 "완료된 실제 상태"와 같은 히스토리 시점에 저장한다.

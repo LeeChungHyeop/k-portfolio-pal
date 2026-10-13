@@ -184,6 +184,15 @@ describe("가드는 flag + revision 이 둘 다 있을 때만 켜진다", () => 
     expect(REVISION_GUARD_LS_KEY).toBe("kaw-data-revision-guard");
   });
 
+  it("외부에서 revision 을 넣는 경로는 **표에 이미 있는 키만** 갱신한다", () => {
+    // 없는 키를 만들어주면 canGuard 가 false 인 상태(base 미확보)를 뚫고 저장이 나간다.
+    const body = fnBody(storeSrc, "export function noteServerRevision(");
+    expect(body).toContain("!(accountType in revisions)");
+    expect(body).toContain("applySavedRevisions");
+    expect(body).not.toContain("dbSave");
+    expect(body).not.toContain("enqueueFullSave");
+  });
+
   it("무가드 경로 목록이 코드에 남아 있다 (보호 완료라고 적지 않는다)", () => {
     expect(guardSrc).toContain("UNGUARDED_WRITE_PATHS");
     expect(guardSrc).toMatch(/saveFamilyRaw/);
