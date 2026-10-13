@@ -34,6 +34,7 @@ import {
 import { completionDisplayState } from "@/lib/kaw/completion-envelope";
 import { acquireCompletionLock, notifyOutboxChanged } from "@/lib/kaw/completion-recovery";
 import { CompletionRecoveryPanel } from "@/components/kaw/CompletionRecoveryPanel";
+import { BuyOrderPreviewCard } from "@/components/kaw/BuyOrderPreviewCard";
 import type { PlanPriceEvidence, PlanRowMeta } from "@/lib/kaw/rebalance-plan";
 
 // YYYY-MM-DD 문자열 ↔ Date 변환 (로컬 자정 기준 — UTC 파싱으로 하루 밀리는 것 방지)
@@ -1369,6 +1370,21 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
           </DialogContent>
         </Dialog>
       </Card>
+
+      {/* 매수 주문안 **미리보기**. 계산만 하고 주문·기록·저장을 하지 않는다 — 위의 수동
+          리밸런싱 입력·완료 저장 흐름과 독립이다. */}
+      <BuyOrderPreviewCard
+        accountId={accountId}
+        rows={rows.map((r) => ({
+          rowId: r.rowId, label: r.label, etfName: r.etfName,
+          ticker: r.ticker || null, allocPct: r.alloc, orphaned: r.orphaned,
+        }))}
+        quantities={quantities}
+        cash={account.cashBalance ?? null}
+        priceMode={dateMode === "future" || !liveMode ? "none" : dateMode === "past" ? "history" : "live"}
+        prices={effectivePrices}
+        historyDate={historyFetchDate}
+      />
     </div>
   );
 }
