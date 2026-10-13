@@ -11,6 +11,7 @@ import {
 } from "@/lib/kaw/store";
 import { checkSafeAssetMinimum, resolveRetirementRiskClass } from "@/lib/kaw/safeAsset";
 import { currentAmountVersion } from "@/lib/kaw/contribution";
+import { BrokerConnectionCard } from "@/components/kaw/BrokerConnectionCard";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -1308,6 +1309,9 @@ const InvestmentTab = forwardRef<InvestmentTabHandle>(function InvestmentTab(_, 
           </Card>
 
           <ContributionScheduleCard accountId={selectedAccount} />
+
+          {/* 증권사 · 운용방식. 기본은 계산만 제공이며 설정을 바꿔도 수량·예수금·기록은 그대로다. */}
+          <BrokerConnectionCard accountId={selectedAccount} />
 
           {/* 자산별 설정 테이블 */}
           <Card className="overflow-hidden">

@@ -61,6 +61,64 @@ export interface BrokerAccountInstance {
   activeTo?: string;
   /** HMAC 파생 drift 탐지기. 서버가 KIS 조회 성공 시 채운다. CANO 원문 아님 */
   refFingerprint?: string;
+  /**
+   * 이 계좌를 앱이 어떻게 다루는가. **없으면 `calc_only`** 다(기존 사용자의 기본값).
+   *
+   *   calc_only     계산만 제공 — 사용자가 수량·예수금을 직접 입력하고 앱은 계산만 한다.
+   *                 증권사 API 를 **호출하지 않는다**
+   *   api_readonly  증권사 API 로 **조회만** 한다(한국투자증권만). 주문·이체는 없다
+   *
+   * 이 값은 **사용자 선호**이지 조회 권한이 아니다. 서버는 이 값만 믿지 않고 자체 권한
+   * 확인(kis-account-read.ts `authorizeKisAccess`)을 따로 한다.
+   */
+  connectionMode?: ConnectionMode;
+}
+
+export type ConnectionMode = "calc_only" | "api_readonly";
+
+const CONNECTION_MODES: readonly ConnectionMode[] = ["calc_only", "api_readonly"];
+const BROKER_ACCOUNT_TYPES = ["retirement", "isa", "pension", "irp"] as const;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * 저장된 `_meta.brokerAccounts` 를 읽는다. 클라이언트(hydration)와 서버(조회 권한 판단)가
+ * **같은 함수**를 쓴다.
+ *
+ * 모양이 어긋난 항목은 **고치지 않고 버린다.** 잘못 읽은 instance 로 조회 대상을 바꾸는
+ * 것보다 없는 것으로 보는 편이 안전하다. 알려진 필드만 복사한다 — 저장된 JSON 에 계좌번호
+ * 같은 값이 섞여 있어도 이 함수를 지난 객체에는 남지 않는다.
+ */
+export function parseBrokerAccounts(raw: unknown): BrokerAccountInstance[] {
+  if (!Array.isArray(raw)) return [];
+  const out: BrokerAccountInstance[] = [];
+  const seen = new Set<string>();
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const i = r as Record<string, unknown>;
+    if (typeof i.id !== "string" || !i.id || seen.has(i.id)) continue;
+    if (typeof i.broker !== "string" || !i.broker) continue;
+    if (!BROKER_ACCOUNT_TYPES.includes(i.logicalAccountType as AccountId)) continue;
+    if (typeof i.activeFrom !== "string" || !ISO_DATE.test(i.activeFrom)) continue;
+    if (i.activeTo !== undefined && (typeof i.activeTo !== "string" || !ISO_DATE.test(i.activeTo))) continue;
+    seen.add(i.id);
+    // 라벨에 긴 숫자열(계좌번호 패턴)이 있으면 쓰지 않는다 — id 로 대체한다.
+    const label = typeof i.label === "string" && i.label.length <= 60 && !/\d{8,}/.test(i.label)
+      ? i.label : i.id;
+    out.push({
+      id: i.id,
+      label,
+      broker: i.broker,
+      ...(typeof i.productCode === "string" && /^\d{2}$/.test(i.productCode)
+        ? { productCode: i.productCode } : {}),
+      logicalAccountType: i.logicalAccountType as AccountId,
+      activeFrom: i.activeFrom,
+      ...(typeof i.activeTo === "string" ? { activeTo: i.activeTo } : {}),
+      ...(typeof i.refFingerprint === "string" ? { refFingerprint: i.refFingerprint } : {}),
+      ...(CONNECTION_MODES.includes(i.connectionMode as ConnectionMode)
+        ? { connectionMode: i.connectionMode as ConnectionMode } : {}),
+    });
+  }
+  return out;
 }
 
 /** half-open 판정: activeFrom <= date < activeTo */

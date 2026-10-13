@@ -21,6 +21,7 @@ import {
   handleRebalancePlanGet, handleRebalancePlanPost,
 } from "./lib/kaw/plan-server";
 import { handleHistoryMergePost } from "./lib/kaw/history-server";
+import { handleKisAccountGet } from "./lib/kaw/kis-account-read";
 
 // Cloudflare Workers environment bindings
 export interface Env {
@@ -28,6 +29,11 @@ export interface Env {
   ANTHROPIC_API_KEY?: string;
   KIS_APP_KEY?: string;
   KIS_APP_SECRET?: string;
+  /** 종합계좌번호 8자리. 실잔고 읽기 전용 조회에만 쓰이고 응답·로그에 나가지 않는다 */
+  KIS_ACCOUNT_CANO?: string;
+  /** 위 계좌의 소유 가족 코드 + 소유 프로필 id(비밀값 아님). 하나라도 없으면 아무도 조회할 수 없다 */
+  KIS_ACCOUNT_OWNER_FAMILY_CODE?: string;
+  KIS_ACCOUNT_OWNER_PROFILE?: string;
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SESSION_SECRET?: string;
@@ -285,6 +291,11 @@ export default {
     // 동시 요청에서도 둘 다 남는다. 같은 id + 같은 경제값은 멱등 성공, 다른 경제값은 409.
     // **기존 자동저장 경로는 그대로 둔다** — 호출부 전환은 1B-2B 다.
     if (pathname === "/api/data/history" && request.method === "POST") return handleHistoryMergePost(request, env);
+
+    // ── 한국투자 연금계좌 실잔고 (읽기 전용, 세션 토큰 필요) ──────────────────
+    // GET 조회만 한다. 주문·이체·DB 쓰기가 없고 계좌번호는 응답에 나가지 않는다.
+    // 이전 중인 계좌는 조회하지 않고 not_queried 로 돌려준다(잔고 0 과 구분).
+    if (pathname === "/api/kis/account" && request.method === "GET") return handleKisAccountGet(request, env);
 
     // ── 일별 자산 스냅샷 읽기 (기간 성과용, 세션 토큰 필요) ─────────────────
     if (pathname === "/api/snapshots" && request.method === "GET") return handleSnapshotsGet(request, env);

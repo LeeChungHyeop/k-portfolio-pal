@@ -14,6 +14,10 @@ import {
 import type { RebalanceSessionMirror } from "./rebalance-journal";
 import { createWriteQueue } from "./write-queue";
 import { isRevisionGuardEnabled } from "./rebalance-feature-flags";
+import { parseBrokerAccounts, type BrokerAccountInstance } from "./broker-account";
+import {
+  applyConnectionChange, type ConnectionChange, type ConnectionChangeResult,
+} from "./broker-connection";
 import {
   applySavedRevisions, canGuard, conflictPrompt, decideHoldRecovery, revisionsFromRows,
   type ConflictPrompt, type ExpectedRevisions, type GuardConflict,
@@ -130,6 +134,11 @@ export interface StoreState {
   allocations: Record<ProfileKey, Record<AssetKey, number>>;
   accounts: Record<AccountId, AccountState>;
   assetLibrary?: AssetDef[];
+  /**
+   * 증권사 계좌 레지스트리 + 계좌별 운용방식. 서버에서는 `_meta.brokerAccounts` 에 산다.
+   * 없으면(기존 사용자) 전 계좌가 "계산만 제공"이다.
+   */
+  brokerAccounts?: BrokerAccountInstance[];
 }
 
 // ── Built-in ticker codes (KRX 6자리) ─────────────────────────────────────
@@ -629,6 +638,7 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
     let allocations = structuredClone(PROFILE_PRESETS);
     let assetLibrary: AssetDef[] | undefined;
     let sharedAssetLibrary: AssetDef[] | undefined;
+    let brokerAccounts: BrokerAccountInstance[] = [];
     const accounts: Partial<Record<AccountId, AccountState>> = {};
 
     for (const row of data) {
@@ -640,6 +650,8 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
           profileKey = m.profile ?? "growth";
           allocations = m.allocations ?? allocations;
           assetLibrary = m.assetLibrary;
+          // 같은 파서를 서버(조회 권한 판단)도 쓴다. 모양이 어긋난 항목은 버려진다.
+          brokerAccounts = parseBrokerAccounts((row.data as { brokerAccounts?: unknown }).brokerAccounts);
         } else if (ACCOUNT_IDS.includes(row.account_type as AccountId)) {
           accounts[row.account_type as AccountId] = row.data as AccountState;
         }
@@ -651,6 +663,7 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
       profile: profileKey,
       allocations,
       assetLibrary: sharedAssetLibrary ?? assetLibrary,
+      brokerAccounts,
       accounts: Object.fromEntries(ACCOUNT_IDS.map((id) => [id, accounts[id] ?? fallback.accounts[id]])) as Record<AccountId, AccountState>,
     };
   } catch (e) {
@@ -759,7 +772,7 @@ async function dbSave(code: string, user: string, state: StoreState) {
   if (isRevisionGuardEnabled() && !canGuard(revisions)) { markRevisionHold(); return; }
   const now = new Date().toISOString();
   const rows: DbRow[] = [
-    { family_code: code, profile: user, account_type: "_meta", data: { profile: state.profile, allocations: state.allocations, assetLibrary: state.assetLibrary }, updated_at: now },
+    { family_code: code, profile: user, account_type: "_meta", data: { profile: state.profile, allocations: state.allocations, assetLibrary: state.assetLibrary, brokerAccounts: state.brokerAccounts ?? [] }, updated_at: now },
     { family_code: code, profile: "_shared", account_type: "_assetLib", data: { assetLibrary: state.assetLibrary }, updated_at: now },
     ...ACCOUNT_IDS.map((id) => ({ family_code: code, profile: user, account_type: id, data: state.accounts[id], updated_at: now })),
   ];
@@ -1417,13 +1430,44 @@ export function usePortfolioStore() {
   const resetAll        = useCallback(() => {
     // 문서를 통째로 갈아끼우는 사용자 행동이다 — 기록 축소·키 유실을 이 저장에서만 허용한다.
     markIntentionalDocumentReplace();
+    // 증권사 계좌 레지스트리는 **초기화 대상이 아니다** — 과거 계좌 instance 와 이전
+    // 이력은 사용자 설정이고, 지우면 그 기록이 어느 계좌 것이었는지 알 수 없게 된다.
+    const keepRegistry = getState().brokerAccounts;
     memState = null;
-    setState(() => currentUser === "hyeobi" ? seedState() : emptyState());
+    setState(() => ({
+      ...(currentUser === "hyeobi" ? seedState() : emptyState()),
+      ...(keepRegistry ? { brokerAccounts: keepRegistry } : {}),
+    }));
   }, []);
   const importJson           = useCallback((data: StoreState) => {
     markIntentionalDocumentReplace();
-    setState(() => data);
+    // 가져온 파일에 레지스트리가 없으면 지금 것을 유지한다(파일이 오래됐을 수 있다).
+    const keepRegistry = getState().brokerAccounts;
+    setState(() => ({
+      ...data,
+      brokerAccounts: data.brokerAccounts !== undefined
+        ? parseBrokerAccounts(data.brokerAccounts)
+        : keepRegistry,
+    }));
   }, []);
+
+  /**
+   * 계좌별 증권사·운용방식 설정. **수량·예수금·거래기록을 건드리지 않는다** — 레지스트리
+   * (`brokerAccounts`)만 바뀐다. 증권사가 바뀌면 기존 instance 를 닫고 새로 추가한다
+   * (삭제 없음). 결과를 돌려주므로 호출부가 거부 사유를 그대로 보여줄 수 있다.
+   */
+  const setBrokerConnection = useCallback(
+    (id: AccountId, change: ConnectionChange, activeFrom?: string): ConnectionChangeResult => {
+      const r = applyConnectionChange(getState().brokerAccounts ?? [], id, change, {
+        today: kstDateString(),
+        ...(activeFrom ? { activeFrom } : {}),
+        newId: () => crypto.randomUUID().slice(0, 8),
+      });
+      if (r.ok && r.changed) setState((s) => ({ ...s, brokerAccounts: r.registry }));
+      return r;
+    },
+    [],
+  );
   const updateAssetLibrary   = useCallback((lib: AssetDef[]) =>
     setState((s) => ({ ...s, assetLibrary: lib })), []);
   const updateRowHolding     = useCallback((id: AccountId, rowId: string, value: number) =>
@@ -1601,6 +1645,7 @@ export function usePortfolioStore() {
     updateAccount, updateHolding,
     addHistory, finalizeRebalance, removeHistory, updateHistory, setHistoryBacktest,
     resetAll, importJson,
+    setBrokerConnection,
     setAccountActive, setAccountProfile,
     setAccountAllocation, resetAccountAllocations,
     setAccountEtfName, toggleAccountAsset,
