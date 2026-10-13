@@ -4,6 +4,11 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { ACCOUNT_IDS, BUILTIN_TICKERS } from "./constants";
 import {
+  isInvalidParameter, isSerializationFailure, isUndefinedFunction,
+  parseExpectedRevisions, readGuardedSaveResult, splitGuardRows,
+  type ExpectedRevisions,
+} from "./revision-guard";
+import {
   buildDailySnapshotRows, kstDateString, SNAPSHOT_UPSERT_CONFLICT,
   type SnapshotAccountInput, type SnapshotPrice,
 } from "./snapshot";
@@ -423,13 +428,31 @@ export async function handleDataGet(request: Request, env: DataEnv): Promise<Res
     return json({ error: "인증이 만료됐어요. 다시 로그인해주세요." }, 401);
   }
 
+  // `revision` 은 **쓰기 가드의 입력**이다(migration 006/007). 클라이언트는 여기서 읽은
+  // 값을 저장 요청에 담아 보내고, 서버는 지금 값과 다르면 거부한다. 구버전 클라이언트는
+  // 이 필드를 무시하므로 읽기 동작은 바뀌지 않는다.
   const { data, error } = await client
-    .from("kaw_data").select("account_type, data, profile")
+    .from("kaw_data").select("account_type, data, profile, revision")
     .eq("family_code", session.code)
     .in("profile", [session.profile, "_shared"]);
-  if (error) return json({ error: error.message }, 500);
+  if (error) {
+    // 006 미적용 DB(revision 컬럼 없음)에서도 읽기는 계속돼야 한다 — 가드만 꺼진다
+    // (revision 이 없으면 클라이언트 `canGuard()` 가 false 가 된다).
+    if (isUndefinedColumn((error as { code?: string }).code)) {
+      const fallback = await client
+        .from("kaw_data").select("account_type, data, profile")
+        .eq("family_code", session.code)
+        .in("profile", [session.profile, "_shared"]);
+      if (fallback.error) return json({ error: fallback.error.message }, 500);
+      return json({ rows: fallback.data ?? [] });
+    }
+    return json({ error: error.message }, 500);
+  }
   return json({ rows: data ?? [] });
 }
+
+/** Postgres: 컬럼이 없음(42703). migration 006 미적용 DB 판정에만 쓴다. */
+const isUndefinedColumn = (code: string | undefined): boolean => code === "42703";
 
 export async function handleDataPost(request: Request, env: DataEnv): Promise<Response> {
   const client = serviceClient(env);
@@ -440,7 +463,14 @@ export async function handleDataPost(request: Request, env: DataEnv): Promise<Re
     return json({ error: "인증이 만료됐어요. 다시 로그인해주세요." }, 401);
   }
 
-  const body = (await request.json().catch(() => ({}))) as { rows?: unknown };
+  const body = (await request.json().catch(() => ({}))) as {
+    rows?: unknown;
+    /** 있으면 **revision 가드 경로**로 저장한다(없으면 기존 무가드 upsert) */
+    expectedRevisions?: unknown;
+    /** 사용자가 확인한 파괴적 저장만 true. 기본값은 거부다 */
+    allowHistoryShrink?: unknown;
+    allowKeyLoss?: unknown;
+  };
   if (!Array.isArray(body.rows)) return json({ error: "잘못된 요청입니다." }, 400);
 
   const rows = body.rows as Array<{ family_code?: unknown; profile?: unknown; account_type?: unknown; data?: unknown; updated_at?: unknown }>;
@@ -459,9 +489,85 @@ export async function handleDataPost(request: Request, env: DataEnv): Promise<Re
   // 기존 호출부(dbSave)는 이 필드를 읽지 않으므로 동작이 바뀌지 않는다.
   if (!sanitized.length) return json({ ok: true, accepted: 0 });
 
-  const { error } = await client.from("kaw_data").upsert(sanitized, { onConflict: "family_code,profile,account_type" });
-  if (error) return json({ error: error.message }, 500);
-  return json({ ok: true, accepted: sanitized.length });
+  // ── 기존(무가드) 경로 ─────────────────────────────────────────────────────
+  // `expectedRevisions` 가 없는 요청은 **구버전 클라이언트**다. 그대로 last-writer-wins
+  // upsert 를 한다 — 서버를 먼저 배포하고 클라이언트 가드를 나중에 켜는 단계적 배포가
+  // 성립해야 하기 때문이다(migration 007 대원칙 4). 이 경로가 남아 있는 동안은
+  // "가드 완료"가 아니다(revision-guard.ts UNGUARDED_WRITE_PATHS).
+  if (body.expectedRevisions === undefined || body.expectedRevisions === null) {
+    const { error } = await client.from("kaw_data").upsert(sanitized, { onConflict: "family_code,profile,account_type" });
+    if (error) return json({ error: error.message }, 500);
+    return json({ ok: true, accepted: sanitized.length, guarded: false });
+  }
+
+  // ── revision 가드 경로 ───────────────────────────────────────────────────
+  const expected = parseExpectedRevisions(body.expectedRevisions);
+  if ("error" in expected && typeof expected.error === "string") {
+    return json({ error: expected.error }, 400);
+  }
+  const split = splitGuardRows(sanitized, expected as ExpectedRevisions);
+  if (!split.ok) return json({ error: split.error }, 400);
+
+  let revisions: Record<string, number> = {};
+  let accepted = 0;
+
+  if (split.guarded.length) {
+    const { data, error } = await client.rpc("kaw_data_save_guarded", {
+      p_family_code: session.code,
+      p_profile: session.profile,
+      p_rows: split.guarded,
+      // **기본값은 거부다.** 파괴적 저장은 사용자가 확인한 요청에서만 통과한다.
+      p_allow_history_shrink: body.allowHistoryShrink === true,
+      p_allow_key_loss: body.allowKeyLoss === true,
+    });
+
+    if (error) {
+      const code = (error as { code?: string }).code;
+      if (isUndefinedFunction(code)) {
+        // 007 미적용. **무가드로 되돌아가지 않는다** — 가드를 켠 클라이언트가 보호받는다고
+        // 믿는 채로 last-writer-wins 로 저장되는 것이 가장 나쁘다.
+        console.error("[kaw] kaw_data_save_guarded 가 없습니다 (migration 007 미적용)");
+        return json({ unavailable: true, error: "저장 가드가 아직 없습니다" }, 503);
+      }
+      if (isSerializationFailure(code)) {
+        // 검사 후 경합. 충돌과 같은 뜻이므로 409 로 돌려준다(자동 재시도하지 않는다).
+        return json({ error: "revision_conflict", conflicts: [], revisions: {} }, 409);
+      }
+      if (isInvalidParameter(code)) return json({ error: error.message }, 400);
+      console.error("[kaw] 가드 저장 실패:", error.message);
+      return json({ error: error.message }, 500);
+    }
+
+    const result = readGuardedSaveResult(data);
+    if (result.kind === "conflict") {
+      // **공용 행도 쓰지 않는다** — 한 번의 저장이 일부만 반영되는 상태를 만들지 않는다.
+      return json(
+        { error: "revision_conflict", conflicts: result.conflicts, revisions: result.revisions },
+        409,
+      );
+    }
+    if (result.kind === "unexpected") {
+      console.error("[kaw] 가드 저장: 알 수 없는 반환값", JSON.stringify(result.raw));
+      return json({ error: "저장 결과를 해석할 수 없습니다." }, 500);
+    }
+    revisions = result.revisions;
+    accepted += result.accepted;
+  }
+
+  // 공용 종목 라이브러리(`_shared/_assetLib`)는 **가드 밖**이다 — 가족 공용 행이라
+  // 프로필마다 revision 을 밀어내서 CAS 를 걸면 상시 충돌이 된다(007 대원칙 2).
+  // 기존 upsert 동작을 그대로 유지한다.
+  if (split.shared.length) {
+    const sharedRows = split.shared.map((r) => ({
+      family_code: session.code, profile: "_shared", account_type: "_assetLib",
+      data: r.data, updated_at: new Date().toISOString(),
+    }));
+    const { error } = await client.from("kaw_data").upsert(sharedRows, { onConflict: "family_code,profile,account_type" });
+    if (error) return json({ error: error.message }, 500);
+    accepted += sharedRows.length;
+  }
+
+  return json({ ok: true, accepted, guarded: true, revisions });
 }
 
 // ── 시세 캐시용 ticker 화이트리스트 ────────────────────────────────────────

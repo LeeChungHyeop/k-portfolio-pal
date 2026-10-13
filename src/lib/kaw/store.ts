@@ -13,6 +13,11 @@ import {
 } from "./contribution";
 import type { RebalanceSessionMirror } from "./rebalance-journal";
 import { createWriteQueue } from "./write-queue";
+import { isRevisionGuardEnabled } from "./rebalance-feature-flags";
+import {
+  applySavedRevisions, canGuard, conflictPrompt, revisionsFromRows,
+  type ConflictPrompt, type ExpectedRevisions, type GuardConflict,
+} from "./revision-guard";
 
 // 액세스 코드: 환경변수에 없으면 "soye" 고정
 export const ACCESS_CODE: string = import.meta.env.VITE_ACCESS_CODE || "soye";
@@ -459,6 +464,66 @@ let dbLoading = typeof window !== "undefined" && !!localStorage.getItem(AUTH_COD
 let dbError: string | null = null;
 let initialized = false;
 
+// ── 쓰기 revision 가드 상태 (Phase 1B-2B) ───────────────────────────────────
+//
+// `revisions` 는 **마지막으로 서버에서 읽은** 행별 revision 이다. 저장할 때 같이 보내고,
+// 서버가 지금 값과 다르면 거부한다(migration 007). 조회에서 값을 못 받으면(구버전 서버)
+// 표에서 그 키가 빠지고 `canGuard()` 가 false 가 되어 가드를 켜지 않는다.
+let revisions: ExpectedRevisions | null = null;
+
+/**
+ * 해결되지 않은 저장 충돌. **있는 동안 자동저장과 폴링 반영을 모두 멈춘다.**
+ *
+ *   자동저장을 계속하면  → 같은 409 를 무한히 반복한다(자동 재시도 금지)
+ *   폴링을 반영하면      → 아직 저장되지 않은 **사용자 입력을 덮어쓴다**
+ *
+ * 둘 중 어느 쪽을 버릴지는 사람이 고른다(`reloadFromServer` / `overwriteServerWithLocal`).
+ */
+export interface DataConflictState {
+  conflicts: GuardConflict[];
+  prompt: ConflictPrompt;
+  at: string;
+  /** 서버가 알려준 **현재** revision. 덮어쓰기를 고를 때만 쓴다 */
+  serverRevisions: ExpectedRevisions | null;
+}
+let dbConflict: DataConflictState | null = null;
+
+/**
+ * **가드 보류(fail-closed).** 가드가 켜져 있는데 서버에서 읽은 revision 이 없으면
+ * 저장을 **하지 않고 멈춘다.**
+ *
+ * 예전에는 이 경우 무가드 요청으로 강등했는데, 그러면 보호된다고 믿는 상태에서
+ * 문서 전체가 last-writer-wins 로 저장된다(다른 기기의 최신 변경이 사라진다).
+ * 보류 중에도 **로컬 입력은 그대로 남는다**(localStorage 저장은 계속된다). 복구는
+ * 조회로만 — revision 을 다시 받으면 보류가 풀리고 그때 한 번 저장한다.
+ */
+export interface DataHoldState {
+  reason: "revision_unavailable";
+  message: string;
+  at: string;
+}
+let dbHold: DataHoldState | null = null;
+
+/**
+ * 사용자가 **의도적으로** 기록을 지웠다. 그 다음 저장 1회에 한해 history 축소를 허용한다
+ * (migration 007 은 기본적으로 축소를 충돌로 거부한다 — 버그로 비어 온 문서를 막기 위해서다).
+ * 저장이 성공할 때까지 유지한다 — 중간에 내려가면 삭제가 영구히 저장되지 못한다.
+ */
+let allowHistoryShrinkOnce = false;
+
+/**
+ * 사용자가 **"지금 화면 내용으로 덮어쓰기"** 를 골랐다. 그 저장 1회에 한해 서버의 현재
+ * revision 으로 CAS 를 다시 맞추고 파괴적 변경(키 유실 포함)까지 허용한다.
+ * 자동으로 켜지는 경로는 없다 — `overwriteServerWithLocal()` 만 켠다.
+ */
+let forceOverwriteOnce = false;
+
+/**
+ * 사용자가 **초기화/가져오기** 처럼 문서를 통째로 갈아끼우는 행동을 했다. 그 저장 1회는
+ * 최상위 키 유실까지 허용한다. 자동저장은 절대 이 값을 켜지 않는다.
+ */
+let allowKeyLossOnce = false;
+
 let memState: StoreState | null = null;
 const listeners = new Set<() => void>();
 
@@ -537,7 +602,7 @@ function loadLocal(): StoreState {
 }
 
 // ── DB operations ──────────────────────────────────────────────────────────
-interface DbRow { family_code: string; profile: string; account_type: string; data: unknown; updated_at?: string; }
+interface DbRow { family_code: string; profile: string; account_type: string; data: unknown; updated_at?: string; revision?: number; }
 
 async function dbLoad(code: string, user: string): Promise<StoreState | null> {
   const token = getSessionToken();
@@ -547,6 +612,9 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
     if (res.status === 401) { clearSessionProfile(); return null; }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const { rows: data } = (await res.json()) as { rows?: DbRow[] };
+    // **가드의 입력**이다. 행이 하나도 없어도(신규 프로필) 표는 만들어 둔다 — 그래야
+    // "아직 없다고 믿는다"(null)로 CAS 가 성립한다.
+    revisions = revisionsFromRows(data ?? [], user);
     if (!data?.length) return null;
 
     let profileKey: ProfileKey = "growth";
@@ -583,27 +651,111 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
   }
 }
 
+/**
+ * 409 응답을 충돌 상태로 올린다. **자동 재시도도 자동 병합도 하지 않는다**(요구 6).
+ *
+ * 서버가 알려준 현재 revision 을 `revisions` 에 **반영하지 않는다** — 반영하면 다음
+ * 자동저장이 CAS 를 통과해 다른 기기의 최신 변경을 조용히 덮는다. 덮어쓰기는 사용자가
+ * `overwriteServerWithLocal()` 로 고를 때만 일어난다.
+ */
+function markDataConflict(body: { conflicts?: unknown; revisions?: unknown }): void {
+  const raw = Array.isArray(body.conflicts) ? (body.conflicts as GuardConflict[]) : [];
+  const conflicts: GuardConflict[] = raw.filter(
+    (c) => c && typeof c === "object" && typeof (c as GuardConflict).reason === "string",
+  );
+  dbConflict = {
+    conflicts,
+    prompt: conflictPrompt(conflicts),
+    at: new Date().toISOString(),
+    serverRevisions: (body.revisions ?? null) as ExpectedRevisions | null,
+  };
+  dbError = `저장 충돌: ${dbConflict.prompt.message}`;
+  notify();
+}
+
+/**
+ * 저장을 보류한다. **요청을 보내지 않는다** — 무가드 강등이 금지이기 때문이다.
+ * 로컬 입력은 이미 localStorage 에 있고 memState 도 그대로다.
+ */
+function markRevisionHold(): void {
+  if (dbHold) return; // 같은 사유로 메시지를 반복 갱신하지 않는다
+  dbHold = {
+    reason: "revision_unavailable",
+    message:
+      "서버의 저장 버전(revision)을 확인하지 못해 저장을 보류했습니다. " +
+      "입력한 내용은 이 기기에 남아 있습니다 — 연결이 돌아오면 자동으로 저장합니다.",
+    at: new Date().toISOString(),
+  };
+  dbError = `저장 보류: ${dbHold.message}`;
+  notify();
+}
+
+/**
+ * 보류 복구. **조회만** 한다 — 받아온 계좌 데이터는 쓰지 않는다(아직 저장되지 않은 로컬
+ * 입력을 서버 상태로 덮으면 안 된다). revision 을 다시 받으면 보류를 풀고 **그때** 저장을
+ * 한 번 예약한다. 복구되기 전에는 자동저장을 재시도하지 않는다.
+ */
+async function recoverRevisionHold(): Promise<boolean> {
+  if (!dbHold || !familyCode || !currentUser) return false;
+  await dbLoad(familyCode, currentUser); // revisions 만 갱신된다 (memState 는 건드리지 않는다)
+  if (!canGuard(revisions)) return false;
+  dbHold = null;
+  if (dbError?.startsWith("저장 보류")) dbError = null;
+  notify();
+  void enqueueFullSave(); // 보류됐던 저장 1회
+  return true;
+}
+
+/** 가드를 켠 요청에 실어 보낼 필드. 가드가 꺼져 있으면 `{}` 다(= 기존 무가드 요청). */
+function guardFields(): Record<string, unknown> {
+  if (!isRevisionGuardEnabled() || !canGuard(revisions)) return {};
+  return {
+    expectedRevisions: revisions,
+    // 파괴적 저장은 **사용자가 확인한 경우에만** 허용한다.
+    allowHistoryShrink: allowHistoryShrinkOnce || allowKeyLossOnce || forceOverwriteOnce,
+    allowKeyLoss: allowKeyLossOnce || forceOverwriteOnce,
+  };
+}
+
 async function dbSave(code: string, user: string, state: StoreState) {
   const token = getSessionToken();
   if (!token || isApplyingRemote || !user) return;
+  // 미해결 충돌·보류가 있는 동안은 **시도하지 않는다** — 같은 실패를 반복하는 자동
+  // 재시도가 된다. 보류는 조회로 revision 을 되찾을 때만 풀린다(recoverRevisionHold).
+  if (dbConflict || dbHold) return;
+  // **fail-closed.** 가드가 켜졌는데 revision 을 모르면 저장을 보류한다 —
+  // 무가드 요청으로 강등하지 않는다(그게 바로 가드를 켠 채 덮어쓰는 경로다).
+  if (isRevisionGuardEnabled() && !canGuard(revisions)) { markRevisionHold(); return; }
   const now = new Date().toISOString();
   const rows: DbRow[] = [
     { family_code: code, profile: user, account_type: "_meta", data: { profile: state.profile, allocations: state.allocations, assetLibrary: state.assetLibrary }, updated_at: now },
     { family_code: code, profile: "_shared", account_type: "_assetLib", data: { assetLibrary: state.assetLibrary }, updated_at: now },
     ...ACCOUNT_IDS.map((id) => ({ family_code: code, profile: user, account_type: id, data: state.accounts[id], updated_at: now })),
   ];
+  const guarded = forceOverwriteOnce;
   try {
     const res = await fetch("/api/data", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ rows }),
+      body: JSON.stringify({ rows, ...guardFields() }),
     });
     if (res.status === 401) { clearSessionProfile(); throw new Error("세션이 만료됐어요. 다시 로그인해주세요."); }
+    if (res.status === 409) {
+      markDataConflict((await res.json().catch(() => ({}))) as { conflicts?: unknown });
+      return;
+    }
     if (!res.ok) {
       const e = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(e.error ?? `HTTP ${res.status}`);
     }
-    if (dbError?.startsWith("동기화 실패")) { dbError = null; notify(); }
+    const ok = (await res.json().catch(() => ({}))) as { revisions?: Record<string, number> };
+    revisions = applySavedRevisions(revisions, ok.revisions);
+    // 저장이 **성공했을 때만** 1회성 허용을 내린다 — 실패 후에도 유지돼야 재시도가 같은
+    // 의도(기록 삭제)를 들고 간다.
+    allowHistoryShrinkOnce = false;
+    allowKeyLossOnce = false;
+    if (guarded) forceOverwriteOnce = false;
+    if (dbError?.startsWith("동기화 실패") || dbError?.startsWith("저장 충돌")) { dbError = null; notify(); }
   } catch (e) {
     console.error("[kaw] DB save error:", e);
     dbError = `동기화 실패: ${(e as Error).message}`;
@@ -662,15 +814,27 @@ async function postAccountRow(
     const res = await fetch("/api/data", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ rows: [row] }),
+      // 단건 write 도 **같은 가드**를 지난다 — 여기만 무가드로 남으면 완료 저장이
+      // 가드 바깥으로 빠져나가고, 그게 정확히 보호하려던 기록이다.
+      body: JSON.stringify({ rows: [row], ...guardFields() }),
       signal: controller.signal,
     });
     if (res.status === 401) {
       clearSessionProfile();
       return { ok: false, error: "세션이 만료됐어요. 다시 로그인해주세요.", status: 401 };
     }
-    const body = (await res.json().catch(() => ({}))) as { error?: string; accepted?: unknown };
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string; accepted?: unknown; revisions?: Record<string, number>;
+      conflicts?: unknown;
+    };
+    if (res.status === 409) {
+      // **ACK 를 주지 않는다.** 호출부는 failed 로 받아 수동 재시도로 간다
+      // (rebalance-session.ts historyOutcomeOfAck). 자동 재시도하지 않는다.
+      markDataConflict(body);
+      return { ok: false, error: "다른 기기에서 먼저 저장된 변경이 있습니다.", status: 409 };
+    }
     if (!res.ok) return { ok: false, error: body.error ?? `HTTP ${res.status}`, status: res.status };
+    revisions = applySavedRevisions(revisions, body.revisions);
     return { ok: true, accepted: typeof body.accepted === "number" ? body.accepted : null };
   } catch (e) {
     const aborted = (e as Error)?.name === "AbortError";
@@ -723,6 +887,87 @@ function scheduleSave() {
   }, 800);
 }
 
+// ── 저장 충돌 해결 — **사용자 확인 전용** ───────────────────────────────────
+//
+// 409 는 자동으로 풀 수 없다. 두 선택 모두 무언가를 버리기 때문이다:
+//
+//   reloadFromServer()         서버 것을 받는다  → **로컬 미저장 입력을 버린다**
+//   overwriteServerWithLocal() 내 것을 밀어넣는다 → **서버의 더 새로운 변경을 버린다**
+//
+// 그래서 둘 다 사용자가 누를 때만 실행된다. 자동 재시도·자동 병합 경로는 없다.
+
+/** 사용자가 기록을 지웠다. 다음 저장 1회만 history 축소를 허용한다. */
+export function markIntentionalHistoryShrink(): void {
+  allowHistoryShrinkOnce = true;
+}
+
+/** 사용자가 초기화/가져오기를 했다. 다음 저장 1회만 키 유실까지 허용한다. */
+export function markIntentionalDocumentReplace(): void {
+  allowHistoryShrinkOnce = true;
+  allowKeyLossOnce = true;
+}
+
+/** 지금 미해결 저장 충돌. 있는 동안 자동저장·폴링 반영이 멈춘다. */
+export function getDataConflict(): DataConflictState | null {
+  return dbConflict;
+}
+
+/** 지금 저장 보류(fail-closed). 있는 동안 자동저장이 멈추고 로컬 입력은 유지된다. */
+export function getDataHold(): DataHoldState | null {
+  return dbHold;
+}
+
+/** 보류 복구를 지금 한 번 시도한다(화면의 "다시 시도"). 복구되면 보류됐던 저장이 나간다. */
+export function retryHeldSave(): Promise<boolean> {
+  return recoverRevisionHold();
+}
+
+/**
+ * 서버 내용을 받아들인다. **로컬의 미저장 입력은 사라진다** — 사용자가 고른 경우에만.
+ */
+export async function reloadFromServer(): Promise<boolean> {
+  if (!familyCode || !currentUser) return false;
+  const state = await dbLoad(familyCode, currentUser);
+  if (!state) return false;
+  isApplyingRemote = true;
+  memState = migrateState(state, currentUser === "hyeobi", hydrationMigration);
+  saveLocal(memState);
+  isApplyingRemote = false;
+  // 서버 것을 받았으므로 로컬이 들고 있던 "의도"(기록 삭제 등)도 함께 버린다.
+  allowHistoryShrinkOnce = false;
+  allowKeyLossOnce = false;
+  forceOverwriteOnce = false;
+  dbConflict = null;
+  // 서버 조회가 성공했으므로 revision 도 다시 받았다 — 보류도 함께 풀린다.
+  if (canGuard(revisions)) dbHold = null;
+  if (dbError?.startsWith("저장 충돌") || dbError?.startsWith("저장 보류")) dbError = null;
+  notify();
+  persistMigrationOnce();
+  return true;
+}
+
+/**
+ * 지금 화면 내용으로 서버를 덮는다. **서버의 더 새로운 변경은 사라진다** —
+ * 사용자가 고른 경우에만.
+ *
+ * 서버의 현재 revision 을 다시 읽어 CAS 를 맞춘다. 가져온 **데이터는 버린다**(덮어쓰기를
+ * 고른 것이므로 화면 내용이 정본이다). 그 사이 또 바뀌면 다시 409 가 되고, 그때도
+ * 자동으로 반복하지 않는다.
+ */
+export async function overwriteServerWithLocal(): Promise<boolean> {
+  if (!familyCode || !currentUser || !memState) return false;
+  const local = memState;
+  await dbLoad(familyCode, currentUser); // revisions 갱신 — memState 는 건드리지 않는다
+  memState = local;
+  forceOverwriteOnce = true;
+  dbConflict = null;
+  notify();
+  await enqueueFullSave();
+  if (dbConflict) return false;
+  forceOverwriteOnce = false;
+  return true;
+}
+
 // ── hydration 중 생성된 값의 1회 영속 ──────────────────────────────────────
 // migrateState 가 DB 에 없던 값(contributionSchedule)을 처음 만들면, 그대로 두면 다음 접속에서
 // 또 만들어지므로 한 번은 저장해야 한다. 단 **프로필당 세션 1회만** 시도한다 —
@@ -748,10 +993,18 @@ function startPolling(code: string) {
     if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
     if (!familyCode || !currentUser || familyCode !== code) return;
     if (hasPendingLocalWrite()) return; // 아직 서버에 안 올라간 로컬 변경이 있으면 이번 폴링 결과로 덮어쓰지 않음
+    // 미해결 저장 충돌이 있으면 **반영하지 않는다** — 아직 저장되지 않은 사용자 입력을
+    // 서버 상태로 덮는 것이 되고, 그 선택은 사용자가 해야 한다(요구 6).
+    if (dbConflict) return;
+    // 보류 중이면 **복구만** 시도한다. 받아온 데이터를 반영하지 않는다 —
+    // 아직 저장되지 않은 로컬 입력을 서버 상태로 덮는 것이 되기 때문이다.
+    if (dbHold) { await recoverRevisionHold().catch(() => false); return; }
     try {
       const state = await dbLoad(code, currentUser);
       if (!state) return;
       if (hasPendingLocalWrite()) return; // 조회하는 동안 새로 로컬 변경이 생겼으면 이 (더 오래된) 결과는 버림
+      if (dbConflict) return;            // 조회 중에 충돌이 생겼으면 반영하지 않는다
+      if (dbHold) return;                // 조회 중에 보류가 생겼으면 반영하지 않는다
       isApplyingRemote = true;
       memState = migrateState(state, currentUser === "hyeobi", hydrationMigration);
       saveLocal(memState);
@@ -898,8 +1151,13 @@ function setupVisibilityRefresh() {
     startPolling(familyCode);
     // 최신 데이터 강제 로드 (단, 아직 서버에 안 올라간 로컬 변경은 덮어쓰지 않음)
     if (hasPendingLocalWrite()) return;
+    if (dbConflict) return; // 충돌 미해결 — 사용자 입력을 서버 상태로 덮지 않는다
+    // 보류 중이면 복구만 시도한다(받아온 데이터는 반영하지 않는다).
+    if (dbHold) { void recoverRevisionHold().catch(() => false); return; }
     dbLoad(familyCode, currentUser).then((state) => {
       if (!state || hasPendingLocalWrite()) return;
+      if (dbConflict) return; // 조회 중에 충돌이 생겼으면 반영하지 않는다
+      if (dbHold) return;     // 조회 중에 보류가 생겼으면 반영하지 않는다
       memState = migrateState(state, false, hydrationMigration);
       saveLocal(memState);
       notify();
@@ -1040,13 +1298,17 @@ export function usePortfolioStore() {
       void enqueueFullSave();
     }
   }, []);
-  const removeHistory   = useCallback((id: AccountId, hid: string) =>
+  const removeHistory   = useCallback((id: AccountId, hid: string) => {
+    // **사용자가 의도적으로 지웠다.** 서버는 history 축소를 기본적으로 충돌로 거부하므로
+    // (버그로 비어 온 문서를 막기 위해서다 — migration 007 대원칙 5), 이 1회만 허용한다.
+    markIntentionalHistoryShrink();
     setState((s) => {
       const acc = s.accounts[id];
       // 히스토리가 바뀌면 이후 시점들의 백테스트 유닛 체인이 무효화되므로 전부 초기화 (다음 조회 시 재계산)
       const filtered = acc.history.filter((h) => h.id !== hid).map((h) => ({ ...h, backtestGrowth: undefined }));
       return { ...s, accounts: { ...s.accounts, [id]: { ...acc, history: recalcReturns(filtered) } } };
-    }), []);
+    });
+  }, []);
   const updateHistory   = useCallback((id: AccountId, entry: HistoryEntry) =>
     setState((s) => {
       const acc = s.accounts[id];
@@ -1064,10 +1326,15 @@ export function usePortfolioStore() {
     }
   }, []);
   const resetAll        = useCallback(() => {
+    // 문서를 통째로 갈아끼우는 사용자 행동이다 — 기록 축소·키 유실을 이 저장에서만 허용한다.
+    markIntentionalDocumentReplace();
     memState = null;
     setState(() => currentUser === "hyeobi" ? seedState() : emptyState());
   }, []);
-  const importJson           = useCallback((data: StoreState) => setState(() => data), []);
+  const importJson           = useCallback((data: StoreState) => {
+    markIntentionalDocumentReplace();
+    setState(() => data);
+  }, []);
   const updateAssetLibrary   = useCallback((lib: AssetDef[]) =>
     setState((s) => ({ ...s, assetLibrary: lib })), []);
   const updateRowHolding     = useCallback((id: AccountId, rowId: string, value: number) =>
@@ -1232,6 +1499,14 @@ export function usePortfolioStore() {
     currentUser,
     dbLoading,
     dbError,
+    // 미해결 저장 충돌. 있으면 자동저장·폴링 반영이 멈춘 상태이고, 아래 두 액션 중
+    // 하나를 사용자가 골라야 풀린다(자동 해결 경로는 없다).
+    dbConflict,
+    // 저장 보류(revision 미확보). 무가드 저장으로 강등하지 않고 멈춘 상태다.
+    dbHold,
+    reloadFromServer: useCallback(() => reloadFromServer(), []),
+    overwriteServerWithLocal: useCallback(() => overwriteServerWithLocal(), []),
+    retryHeldSave: useCallback(() => retryHeldSave(), []),
     hasSupabase,
     setProfile, setAllocation, resetAllocation,
     updateAccount, updateHolding,

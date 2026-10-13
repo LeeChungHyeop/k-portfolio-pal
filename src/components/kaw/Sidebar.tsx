@@ -128,7 +128,13 @@ function PriceDetailDialog({ open, onClose }: { open: boolean; onClose: () => vo
 }
 
 export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose }: Props) {
-  const { familyCode, currentUser, dbLoading, dbError, hasSupabase, deactivateProfile, logoutCode } = usePortfolioStore();
+  const {
+    familyCode, currentUser, dbLoading, dbError, hasSupabase, deactivateProfile, logoutCode,
+    dbConflict, reloadFromServer, overwriteServerWithLocal, dbHold, retryHeldSave,
+  } = usePortfolioStore();
+  const [resolving, setResolving] = useState(false);
+  /** 확인 단계 — 되돌릴 수 없는 폐기를 한 번의 클릭으로 실행하지 않는다 */
+  const [confirming, setConfirming] = useState<"reload" | "overwrite" | null>(null);
   const { successCount, totalCount, configured, isLoading: priceLoading } = useKisPriceContext();
   const [priceDetailOpen, setPriceDetailOpen] = useState(false);
 
@@ -291,6 +297,90 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
                 <RefreshCw className={`w-3.5 h-3.5 ${dbLoading ? "animate-spin text-violet-400" : "text-muted-foreground"}`} />
               </button>
             )}
+          </div>
+        )}
+        {/* 저장 충돌 — **자동으로 풀지 않는다.** 어느 쪽을 버릴지 사용자가 고른다.
+            이 상태가 유지되는 동안 자동저장과 폴링 반영이 멈춰 있어서, 화면의 입력은
+            그대로 남아 있다(store.ts dbSave / startPolling 의 dbConflict 가드).
+
+            경고는 **본문 글자로** 띄운다 — title 툴팁은 아이폰 등 터치 환경에서 보이지
+            않으므로, 되돌릴 수 없는 폐기를 툴팁에만 적어두면 안 된다. 그래서 두 동작 모두
+            **확인 단계**를 한 번 더 거친다. */}
+        {dbConflict && (
+          <div className="mt-1.5 px-3 py-2 rounded-xl text-xs bg-amber-500/10 border border-amber-500/30 space-y-1.5">
+            <div className="flex items-start gap-1.5">
+              <CloudOff className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+              <span className="text-amber-600 dark:text-amber-400 leading-snug">
+                {dbConflict.prompt.message}
+              </span>
+            </div>
+            {confirming === null ? (
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => setConfirming("reload")}
+                  disabled={resolving}
+                  className="flex-1 px-2 py-1 rounded-lg bg-muted hover:bg-muted/70 transition-colors disabled:opacity-50"
+                >
+                  서버 내용 불러오기
+                </button>
+                <button
+                  onClick={() => setConfirming("overwrite")}
+                  disabled={resolving}
+                  className="flex-1 px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-700 dark:text-amber-300 transition-colors disabled:opacity-50"
+                >
+                  이 화면으로 덮어쓰기
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <p className="text-rose-600 dark:text-rose-400 leading-snug">
+                  {confirming === "reload"
+                    ? dbConflict.prompt.reloadWarning
+                    : dbConflict.prompt.overwriteWarning}
+                </p>
+                <p className="text-muted-foreground">이 동작은 되돌릴 수 없습니다. 계속할까요?</p>
+                <div className="flex gap-1.5">
+                  <button
+                    onClick={() => setConfirming(null)}
+                    disabled={resolving}
+                    className="flex-1 px-2 py-1 rounded-lg bg-muted hover:bg-muted/70 transition-colors disabled:opacity-50"
+                  >
+                    취소
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setResolving(true);
+                      if (confirming === "reload") await reloadFromServer();
+                      else await overwriteServerWithLocal();
+                      setResolving(false);
+                      setConfirming(null);
+                    }}
+                    disabled={resolving}
+                    className="flex-1 px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-700 dark:text-rose-300 transition-colors disabled:opacity-50"
+                  >
+                    {resolving ? "처리 중…" : "확인"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {/* 저장 보류(fail-closed) — revision 을 확인하지 못해 **저장을 하지 않은** 상태다.
+            무가드 저장으로 강등하지 않으므로 서버가 덮일 일은 없고, 입력은 이 기기에 남아
+            있다. 연결이 돌아오면 폴링이 복구하고 보류됐던 저장이 나간다. */}
+        {dbHold && !dbConflict && (
+          <div className="mt-1.5 px-3 py-2 rounded-xl text-xs bg-sky-500/10 border border-sky-500/30 space-y-1.5">
+            <div className="flex items-start gap-1.5">
+              <CloudOff className="w-3.5 h-3.5 text-sky-500 shrink-0 mt-0.5" />
+              <span className="text-sky-700 dark:text-sky-300 leading-snug">{dbHold.message}</span>
+            </div>
+            <button
+              onClick={async () => { setResolving(true); await retryHeldSave(); setResolving(false); }}
+              disabled={resolving}
+              className="w-full px-2 py-1 rounded-lg bg-muted hover:bg-muted/70 transition-colors disabled:opacity-50"
+            >
+              {resolving ? "확인 중…" : "지금 다시 시도"}
+            </button>
           </div>
         )}
       </div>

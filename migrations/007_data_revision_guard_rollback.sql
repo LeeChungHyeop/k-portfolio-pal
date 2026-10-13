@@ -1,0 +1,53 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 007 되돌리기 — kaw_data 쓰기 revision 가드 제거
+--
+-- **007 은 데이터를 만들지 않는다.** 함수 둘뿐이고, 계좌 데이터(`kaw_data`)와 006 의
+-- `revision` 컬럼·`kaw_data_merge_history` 는 **그대로** 남는다. 그래서 백업할 것이 없다.
+--
+-- ── 1단계: 클라이언트 가드를 **먼저** 끈다 ──────────────────────────────────
+--
+-- 순서가 거꾸로면 가드를 켠 클라이언트의 저장이 503(`unavailable`)으로 전부 실패한다 —
+-- 서버는 007 이 없을 때 **무가드로 되돌아가지 않는다**(그게 더 나쁜 상태이기 때문이다.
+-- data-server.ts handleDataPost 주석). 그러니 이 순서를 지킨다:
+--
+--   1) feature flag 끄기 — 빌드의 `VITE_KAW_DATA_REVISION_GUARD` 를 없애고 배포
+--      (개발 기기는 localStorage `kaw-data-revision-guard` 도 지운다)
+--   2) 저장이 다시 무가드 경로로 도는 것을 확인(응답에 `guarded: false`)
+--   3) 그 다음 아래 함수 삭제
+--
+-- ── 2단계: 삭제 ─────────────────────────────────────────────────────────────
+-- 아래 블록의 주석을 풀고 실행한다. 실수로 통째 실행되는 것을 막기 위해 주석 처리해 둔다.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- -- GRANT/REVOKE 는 함수와 함께 사라지므로 따로 되돌릴 것이 없다.
+-- drop function if exists public.kaw_data_save_guarded(text, text, jsonb, boolean, boolean);
+-- drop function if exists public.kaw_data_guardable_type(text);
+--
+-- -- **006 은 건드리지 않는다.** `public.kaw_data_merge_history(...)` 와
+-- -- `kaw_data.revision` 컬럼은 **지우지 않는다** — 1B-2A 의 history 병합이 그 둘을 쓰고,
+-- -- 컬럼을 지우면 몇 번 병합됐는지가 영구히 사라진다.
+
+-- ── 3단계: 확인 ─────────────────────────────────────────────────────────────
+--
+-- (a) 007 의 함수가 사라졌는가 — 0행이어야 한다
+--   select p.oid::regprocedure from pg_proc p
+--     join pg_namespace n on n.oid = p.pronamespace
+--    where n.nspname = 'public'
+--      and p.proname in ('kaw_data_save_guarded','kaw_data_guardable_type');
+--
+-- (b) 006 이 그대로인가 — 함수 1행 + revision 컬럼 1행이어야 한다
+--   select p.oid::regprocedure from pg_proc p
+--     join pg_namespace n on n.oid = p.pronamespace
+--    where n.nspname = 'public' and p.proname = 'kaw_data_merge_history';
+--   select column_name from information_schema.columns
+--    where table_schema='public' and table_name='kaw_data' and column_name='revision';
+--
+-- (c) **계좌 데이터가 그대로인가** — 행 수·history 길이가 롤백 전과 같아야 한다
+--   select profile, account_type, revision,
+--          jsonb_array_length(coalesce(data -> 'history', '[]'::jsonb)) as history_count
+--     from public.kaw_data
+--    where account_type in ('retirement','isa','pension','irp')
+--    order by profile, account_type;
+--
+-- (d) 저장이 무가드 경로로 도는가 — 앱에서 아무 값이나 바꾸고 응답을 본다
+--   (네트워크 탭: POST /api/data → 200 `{"ok":true,"accepted":6,"guarded":false}`)

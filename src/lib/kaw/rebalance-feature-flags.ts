@@ -52,15 +52,44 @@ export function resolveSessionTrackingFlag(sources: SessionTrackingSources): boo
   return sources.dev === true && sources.local === "on";
 }
 
-function readSources(): SessionTrackingSources {
+// ── kaw_data 쓰기 revision 가드 (Phase 1B-2B) ───────────────────────────────
+//
+// 서버는 요청에 `expectedRevisions` 가 실려 있을 때만 가드 경로를 쓴다
+// (data-server.ts handleDataPost). 그래서 **클라이언트 쪽 스위치가 곧 배포 단계**다:
+// 서버 + migration 006/007 을 먼저 올려두고, 이 flag 로 나중에 켠다.
+//
+// 기본값 OFF 인 이유는 세션 추적 flag 와 같다 — 켜면 저장이 409 로 거부될 수 있고,
+// 그때는 **사용자 확인**이 필요하다(자동 병합·자동 재시도를 하지 않는다). 확인 UI 가
+// 붙지 않은 빌드에서 켜지면 저장이 멈춘 채로 보일 수 있다. production 빌드에서
+// devtools 한 줄로 켜지지 않게 **같은 판정 규칙**을 쓴다.
+export const REVISION_GUARD_LS_KEY = "kaw-data-revision-guard";
+export const REVISION_GUARD_ENV_KEY = "VITE_KAW_DATA_REVISION_GUARD";
+
+/** 세션 추적 flag 와 **같은 규칙**이다(빌드 타임 허용 없이는 런타임 스위치 무시). */
+export function resolveRevisionGuardFlag(sources: SessionTrackingSources): boolean {
+  if (sources.env === "on") return true;
+  return sources.dev === true && sources.local === "on";
+}
+
+/** 지금 쓰기 가드를 쓸 수 있는가. **매번 읽는다**(캐시하지 않는다). */
+export function isRevisionGuardEnabled(): boolean {
+  return resolveRevisionGuardFlag(readSources(REVISION_GUARD_ENV_KEY, REVISION_GUARD_LS_KEY));
+}
+
+/** 진단용 — 지금 어떤 소스 때문에 켜졌/꺼졌는지 그대로 보여준다. */
+export function revisionGuardSources(): SessionTrackingSources {
+  return readSources(REVISION_GUARD_ENV_KEY, REVISION_GUARD_LS_KEY);
+}
+
+function readSources(
+  envKey: string = SESSION_TRACKING_ENV_KEY,
+  lsKey: string = SESSION_TRACKING_LS_KEY,
+): SessionTrackingSources {
   let env: string | undefined;
   let dev = false;
   try {
     const meta = (import.meta as unknown as { env?: Record<string, unknown> }).env;
-    env =
-      typeof meta?.[SESSION_TRACKING_ENV_KEY] === "string"
-        ? (meta[SESSION_TRACKING_ENV_KEY] as string)
-        : undefined;
+    env = typeof meta?.[envKey] === "string" ? (meta[envKey] as string) : undefined;
     dev = meta?.DEV === true;
   } catch {
     env = undefined;
@@ -68,7 +97,7 @@ function readSources(): SessionTrackingSources {
   }
   let local: string | null = null;
   try {
-    if (typeof localStorage !== "undefined") local = localStorage.getItem(SESSION_TRACKING_LS_KEY);
+    if (typeof localStorage !== "undefined") local = localStorage.getItem(lsKey);
   } catch {
     local = null;
   }
