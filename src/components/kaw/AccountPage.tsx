@@ -32,6 +32,8 @@ import {
   describeOutcome, fetchDurablePlanKnown, postHistoryMergeWrite, postPlanWrite,
 } from "@/lib/kaw/completion-api";
 import { completionDisplayState } from "@/lib/kaw/completion-envelope";
+import { acquireCompletionLock, notifyOutboxChanged } from "@/lib/kaw/completion-recovery";
+import { CompletionRecoveryPanel } from "@/components/kaw/CompletionRecoveryPanel";
 import type { PlanPriceEvidence, PlanRowMeta } from "@/lib/kaw/rebalance-plan";
 
 // YYYY-MM-DD 문자열 ↔ Date 변환 (로컬 자정 기준 — UTC 파싱으로 하루 밀리는 것 방지)
@@ -741,7 +743,12 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
     // 못한다(같은 탭 순서는 write queue 가 보장하지만 **다른 기기는 아직 아니다**).
     // 그래서 historyPersistence 는 unknown/failed 에 머물고, plan 도 API 가 없어 pending
     // 이며, 결과적으로 journal/outbox 는 Phase 1A 에서 **정리되지 않는다**(의도된 동작).
-    if (begun.kind === "ready" && sessionCtx) {
+    // 같은 completionId 를 수동 재시도(복구 패널)가 동시에 보내지 않게 잠근다.
+    const releaseCompletion = begun.kind === "ready" && sessionCtx
+      ? acquireCompletionLock(sessionCtx, begun.completionId)
+      : null;
+    if (begun.kind === "ready") notifyOutboxChanged();
+    if (begun.kind === "ready" && sessionCtx && releaseCompletion) try {
       // ① 계좌 문서 저장(기존 경로). 예수금·보유수량 같은 **기록 밖의 상태**는 이 경로로만
       //    올라간다. 이 응답은 텔레메트리일 뿐이라 historyPersistence 를 confirmed 로
       //    올리지 않는다(settleHistoryWrite 에 ack 분기가 없다).
@@ -779,6 +786,9 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
       if (settled && completionDisplayState(settled) === "all_confirmed") {
         toast.success("서버가 계획·기록을 수신했습니다 (수신 확인까지이며 최종 보존을 보장하지는 않습니다)");
       }
+    } finally {
+      releaseCompletion();
+      notifyOutboxChanged();
     }
 
     // 성장형 백테스트도 "완료된 실제 상태"와 같은 히스토리 시점에 저장한다.
@@ -801,6 +811,16 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
 
   return (
     <div className="space-y-5">
+      {/* 서버 저장이 확인되지 않은 완료의 수동 복구. 자동 재시도·자동 삭제는 없다 —
+          flag OFF 면 outbox 를 읽지 않아 아무것도 그리지 않는다. */}
+      {sessionCtx && (
+        <CompletionRecoveryPanel
+          ctx={sessionCtx}
+          mirrorCompletionId={account.rebalanceSession?.completionId ?? null}
+          onClearMirror={() => setRebalanceSessionMirror(accountId, null)}
+        />
+      )}
+
       {/* 이전 리밸런싱 요약 */}
       {lastHistory && (
         <Card className="p-4 bg-muted/30 border-dashed">

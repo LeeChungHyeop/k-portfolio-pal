@@ -331,3 +331,40 @@ describe("409 해결 UI — 보이는 경고 + 확인 단계", () => {
     expect(firstStep).not.toContain("reloadFromServer(");
   });
 });
+
+describe("revision 보호 검증 상태 — 완료 기록 삭제의 근거 (1B-3B)", () => {
+  const status = () => fnBody(storeSrc, "export function getRevisionProtectionStatus(");
+
+  it("네 조건을 **모두** 요구한다 (flag · revision · 충돌/보류 없음 · 가드 저장 성공)", () => {
+    const body = status();
+    expect(body).toContain("!isRevisionGuardEnabled()");
+    expect(body).toContain("!canGuard(revisions)");
+    expect(body).toContain("dbConflict");
+    expect(body).toContain("dbHold");
+    expect(body).toContain("!guardedSaveVerified");
+    // 마지막에만 verified: true 가 나온다
+    const trues = body.match(/verified:\s*true/g) ?? [];
+    expect(trues).toHaveLength(1);
+    expect(body.lastIndexOf("verified: true")).toBeGreaterThan(body.indexOf("!guardedSaveVerified"));
+  });
+
+  it("**서버가 guarded: true 로 말한 저장에서만** 검증됨으로 올라간다", () => {
+    const sets = [...storeSrc.matchAll(/guardedSaveVerified = true/g)];
+    expect(sets).toHaveLength(2); // dbSave + 단건 ACK write
+    for (const m of sets) {
+      expect(storeSrc.slice(Math.max(0, m.index! - 120), m.index!)).toContain("guarded === true");
+    }
+  });
+
+  it("충돌·보류가 나면 검증됨이 내려간다", () => {
+    expect(fnBody(storeSrc, "function markDataConflict(")).toContain("guardedSaveVerified = false");
+    expect(fnBody(storeSrc, "function markRevisionHold(")).toContain("guardedSaveVerified = false");
+  });
+
+  it("기본 상태(flag OFF)에서는 검증되지 않는다", async () => {
+    const { getRevisionProtectionStatus } = await import("./store");
+    const r = getRevisionProtectionStatus();
+    expect(r.verified).toBe(false);
+    expect(r.reason).toMatch(/꺼져 있어/);
+  });
+});

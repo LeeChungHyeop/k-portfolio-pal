@@ -50,10 +50,12 @@ import {
   markHistoryFailed,
   markHistoryUnknown,
   markPlanFailed,
+  markPlanUnknown,
   pendingEnvelopes,
   putEnvelope,
   readOutbox,
   removeEnvelopeIfComplete,
+  withSideDetail,
   type CompletionEnvelope,
   type CompletionIds,
 } from "./completion-envelope";
@@ -601,8 +603,16 @@ export function settleHistoryWrite(
   outcome: HistoryWriteOutcome,
 ): CompletionEnvelope | null {
   return patchEnvelope(ctx, completionId, (env) => {
-    if (outcome.kind === "failed") return markHistoryFailed(env, outcome.error);
-    return markHistoryUnknown(env);
+    if (outcome.kind === "failed") {
+      return withSideDetail(markHistoryFailed(env, outcome.error), "history", {
+        kind: "failed", message: outcome.error,
+      });
+    }
+    // 문서 전체 교체의 수용은 "기록 단위 확인"이 아니다 — 사유에 그 사실을 남긴다.
+    return withSideDetail(markHistoryUnknown(env), "history", {
+      kind: "unknown",
+      message: "계좌 문서 저장 응답만 확인됐습니다 (기록 단위 서버 확인은 아직입니다)",
+    });
   });
 }
 
@@ -621,14 +631,25 @@ export function settleHistoryMergeWrite(
 ): CompletionEnvelope | null {
   return patchEnvelope(ctx, completionId, (env) => {
     if (outcome.kind === "ack") {
-      return confirmHistoryPersistence(env, {
-        kind: "server_ack",
-        outcome: outcome.outcome,
-        at: deps.now(),
+      return withSideDetail(
+        confirmHistoryPersistence(env, {
+          kind: "server_ack",
+          outcome: outcome.outcome,
+          at: deps.now(),
+        }),
+        "history",
+        undefined,
+      );
+    }
+    if (outcome.kind === "failed") {
+      return withSideDetail(markHistoryFailed(env, outcome.error), "history", {
+        kind: "failed", message: outcome.error,
       });
     }
-    if (outcome.kind === "failed") return markHistoryFailed(env, outcome.error);
-    return markHistoryUnknown(env);
+    return withSideDetail(markHistoryUnknown(env), "history", {
+      kind: "unknown",
+      message: outcome.reason ?? "서버가 받았는지 확인하지 못했습니다",
+    });
   });
 }
 
@@ -640,15 +661,29 @@ export function settlePlanWrite(
 ): CompletionEnvelope | null {
   return patchEnvelope(ctx, completionId, (env) => {
     if (outcome.kind === "ack") {
-      return confirmPlanPersistence(env, {
-        kind: "server_ack",
-        outcome: outcome.outcome,
-        at: deps.now(),
+      return withSideDetail(
+        confirmPlanPersistence(env, {
+          kind: "server_ack",
+          outcome: outcome.outcome,
+          at: deps.now(),
+        }),
+        "plan",
+        undefined,
+      );
+    }
+    if (outcome.kind === "failed") {
+      return withSideDetail(markPlanFailed(env, outcome.error), "plan", {
+        kind: "failed", message: outcome.error,
       });
     }
-    if (outcome.kind === "failed") return markPlanFailed(env, outcome.error);
-    // plan 은 "모른다" 를 쓰지 않는다 — POST 응답이 곧 ACK 라서, 모르면 실패다
-    return markPlanFailed(env, "plan 저장 결과를 확인하지 못했습니다");
+    // **결과 불명은 확정 실패가 아니다.** 상태를 unknown 으로 두고 attempts 를 올리지
+    // 않는다 — 복구 대상(재전송)에는 그대로 남지만, "3회 실패" 제한은 서버가 명시적으로
+    // 거부한 경우에만 적용된다. 사유도 unknown 으로 남겨 화면이 "저장 안 됨"이라고
+    // 말하지 않게 한다(서버에 이미 있을 수 있다).
+    return withSideDetail(markPlanUnknown(env), "plan", {
+      kind: "unknown",
+      message: outcome.reason ?? "서버가 받았는지 확인하지 못했습니다",
+    });
   });
 }
 

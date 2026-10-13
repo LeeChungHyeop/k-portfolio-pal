@@ -512,6 +512,14 @@ let dbHold: DataHoldState | null = null;
 let allowHistoryShrinkOnce = false;
 
 /**
+ * **이 세션에서 가드 저장이 실제로 성공했는가.** 서버가 `guarded: true` 로 응답한 적이
+ * 있다는 것은 migration 006/007 이 적용돼 있고 revision 비교가 실제로 동작한다는 가장
+ * 직접적인 증거다. flag 가 켜져 있다는 사실이나 GET 이 revision 을 준다는 사실만으로는
+ * (RPC 가 없을 수 있다) 부족하다. 충돌·보류·503 이 나면 내린다.
+ */
+let guardedSaveVerified = false;
+
+/**
  * 사용자가 **"지금 화면 내용으로 덮어쓰기"** 를 골랐다. 그 저장 1회에 한해 서버의 현재
  * revision 으로 CAS 를 다시 맞추고 파괴적 변경(키 유실 포함)까지 허용한다.
  * 자동으로 켜지는 경로는 없다 — `overwriteServerWithLocal()` 만 켠다.
@@ -659,6 +667,7 @@ async function dbLoad(code: string, user: string): Promise<StoreState | null> {
  * `overwriteServerWithLocal()` 로 고를 때만 일어난다.
  */
 function markDataConflict(body: { conflicts?: unknown; revisions?: unknown }): void {
+  guardedSaveVerified = false;
   const raw = Array.isArray(body.conflicts) ? (body.conflicts as GuardConflict[]) : [];
   const conflicts: GuardConflict[] = raw.filter(
     (c) => c && typeof c === "object" && typeof (c as GuardConflict).reason === "string",
@@ -678,6 +687,7 @@ function markDataConflict(body: { conflicts?: unknown; revisions?: unknown }): v
  * 로컬 입력은 이미 localStorage 에 있고 memState 도 그대로다.
  */
 function markRevisionHold(): void {
+  guardedSaveVerified = false;
   if (dbHold) return; // 같은 사유로 메시지를 반복 갱신하지 않는다
   dbHold = {
     reason: "revision_unavailable",
@@ -769,8 +779,12 @@ async function dbSave(code: string, user: string, state: StoreState) {
       const e = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(e.error ?? `HTTP ${res.status}`);
     }
-    const ok = (await res.json().catch(() => ({}))) as { revisions?: Record<string, number> };
+    const ok = (await res.json().catch(() => ({}))) as {
+      revisions?: Record<string, number>; guarded?: unknown;
+    };
     revisions = applySavedRevisions(revisions, ok.revisions);
+    // 서버가 가드 경로로 처리했다고 **직접 말한 경우에만** 보호가 확인된 것으로 본다.
+    if (ok.guarded === true) guardedSaveVerified = true;
     // 저장이 **성공했을 때만** 1회성 허용을 내린다 — 실패 후에도 유지돼야 재시도가 같은
     // 의도(기록 삭제)를 들고 간다.
     allowHistoryShrinkOnce = false;
@@ -856,6 +870,7 @@ async function postAccountRow(
     }
     if (!res.ok) return { ok: false, error: body.error ?? `HTTP ${res.status}`, status: res.status };
     revisions = applySavedRevisions(revisions, body.revisions);
+    if ((body as { guarded?: unknown }).guarded === true) guardedSaveVerified = true;
     return { ok: true, accepted: typeof body.accepted === "number" ? body.accepted : null };
   } catch (e) {
     const aborted = (e as Error)?.name === "AbortError";
@@ -931,6 +946,41 @@ export function markIntentionalDocumentReplace(): void {
 /** 지금 미해결 저장 충돌. 있는 동안 자동저장·폴링 반영이 멈춘다. */
 export function getDataConflict(): DataConflictState | null {
   return dbConflict;
+}
+
+/**
+ * **revision 보호가 검증된 상태인가.** 완료 기록(envelope)의 삭제 허용 근거다.
+ *
+ * ACK 는 "서버가 받았다"일 뿐이다. 무가드 문서 교체가 남아 있는 동안 그 기록은 나중에
+ * 도착한 오래된 저장에 덮일 수 있고, envelope 은 그때 다시 보낼 수 있는 **유일한 수단**이다.
+ * 그래서 보호가 실제로 동작한다는 증거가 없으면 삭제를 허용하지 않는다(fail-closed).
+ *
+ * 증거는 네 가지가 **모두** 필요하다:
+ *   1. 클라이언트 가드 flag ON (기본 OFF)
+ *   2. 서버가 모든 가드 대상 행의 revision 을 알려줌(canGuard)
+ *   3. 미해결 충돌·보류가 없음
+ *   4. 이 세션에서 가드 저장이 **실제로 성공**함(서버가 `guarded: true` 로 응답)
+ *
+ * 이것은 "다른 기기의 무가드 구버전 클라이언트가 없다"는 증명이 아니다 — 서버의 무가드
+ * 경로는 구버전 호환을 위해 남아 있다. 그래서 통과해도 삭제는 **사용자 확인**을 거친다.
+ */
+export function getRevisionProtectionStatus(): { verified: boolean; reason: string } {
+  if (!isRevisionGuardEnabled()) {
+    return { verified: false, reason: "쓰기 revision 보호가 꺼져 있어 서버 기록의 보존을 확인할 수 없습니다." };
+  }
+  if (!canGuard(revisions)) {
+    return { verified: false, reason: "서버의 저장 버전(revision)을 확인하지 못했습니다." };
+  }
+  if (dbConflict) {
+    return { verified: false, reason: "해결되지 않은 저장 충돌이 있습니다." };
+  }
+  if (dbHold) {
+    return { verified: false, reason: "저장이 보류된 상태입니다." };
+  }
+  if (!guardedSaveVerified) {
+    return { verified: false, reason: "이 세션에서 보호된 저장이 아직 확인되지 않았습니다." };
+  }
+  return { verified: true, reason: "" };
 }
 
 /**

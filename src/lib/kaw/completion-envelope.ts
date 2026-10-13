@@ -100,8 +100,41 @@ export interface CompletionEnvelope {
 
   attempts: number;
   lastError?: string;
+  /**
+   * 쪽별 **마지막 결과의 사유**. `lastError` 는 한 칸이라 어느 쪽 실패인지 알 수 없다 —
+   * 복구 화면이 History / Plan 을 각각 설명하려면 쪽별로 있어야 한다.
+   *
+   *   failed   서버가 **명시적으로 거부**했다(400/404/409/422)
+   *   unknown  서버가 받았는지 **모른다**(503·네트워크·타임아웃·해석불가).
+   *            이것을 "저장 안 됨"으로 읽지 않는다 — 서버에 이미 있을 수 있다
+   *
+   * confirmed 가 되면 지운다. 없으면(구버전 envelope) 화면이 상태만 보여준다.
+   */
+  historyDetail?: SideDetail;
+  planDetail?: SideDetail;
   /** 자동 재시도를 그만두고 사용자 조작을 기다리는 상태인가 */
   manualRetryRequired: boolean;
+}
+
+export interface SideDetail {
+  kind: "failed" | "unknown";
+  message: string;
+}
+
+/**
+ * 쪽별 사유를 갱신한다. `undefined` 면 키를 **지운다**(confirmed 가 됐다).
+ * 새 객체를 돌려주고 입력을 변형하지 않는다.
+ */
+export function withSideDetail(
+  env: CompletionEnvelope,
+  side: "history" | "plan",
+  detail: SideDetail | undefined,
+): CompletionEnvelope {
+  const key = side === "history" ? "historyDetail" : "planDetail";
+  const next = { ...env } as CompletionEnvelope;
+  if (detail === undefined) delete next[key];
+  else next[key] = detail;
+  return next;
 }
 
 // ── 상태 전이 (전부 새 객체를 돌려준다 — 입력을 변형하지 않는다) ───────────
@@ -134,6 +167,18 @@ export function confirmPlanPersistence(
  */
 export function markHistoryUnknown(env: CompletionEnvelope): CompletionEnvelope {
   return { ...env, historyPersistence: "unknown" };
+}
+
+/**
+ * plan 의 **결과 불명**(503·네트워크·타임아웃·해석불가)을 기록한다.
+ *
+ * `markPlanFailed` 와 달리 **attempts 를 올리지 않는다.** 서버가 받았는지 모르는 것은
+ * 확정 실패가 아니고, 오프라인에서 몇 번 눌렀다고 "3회 실패로 자동 동작 정지"가 되면
+ * 연결이 돌아온 뒤의 정상 재전송이 막힌다(실패 횟수 제한은 서버가 **거부한** 경우의
+ * 안전장치다). 상태는 `unknown` 이라 복구 대상(재전송)에는 그대로 남는다.
+ */
+export function markPlanUnknown(env: CompletionEnvelope): CompletionEnvelope {
+  return { ...env, planPersistence: "unknown" };
 }
 
 export function markPlanFailed(env: CompletionEnvelope, error: string): CompletionEnvelope {

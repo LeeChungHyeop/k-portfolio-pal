@@ -49,6 +49,7 @@ import {
   readOutbox,
   putEnvelope,
   confirmHistoryPersistence,
+  nextRecoveryActions,
   MAX_AUTO_ATTEMPTS,
 } from "./completion-envelope";
 import type { BrokerAccountInstance } from "./broker-account";
@@ -628,10 +629,31 @@ describe("history write 결과 — confirmed 로 가는 경로가 없다", () =>
     expect(env.manualRetryRequired).toBe(true);
   });
 
-  it("plan 은 모른다를 쓰지 않는다 — POST 응답이 곧 ACK 라서 모르면 실패다", () => {
+  it("plan 결과 불명은 **확정 실패가 아니다** — 상태는 unknown 이고 횟수에 들지 않는다", () => {
     const r = begin();
-    const env = settlePlanWrite(ctx, r.completionId, { kind: "unknown" }, deps())!;
-    expect(env.planPersistence).toBe("failed");
+    let env = settlePlanWrite(ctx, r.completionId, { kind: "unknown", reason: "timeout" }, deps())!;
+    expect(env.planPersistence).toBe("unknown");
+    expect(env.attempts).toBe(0);
+    // 몇 번을 반복해도 자동 동작 정지(3회 실패)에 도달하지 않는다
+    for (let i = 0; i < MAX_AUTO_ATTEMPTS + 2; i++) {
+      env = settlePlanWrite(ctx, r.completionId, { kind: "unknown", reason: "503" }, deps())!;
+    }
+    expect(env.attempts).toBe(0);
+    expect(env.manualRetryRequired).toBe(false);
+    // 그래도 재전송 대상에는 남는다
+    expect(nextRecoveryActions(env)).toContain("retry_plan_post");
+  });
+
+  it("확정 실패(failed)만 횟수에 든다 — 불명이 섞여도 실패만 센다", () => {
+    const r = begin();
+    settlePlanWrite(ctx, r.completionId, { kind: "unknown" }, deps());
+    settleHistoryMergeWrite(ctx, r.completionId, { kind: "unknown" });
+    let env = settlePlanWrite(ctx, r.completionId, { kind: "failed", error: "422" }, deps())!;
+    expect(env.attempts).toBe(1);
+    settlePlanWrite(ctx, r.completionId, { kind: "unknown" }, deps());
+    env = settleHistoryMergeWrite(ctx, r.completionId, { kind: "unknown" })!;
+    expect(env.attempts).toBe(1); // 불명은 그대로
+    expect(env.manualRetryRequired).toBe(false);
   });
 
   it("없는 completionId 에는 아무 일도 일어나지 않는다", () => {
