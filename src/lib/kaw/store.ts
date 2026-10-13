@@ -15,7 +15,7 @@ import type { RebalanceSessionMirror } from "./rebalance-journal";
 import { createWriteQueue } from "./write-queue";
 import { isRevisionGuardEnabled } from "./rebalance-feature-flags";
 import {
-  applySavedRevisions, canGuard, conflictPrompt, revisionsFromRows,
+  applySavedRevisions, canGuard, conflictPrompt, decideHoldRecovery, revisionsFromRows,
   type ConflictPrompt, type ExpectedRevisions, type GuardConflict,
 } from "./revision-guard";
 
@@ -683,7 +683,7 @@ function markRevisionHold(): void {
     reason: "revision_unavailable",
     message:
       "서버의 저장 버전(revision)을 확인하지 못해 저장을 보류했습니다. " +
-      "입력한 내용은 이 기기에 남아 있습니다 — 연결이 돌아오면 자동으로 저장합니다.",
+      "입력한 내용은 이 기기에 남아 있습니다 — 서버와 연결되면 어느 쪽을 남길지 물어봅니다.",
     at: new Date().toISOString(),
   };
   dbError = `저장 보류: ${dbHold.message}`;
@@ -692,17 +692,38 @@ function markRevisionHold(): void {
 
 /**
  * 보류 복구. **조회만** 한다 — 받아온 계좌 데이터는 쓰지 않는다(아직 저장되지 않은 로컬
- * 입력을 서버 상태로 덮으면 안 된다). revision 을 다시 받으면 보류를 풀고 **그때** 저장을
- * 한 번 예약한다. 복구되기 전에는 자동저장을 재시도하지 않는다.
+ * 입력을 서버 상태로 덮으면 안 된다).
+ *
+ * **여기서 저장하지 않는다.** 보류는 "로컬 수정의 출발 revision 이 기록돼 있지 않다"에서
+ * 시작했고, 나중에 받은 최신 revision 은 그 증거가 되지 못한다. 그걸 base 로 삼아 저장하면
+ * CAS 는 통과하면서 다른 기기의 더 새로운 변경이 조용히 사라진다 — 가드를 켠 채로
+ * last-writer-wins 가 되는 것과 같다. 그래서 조회가 성공하면 **충돌 상태로 전환**해
+ * 사용자가 고르게 한다(`base_unknown`).
+ *
+ * 받아온 revision 을 `revisions` 에 **남기지도 않는다**(요구 4: base 자동 승격 금지).
+ * 서버 값은 충돌 상태의 `serverRevisions` 로만 들고 있고, 실제 저장은 사용자가 고른
+ * `overwriteServerWithLocal()` 이 그때 다시 조회해 맞춘다.
  */
 async function recoverRevisionHold(): Promise<boolean> {
   if (!dbHold || !familyCode || !currentUser) return false;
+  const beforeFetch = revisions;
   await dbLoad(familyCode, currentUser); // revisions 만 갱신된다 (memState 는 건드리지 않는다)
-  if (!canGuard(revisions)) return false;
+  const fetched = revisions;
+  revisions = beforeFetch; // **base 자동 승격 금지** — 받아온 값을 base 로 쓰지 않는다
+
+  const decision = decideHoldRecovery(fetched);
+  if (decision.kind === "stay_held") return false;
+
+  // 로컬 미저장 데이터는 그대로 둔다(memState / localStorage 를 건드리지 않는다).
   dbHold = null;
-  if (dbError?.startsWith("저장 보류")) dbError = null;
+  dbConflict = {
+    conflicts: decision.conflicts,
+    prompt: conflictPrompt(decision.conflicts),
+    at: new Date().toISOString(),
+    serverRevisions: fetched,
+  };
+  dbError = `저장 충돌: ${dbConflict.prompt.message}`;
   notify();
-  void enqueueFullSave(); // 보류됐던 저장 1회
   return true;
 }
 
@@ -917,7 +938,10 @@ export function getDataHold(): DataHoldState | null {
   return dbHold;
 }
 
-/** 보류 복구를 지금 한 번 시도한다(화면의 "다시 시도"). 복구되면 보류됐던 저장이 나간다. */
+/**
+ * 보류 복구를 지금 한 번 시도한다(화면의 "다시 시도").
+ * **저장하지 않는다** — 서버에서 revision 을 받으면 사용자 선택(충돌)으로 전환된다.
+ */
 export function retryHeldSave(): Promise<boolean> {
   return recoverRevisionHold();
 }

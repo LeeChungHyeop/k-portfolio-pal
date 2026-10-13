@@ -15,6 +15,7 @@ import {
   applySavedRevisions,
   canGuard,
   conflictPrompt,
+  decideHoldRecovery,
   isGuardableType,
   parseExpectedRevisions,
   OVERWRITE_WARNING,
@@ -190,6 +191,46 @@ describe("readGuardedSaveResult", () => {
     { outcome: "conflict", conflicts: [{ account_type: "isa", reason: "뭔가" }] },
   ])("%s 는 unexpected 다 (성공으로 읽지 않는다)", (raw) => {
     expect(readGuardedSaveResult(raw).kind).toBe("unexpected");
+  });
+});
+
+describe("decideHoldRecovery — 보류는 저장으로 풀리지 않는다", () => {
+  it("서버가 revision 을 못 주면 **계속 보류**다", () => {
+    expect(decideHoldRecovery(null).kind).toBe("stay_held");
+    expect(decideHoldRecovery({ _meta: 1 }).kind).toBe("stay_held"); // 일부만 알아도 보류
+  });
+
+  it("revision 을 받아도 **사용자 선택**으로 간다 (자동 저장 분기가 없다)", () => {
+    const d = decideHoldRecovery(full);
+    expect(d.kind).toBe("needs_user_choice");
+    if (d.kind !== "needs_user_choice") return;
+    expect(d.conflicts.every((c) => c.reason === "base_unknown")).toBe(true);
+    expect(d.conflicts.map((c) => c.accountType).sort()).toEqual([...GUARDABLE_TYPES].sort());
+  });
+
+  it("**받아온 revision 을 expected(base)로 쓰지 않는다**", () => {
+    const d = decideHoldRecovery(full);
+    if (d.kind !== "needs_user_choice") throw new Error("선택이어야 한다");
+    // base 를 모른다는 사실을 그대로 남긴다 — 서버 값은 current 로만 들고 온다.
+    expect(d.conflicts.every((c) => c.expectedRevision === null)).toBe(true);
+    expect(d.conflicts.find((c) => c.accountType === "isa")!.currentRevision).toBe(full.isa);
+  });
+
+  it("base_unknown 도 자동 해결이 아니다", () => {
+    const d = decideHoldRecovery(full);
+    if (d.kind !== "needs_user_choice") throw new Error("선택이어야 한다");
+    const p = conflictPrompt(d.conflicts);
+    expect(p.autoResolvable).toBe(false);
+    expect(p.message).toMatch(/어느 버전에서 시작됐는지/);
+    expect(p.message).toMatch(/사라집니다/);
+  });
+
+  it("서버 응답으로 base_unknown 이 들어와도 **읽지 않는다** (서버 사유가 아니다)", () => {
+    const r = readGuardedSaveResult({
+      outcome: "conflict",
+      conflicts: [{ account_type: "isa", reason: "base_unknown" }],
+    });
+    expect(r.kind).toBe("unexpected");
   });
 });
 

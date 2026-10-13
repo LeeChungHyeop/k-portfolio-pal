@@ -337,6 +337,114 @@ describe("동시 수정", () => {
   });
 });
 
+// ── 2-b. 서로 다른 기기의 동시 수정 (실제 시나리오 재현) ───────────────────
+
+describe("두 기기가 같은 계좌를 수정하는 흐름", () => {
+  /** 기기 하나를 흉내낸다 — 조회 시점의 revision 을 들고 있다가 그걸로 저장한다. */
+  function device(name: string) {
+    let base: number | null = null;
+    return {
+      async read() {
+        const res = await handleDataGet(
+          new Request("https://x/api/data", { headers: { Authorization: `Bearer ${await token()}` } }),
+          env,
+        );
+        const body = (await res.json()) as { rows: Array<{ account_type: string; revision?: number }> };
+        base = body.rows.find((r) => r.account_type === "isa")?.revision ?? null;
+        return base;
+      },
+      save(data: Record<string, unknown>, opts: Record<string, unknown> = {}) {
+        return post({
+          rows: [accountRow("isa", data)],
+          expectedRevisions: { isa: base },
+          ...opts,
+        });
+      },
+      name,
+      get base() { return base; },
+    };
+  }
+
+  it("**뒤늦게 저장하는 기기가 앞선 변경을 덮지 못한다**", async () => {
+    const phone = device("phone");
+    const pc = device("pc");
+    // 둘이 같은 시점(revision 7)을 읽는다
+    expect(await phone.read()).toBe(7);
+    expect(await pc.read()).toBe(7);
+
+    // PC 가 먼저 저장 → revision 8
+    const first = await pc.save(isaData({ cashBalance: 500_000 }));
+    expect(first.status).toBe(200);
+    expect(first.json.revisions).toEqual({ isa: 8 });
+
+    // 폰이 (PC 의 변경을 모른 채) 저장 → 409, 서버는 그대로
+    const second = await phone.save(isaData({ cashBalance: 1 }));
+    expect(second.status).toBe(409);
+    expect(second.json.conflicts).toMatchObject([
+      { accountType: "isa", reason: "revision_mismatch", expectedRevision: 7, currentRevision: 8 },
+    ]);
+    expect(db.get(key(F, P, "isa"))!.data.cashBalance).toBe(500_000);
+    expect(db.get(key(F, P, "isa"))!.revision).toBe(8);
+  });
+
+  it("폰이 다시 읽으면 PC 의 변경을 base 로 삼아 저장할 수 있다", async () => {
+    const phone = device("phone");
+    const pc = device("pc");
+    await phone.read();
+    await pc.read();
+    await pc.save(isaData({ cashBalance: 500_000 }));
+
+    expect(await phone.read()).toBe(8); // 다시 읽어서 base 를 갱신
+    const r = await phone.save(isaData({ cashBalance: 500_001 }));
+    expect(r.status).toBe(200);
+    expect(db.get(key(F, P, "isa"))!.revision).toBe(9);
+  });
+
+  it("**사용자가 덮어쓰기를 고른 경우에만** 서버의 더 새로운 변경을 지운다", async () => {
+    const phone = device("phone");
+    const pc = device("pc");
+    await phone.read();
+    await pc.read();
+    // PC 가 기록을 하나 더 저장(폰은 모른다)
+    await pc.save(isaData({
+      cashBalance: 500_000,
+      history: [{ id: "hist:a", date: "2026-09-01" }, { id: "hist:pc", date: "2026-10-01" }],
+    }));
+
+    // 폰이 가진 문서는 그 기록이 없다 → 다시 읽어 base 를 맞춰도 **축소**로 막힌다
+    await phone.read();
+    const blocked = await phone.save(isaData({ cashBalance: 1 }));
+    expect(blocked.status).toBe(409);
+    expect((blocked.json.conflicts as Array<{ reason: string }>)[0].reason).toBe("history_shrink");
+    expect((db.get(key(F, P, "isa"))!.data.history as unknown[])).toHaveLength(2);
+
+    // 사용자가 "이 화면으로 덮어쓰기"를 고른 경우에만 통과한다
+    const forced = await phone.save(isaData({ cashBalance: 1 }), {
+      allowHistoryShrink: true, allowKeyLoss: true,
+    });
+    expect(forced.status).toBe(200);
+    expect((db.get(key(F, P, "isa"))!.data.history as unknown[])).toHaveLength(1);
+  });
+
+  it("**base 를 모르는 기기는 저장할 수 없다** (revision 없이 보내면 가드가 성립하지 않는다)", async () => {
+    // 보류(base_unknown)에서 서버 revision 만 받아와 저장하는 경로가 바로 이 사고다.
+    // 그런 요청은 클라이언트가 보내지 않지만(fail-closed), 서버 쪽 결과도 고정해 둔다:
+    // 최신 revision 을 base 로 붙이면 **CAS 는 통과한다** — 그래서 그 승격을 금지한다.
+    const pc = device("pc");
+    await pc.read();
+    await pc.save(isaData({ cashBalance: 500_000 })); // 서버 revision 8
+
+    const promoted = await post({
+      rows: [accountRow("isa", isaData({ cashBalance: 1, history: [{ id: "hist:a", date: "2026-09-01" }] }))],
+      expectedRevisions: { isa: 8 }, // "지금 서버가 8" 을 base 로 **승격**한 경우
+    });
+    expect(promoted.status).toBe(200); // 서버는 막을 수 없다
+    expect(db.get(key(F, P, "isa"))!.data.cashBalance).toBe(1); // PC 의 변경이 사라졌다
+    // → 그러므로 base 승격 금지는 **클라이언트에서** 지켜져야 한다
+    //   (store-revision-guard.test.ts "받아온 revision 을 base 로 승격하지 않는다").
+  });
+});
+
 // ── 3. 부분 실패 금지 ───────────────────────────────────────────────────────
 
 describe("부분 실패 금지 (전부 아니면 전무)", () => {

@@ -143,12 +143,25 @@ export function splitGuardRows(
 
 // ── RPC 결과 ────────────────────────────────────────────────────────────────
 
-export type ConflictReason =
+/** 서버(migration 007)가 돌려주는 충돌 사유. */
+export type ServerConflictReason =
   | "revision_mismatch"
   | "row_exists"
   | "row_missing"
   | "history_shrink"
   | "key_loss";
+
+/**
+ * 클라이언트에서만 생기는 사유 하나가 더 있다.
+ *
+ * `base_unknown` — **이 기기의 수정이 어떤 서버 버전에서 시작됐는지 모른다.**
+ * 저장 보류(revision 미확보) 중에 서버에서 revision 을 **새로** 받아왔을 때가 그렇다.
+ * 그 값은 "지금 서버가 몇 번인가"일 뿐이고, 로컬 수정이 그 버전에서 출발했다는 증거가
+ * 아니다. 그것을 base 로 써서 저장하면 CAS 는 통과하지만 **다른 기기의 더 새로운 변경이
+ * 조용히 사라진다**(가드를 켠 채로 last-writer-wins 가 되는 것과 같다).
+ * 그래서 자동 저장하지 않고 **사용자에게 선택을 요구한다.**
+ */
+export type ConflictReason = ServerConflictReason | "base_unknown";
 
 export interface GuardConflict {
   accountType: string;
@@ -164,7 +177,8 @@ export type GuardedSaveResult =
   | { kind: "conflict"; conflicts: GuardConflict[]; revisions: Record<string, number | null> }
   | { kind: "unexpected"; raw: unknown };
 
-const CONFLICT_REASONS: readonly ConflictReason[] = [
+/** **서버가 보낼 수 있는 값만** 받는다 — base_unknown 은 서버에서 오지 않는다. */
+const SERVER_CONFLICT_REASONS: readonly ServerConflictReason[] = [
   "revision_mismatch", "row_exists", "row_missing", "history_shrink", "key_loss",
 ];
 
@@ -197,7 +211,10 @@ export function readGuardedSaveResult(raw: unknown): GuardedSaveResult {
     for (const c of raw.conflicts) {
       if (!isPlainObject(c)) return { kind: "unexpected", raw };
       const reason = c.reason;
-      if (typeof reason !== "string" || !CONFLICT_REASONS.includes(reason as ConflictReason)) {
+      if (
+        typeof reason !== "string" ||
+        !SERVER_CONFLICT_REASONS.includes(reason as ServerConflictReason)
+      ) {
         return { kind: "unexpected", raw };
       }
       conflicts.push({
@@ -305,7 +322,39 @@ const REASON_TEXT: Record<ConflictReason, string> = {
   row_missing: "서버에서 해당 데이터가 삭제됐습니다",
   history_shrink: "저장하려는 내용에서 기존 리밸런싱 기록이 빠져 있습니다",
   key_loss: "저장하려는 내용에서 기존 항목이 빠져 있습니다",
+  base_unknown:
+    "이 기기의 수정이 서버의 어느 버전에서 시작됐는지 확인할 수 없습니다 (저장이 보류된 동안 서버가 바뀌었을 수 있습니다)",
 };
+
+// ── 보류 복구 판정 ──────────────────────────────────────────────────────────
+
+export type HoldRecovery =
+  /** 서버가 revision 을 돌려주지 못한다(006 미적용·조회 실패) → **계속 보류** */
+  | { kind: "stay_held" }
+  /**
+   * revision 은 받았지만 **그것을 로컬 수정의 base 로 쓸 수 없다** → 사용자 선택 필요.
+   * 여기에 "그대로 저장" 변종이 **없다** — 있으면 그게 base 자동 승격이다.
+   */
+  | { kind: "needs_user_choice"; conflicts: GuardConflict[] };
+
+/**
+ * 보류를 어떻게 풀 것인가. **저장으로 가는 분기가 없다.**
+ *
+ * 보류는 "읽은 revision 이 없다"에서 시작한다. 즉 로컬 수정의 출발 버전이 기록돼 있지
+ * 않다는 뜻이고, 나중에 조회로 받은 최신 revision 은 그 증거를 만들어주지 못한다.
+ * 그래서 조회가 성공해도 자동 저장하지 않고 충돌로 전환한다(`base_unknown`).
+ */
+export function decideHoldRecovery(fetched: ExpectedRevisions | null): HoldRecovery {
+  if (!canGuard(fetched)) return { kind: "stay_held" };
+  const conflicts: GuardConflict[] = GUARDABLE_TYPES.map((t) => ({
+    accountType: t,
+    reason: "base_unknown" as const,
+    // **base 를 모른다**는 사실을 그대로 적는다 — 받아온 값을 expected 로 쓰지 않는다.
+    expectedRevision: null,
+    currentRevision: typeof fetched![t] === "number" ? (fetched![t] as number) : null,
+  }));
+  return { kind: "needs_user_choice", conflicts };
+}
 
 /**
  * 충돌을 사용자 문구로. **여기서 고르지 않는다** — 선택지를 보여주기 위한 재료다.

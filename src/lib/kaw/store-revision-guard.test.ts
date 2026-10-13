@@ -215,16 +215,41 @@ describe("revision 미확보 = fail-closed (무가드 강등 금지)", () => {
     expect(body).toMatch(/dbError\s*=/);
     expect(body).toContain("notify()");
     expect(body).toMatch(/남아 있습니다/);
+    // "자동으로 저장한다"고 약속하지 않는다 — 복구는 사용자 선택으로 간다
+    expect(body).not.toMatch(/자동으로 저장/);
   });
 
   it("복구는 **조회만** 하고 받아온 데이터를 반영하지 않는다", () => {
     const body = fnBody(storeSrc, "async function recoverRevisionHold(");
     expect(body).toContain("await dbLoad(");
     expect(body).not.toMatch(/memState\s*=\s*migrateState/);
-    // revision 을 되찾았을 때만 보류를 풀고, 그때 한 번 저장한다
-    expect(body).toContain("if (!canGuard(revisions)) return false;");
-    expect(body).toContain("dbHold = null;");
-    expect(body).toContain("void enqueueFullSave();");
+    expect(body).not.toContain("saveLocal(");
+  });
+
+  it("**복구가 자동저장으로 이어지지 않는다** (오래된 로컬 JSON 을 올리지 않는다)", () => {
+    const body = fnBody(storeSrc, "async function recoverRevisionHold(");
+    expect(body).not.toContain("enqueueFullSave");
+    expect(body).not.toContain("dbSave(");
+    // 조회가 성공하면 **사용자 선택**(충돌)으로 전환된다
+    expect(body).toContain("decideHoldRecovery(fetched)");
+    expect(body).toContain('decision.kind === "stay_held"');
+    expect(body).toMatch(/dbConflict\s*=\s*\{/);
+  });
+
+  it("**받아온 revision 을 base 로 승격하지 않는다**", () => {
+    const body = fnBody(storeSrc, "async function recoverRevisionHold(");
+    // 조회 전 값으로 되돌려 둔다 — 그 값이 base 가 되면 CAS 가 통과해 서버가 덮인다.
+    expect(body).toContain("const beforeFetch = revisions;");
+    expect(body).toContain("revisions = beforeFetch;");
+    // 서버 값은 사용자 선택용으로만 들고 있는다
+    expect(body).toContain("serverRevisions: fetched");
+  });
+
+  it("선택 전까지 로컬 미저장 데이터가 유지된다 (저장도 폐기도 하지 않는다)", () => {
+    const body = fnBody(storeSrc, "async function recoverRevisionHold(");
+    expect(body).not.toMatch(/memState\s*=/);
+    // dbConflict 가 세워지면 dbSave 와 폴링 반영이 둘 다 멈춘다(위 테스트들이 고정)
+    expect(body).toMatch(/dbHold = null;[\s\S]{0,200}dbConflict = \{/);
   });
 
   it("폴링·가시성 복귀가 보류 복구만 돌리고 반영을 건너뛴다", () => {
