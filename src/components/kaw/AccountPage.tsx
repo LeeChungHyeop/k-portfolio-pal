@@ -35,6 +35,7 @@ import { completionDisplayState } from "@/lib/kaw/completion-envelope";
 import { acquireCompletionLock, notifyOutboxChanged } from "@/lib/kaw/completion-recovery";
 import { CompletionRecoveryPanel } from "@/components/kaw/CompletionRecoveryPanel";
 import { BuyOrderPreviewCard } from "@/components/kaw/BuyOrderPreviewCard";
+import { OrderApprovalCard } from "@/components/kaw/OrderApprovalCard";
 import type { PlanPriceEvidence, PlanRowMeta } from "@/lib/kaw/rebalance-plan";
 
 // YYYY-MM-DD 문자열 ↔ Date 변환 (로컬 자정 기준 — UTC 파싱으로 하루 밀리는 것 방지)
@@ -1385,6 +1386,8 @@ function RebalanceTab({ accountId }: { accountId: AccountId }) {
         prices={effectivePrices}
         historyDate={historyFetchDate}
       />
+      {/* 승인형 주문 — 빌드 flag 기본 OFF, 연금저축(22)·API 모드에서만 그려진다. 위 미리보기와 독립이다. */}
+      <OrderApprovalCard accountId={accountId} />
     </div>
   );
 }
