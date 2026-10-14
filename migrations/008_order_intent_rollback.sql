@@ -1,0 +1,40 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 008 되돌리기 — 주문 의도 테이블 제거
+--
+-- **이 스크립트는 주문 의도 기록을 전부 지운다.** 주문 의도는 "이 주문이 나갔을 수 있다"는
+-- 유일한 영속 증거다 — 실주문이 한 건이라도 있었다면 지우기 전에 반드시 백업하고, 증권사
+-- 체결내역과 대조해 미해소 주문이 없는지 확인한다.
+--
+-- ── 1단계: 먼저 주문 기능을 끈다 ────────────────────────────────────────────
+--
+--   서버 환경변수 KIS_ORDER_ENABLED 를 지우고(또는 "on" 이 아니게 하고) 배포한다. 기능이 꺼지면
+--   /api/kis/order/* 는 403 이고 이 테이블을 읽지도 쓰지도 않는다.
+--
+-- ── 2단계: 미해소 의도가 없는가 확인한다 ────────────────────────────────────
+--
+--   select state, count(*) from public.kaw_order_intent
+--    where state in ('proposed','submitting','accepted','unknown','open','partially_filled')
+--    group by state;
+--   -- 0 행이어야 한다. 남아 있으면 증권사 체결내역과 대조하기 전에 지우지 않는다.
+--
+-- ── 3단계: 백업 ─────────────────────────────────────────────────────────────
+--
+--   select json_agg(t) from public.kaw_order_intent t;
+--
+-- ── 4단계: 삭제 ─────────────────────────────────────────────────────────────
+-- 아래 블록의 주석을 풀고 실행한다. 실수로 통째 실행되는 것을 막기 위해 주석 처리해 둔다.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- drop table if exists public.kaw_order_intent;
+
+-- ── 5단계: 확인 ─────────────────────────────────────────────────────────────
+--
+-- (a) 테이블이 사라졌는가 — 0 행
+--   select table_name from information_schema.tables
+--    where table_schema = 'public' and table_name = 'kaw_order_intent';
+--
+-- (b) 다른 객체가 그대로인가 — 거래 원장·plan·관측 테이블이 남아 있어야 한다
+--   select table_name from information_schema.tables
+--    where table_schema = 'public'
+--      and table_name in ('kaw_transaction_ledger','kaw_rebalance_plan','kaw_settlement_observation','kaw_data')
+--    order by table_name;

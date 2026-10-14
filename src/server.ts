@@ -22,6 +22,7 @@ import {
 } from "./lib/kaw/plan-server";
 import { handleHistoryMergePost } from "./lib/kaw/history-server";
 import { handleKisAccountGet } from "./lib/kaw/kis-account-read";
+import { handleOrderPrepare, handleOrderStatus, handleOrderSubmit } from "./lib/kaw/order-handlers";
 
 // Cloudflare Workers environment bindings
 export interface Env {
@@ -31,6 +32,8 @@ export interface Env {
   KIS_APP_SECRET?: string;
   /** 종합계좌번호 8자리. 실잔고 읽기 전용 조회에만 쓰이고 응답·로그에 나가지 않는다 */
   KIS_ACCOUNT_CANO?: string;
+  /** 승인형 주문 기능 flag. 정확히 "on" 일 때만 켜진다. **기본 꺼짐** */
+  KIS_ORDER_ENABLED?: string;
   /** 위 계좌의 소유 가족 코드 + 소유 프로필 id(비밀값 아님). 하나라도 없으면 아무도 조회할 수 없다 */
   KIS_ACCOUNT_OWNER_FAMILY_CODE?: string;
   KIS_ACCOUNT_OWNER_PROFILE?: string;
@@ -296,6 +299,13 @@ export default {
     // GET 조회만 한다. 주문·이체·DB 쓰기가 없고 계좌번호는 응답에 나가지 않는다.
     // 이전 중인 계좌는 조회하지 않고 not_queried 로 돌려준다(잔고 0 과 구분).
     if (pathname === "/api/kis/account" && request.method === "GET") return handleKisAccountGet(request, env);
+
+    // ── 승인형 주문 (기본 OFF, 세션 + 소유 가족/프로필 + 계좌 instance + 1회성 승인) ──
+    // prepare 는 의도만 만들고, submit 만 주문을 보낸다. status 는 체결조회로 접수·체결을
+    // 해소한다(주문하지 않는다). 응답이 유실되면 재주문하지 않고 status 로 확인한다.
+    if (pathname === "/api/kis/order/prepare" && request.method === "POST") return handleOrderPrepare(request, env);
+    if (pathname === "/api/kis/order/submit" && request.method === "POST") return handleOrderSubmit(request, env);
+    if (pathname === "/api/kis/order/status" && request.method === "GET") return handleOrderStatus(request, env);
 
     // ── 일별 자산 스냅샷 읽기 (기간 성과용, 세션 토큰 필요) ─────────────────
     if (pathname === "/api/snapshots" && request.method === "GET") return handleSnapshotsGet(request, env);
