@@ -34,6 +34,10 @@ export interface Env {
   KIS_ACCOUNT_CANO?: string;
   /** 승인형 주문 기능 flag. 정확히 "on" 일 때만 켜진다. **기본 꺼짐** */
   KIS_ORDER_ENABLED?: string;
+  /** 미접수 정리(dismiss) flag. 22 체결조회 형식이 실측되기 전에는 켜지 않는다. **기본 꺼짐** */
+  KIS_ORDER_DISMISS_ENABLED?: string;
+  /** `/api/data` 무가드 저장 차단(428). **기본 꺼짐** */
+  KAW_REQUIRE_REVISION?: string;
   /** 위 계좌의 소유 가족 코드 + 소유 프로필 id(비밀값 아님). 하나라도 없으면 아무도 조회할 수 없다 */
   KIS_ACCOUNT_OWNER_FAMILY_CODE?: string;
   KIS_ACCOUNT_OWNER_PROFILE?: string;

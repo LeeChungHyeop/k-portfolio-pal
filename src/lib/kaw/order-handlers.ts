@@ -37,6 +37,8 @@ import type { KisAccountCredentials } from "./kis-account-server";
 export interface OrderEnv extends KisAccountEnv {
   /** 서버 기능 flag. 정확히 "on" 일 때만 켜진다. 기본 꺼짐 */
   KIS_ORDER_ENABLED?: string;
+  /** 미접수 정리 flag. 정확히 "on" 일 때만. 기본 꺼짐(22 체결조회 형식 실측 전) */
+  KIS_ORDER_DISMISS_ENABLED?: string;
 }
 
 /** 테스트가 증권사·저장소·시계를 바꿔 끼우는 지점. 운영 경로는 모두 기본값이다. */
@@ -50,6 +52,7 @@ export interface OrderHandlerOverrides {
 }
 
 export const isOrderEnabled = (env: OrderEnv): boolean => env.KIS_ORDER_ENABLED === "on";
+export const isDismissEnabled = (env: OrderEnv): boolean => env.KIS_ORDER_DISMISS_ENABLED === "on";
 
 /** 의도를 응답으로. 승인 토큰 해시·내부 필드는 싣지 않는다. */
 export function publicIntent(i: OrderIntent) {
@@ -169,7 +172,7 @@ async function resolve(
 
   return {
     deps: {
-      store, broker, enabled: true,
+      store, broker, enabled: true, dismissEnabled: isDismissEnabled(env),
       now: ov.now ?? (() => new Date()),
       newId: ov.newId ?? (() => crypto.randomUUID()),
       newToken: ov.newToken ?? newApprovalToken,
@@ -324,6 +327,11 @@ export async function handleOrderResolve(
   switch (res.kind) {
     case "disabled": return json({ error: "order_disabled" }, 403);
     case "not_found": return json({ error: "not_found" }, 404);
+    case "dismiss_disabled":
+      return json({
+        error: "dismiss_disabled",
+        message: "미접수 정리는 서버에서 꺼져 있습니다(체결조회 형식 확인 전). 주문번호 연결이나 상태 조회를 사용하세요.",
+      }, 403);
     case "bad_input": return json({ error: "bad_input", message: res.message }, 400);
     case "not_resolvable":
       return json({ error: "not_resolvable", message: res.reason, intent: publicIntent(res.intent) }, 409);

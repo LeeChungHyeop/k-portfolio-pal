@@ -396,7 +396,7 @@ export function OrderApprovalPanel({ instance, api, storage }: OrderApprovalPane
                   <input type="radio" name="resolve-action" className="mt-0.5 h-4 w-4"
                     checked={resolveForm.action === "dismiss_not_found"}
                     onChange={() => setResolveForm((f) => ({ ...f, action: "dismiss_not_found" }))} />
-                  <span className="break-words">증권사 앱에 이 주문이 없다 — 미접수로 정리(주문일 다음 날부터, 조건이 같은 주문이 하나도 없을 때만)</span>
+                  <span className="break-words">증권사 앱에 이 주문이 없다 — 미접수로 정리(주문일 다음 날부터, 조건이 같은 주문이 하나도 없을 때만. 서버에서 꺼져 있으면 처리되지 않습니다)</span>
                 </label>
               </fieldset>
               {resolveForm.action === "link_order_no" && (

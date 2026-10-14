@@ -20,12 +20,21 @@ interface KVLike {
 }
 
 export interface DataEnv {
+  /**
+   * 무가드 저장 차단 스위치. 정확히 "on" 이면 `/api/data` 의 **expectedRevisions 없는 계좌 쓰기**를
+   * 428 로 거부한다(아무 행도 쓰지 않는다). **기본 OFF** — 켜기 전에 가드 ON 클라이언트가 배포돼
+   * 있어야 한다(아니면 모든 저장이 막힌다).
+   */
+  KAW_REQUIRE_REVISION?: string;
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SESSION_SECRET?: string;
   ACCESS_CODE?: string;
   RATE_LIMIT?: KVLike;
 }
+
+export const isRevisionRequired = (env: Pick<DataEnv, "KAW_REQUIRE_REVISION">): boolean =>
+  env.KAW_REQUIRE_REVISION === "on";
 
 /** 공용 JSON 응답 (no-store). 원장 API 등 다른 핸들러 모듈도 같은 모양을 쓰도록 export 한다. */
 export function json(body: unknown, status = 200): Response {
@@ -495,6 +504,16 @@ export async function handleDataPost(request: Request, env: DataEnv): Promise<Re
   // 성립해야 하기 때문이다(migration 007 대원칙 4). 이 경로가 남아 있는 동안은
   // "가드 완료"가 아니다(revision-guard.ts UNGUARDED_WRITE_PATHS).
   if (body.expectedRevisions === undefined || body.expectedRevisions === null) {
+    // 차단 스위치가 켜져 있으면 계좌 행(프로필 5행)이 하나라도 섞인 무가드 요청은 **통째로 거부**한다
+    // (같이 온 공용 행도 쓰지 않는다 — 한 번의 저장이 일부만 반영되지 않게). 공용 종목 라이브러리만
+    // 보내는 요청은 설계상 가드 밖이라 그대로 둔다(007 대원칙 2).
+    if (isRevisionRequired(env) && sanitized.some((r) => r.profile !== "_shared")) {
+      return json({
+        error: "revision_required",
+        message: "앱이 최신 버전이 아니라 저장하지 않았습니다. 새로고침한 뒤 다시 시도하세요.",
+        saved: false,
+      }, 428);
+    }
     const { error } = await client.from("kaw_data").upsert(sanitized, { onConflict: "family_code,profile,account_type" });
     if (error) return json({ error: error.message }, 500);
     return json({ ok: true, accepted: sanitized.length, guarded: false });

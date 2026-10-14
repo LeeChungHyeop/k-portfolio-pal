@@ -639,3 +639,74 @@ describe("경계", () => {
     expect([a.status, b.status]).toEqual([200, 200]); // 한쪽 변경이 사라졌다
   });
 });
+
+// ── 무가드 저장 차단 스위치(KAW_REQUIRE_REVISION) ─────────────────────────────
+
+describe("무가드 저장 차단 스위치 — 기본 OFF, ON 이면 428", () => {
+  async function postEnv(body: unknown, extra: Record<string, string | undefined>) {
+    const res = await handleDataPost(
+      new Request("https://x/api/data", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${await token()}` },
+        body: JSON.stringify(body),
+      }),
+      { ...env, ...extra },
+    );
+    return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+  }
+  const legacyBody = () => ({ rows: [accountRow("isa", isaData({ cashBalance: 1 })), sharedRow([{ id: "x" }])] });
+
+  it("OFF(기본·on 이 아닌 값)이면 구버전 무가드 요청이 그대로 저장된다(단계적 배포 호환)", async () => {
+    for (const v of [undefined, "", "off", "true", "1", "ON"]) {
+      upserts.length = 0;
+      const r = await postEnv(legacyBody(), { KAW_REQUIRE_REVISION: v });
+      expect(r.status).toBe(200);
+      expect(r.json.guarded).toBe(false);
+      expect(upserts.length).toBe(1);
+    }
+  });
+
+  it("**ON 이면 계좌 행이 섞인 무가드 요청을 428 로 거부하고 아무 행도 쓰지 않는다**", async () => {
+    const before = JSON.stringify([...db.entries()]);
+    const r = await postEnv(legacyBody(), { KAW_REQUIRE_REVISION: "on" });
+    expect(r.status).toBe(428);
+    expect(r.json).toMatchObject({ error: "revision_required", saved: false });
+    expect(upserts).toHaveLength(0); // 같이 온 공용 행도 쓰지 않는다
+    expect(JSON.stringify([...db.entries()])).toBe(before);
+  });
+
+  it("ON 이면 expectedRevisions: null 로 보내도 우회되지 않는다", async () => {
+    const r = await postEnv({ ...legacyBody(), expectedRevisions: null }, { KAW_REQUIRE_REVISION: "on" });
+    expect(r.status).toBe(428);
+    expect(upserts).toHaveLength(0);
+  });
+
+  it("ON 이어도 공용 종목 라이브러리만 보내는 요청은 허용한다(설계상 가드 밖)", async () => {
+    const r = await postEnv({ rows: [sharedRow([{ id: "y" }])] }, { KAW_REQUIRE_REVISION: "on" });
+    expect(r.status).toBe(200);
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0].rows.every((x) => x.profile === "_shared")).toBe(true);
+  });
+
+  it("ON 이어도 가드 요청(expectedRevisions 포함)은 정상 저장된다", async () => {
+    const r = await postEnv({
+      rows: [accountRow("isa", isaData({ cashBalance: 5 }))],
+      expectedRevisions: { isa: 7 },
+    }, { KAW_REQUIRE_REVISION: "on" });
+    expect(r.status).toBe(200);
+    expect(r.json.guarded).toBe(true);
+    expect((db.get(key(F, P, "isa"))!.data as { cashBalance: number }).cashBalance).toBe(5);
+  });
+
+  it("ON 이어도 낡은 revision 은 여전히 409(428 이 아니다)", async () => {
+    const r = await postEnv({ rows: [accountRow("isa", isaData())], expectedRevisions: { isa: 1 } }, { KAW_REQUIRE_REVISION: "on" });
+    expect(r.status).toBe(409);
+  });
+
+  it("ON 이어도 다른 가족·프로필 행만 보내면 걸러져 accepted 0(쓰지 않음)", async () => {
+    const r = await postEnv({ rows: [{ family_code: "otherfam", profile: P, account_type: "isa", data: {} }] }, { KAW_REQUIRE_REVISION: "on" });
+    expect(r.status).toBe(200);
+    expect(r.json.accepted).toBe(0);
+    expect(upserts).toHaveLength(0);
+  });
+});

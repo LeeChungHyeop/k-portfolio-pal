@@ -301,6 +301,13 @@ export async function requestResolve(req: ResolveRequest, fetchImpl: Fetch = fet
   }
   const body = await readJson(res);
   if (res.status === 401) return { kind: "unauthenticated" };
+  if (res.status === 403 && body?.error === "dismiss_disabled") {
+    return {
+      kind: "refused", code: "dismiss_disabled",
+      message: typeof body.message === "string" ? body.message : "미접수 정리는 서버에서 꺼져 있습니다.",
+      intent: null,
+    };
+  }
   if (res.status === 403) return body?.error === "order_disabled" ? { kind: "disabled" } : { kind: "denied" };
   if (res.ok && body?.intent) return { kind: "resolved", intent: body.intent as IntentView };
   if (typeof body?.error === "string") {

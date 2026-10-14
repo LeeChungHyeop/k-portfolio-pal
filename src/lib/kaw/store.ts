@@ -750,6 +750,26 @@ async function recoverRevisionHold(): Promise<boolean> {
   return true;
 }
 
+// ── 서버가 무가드 저장을 거부함(428) ───────────────────────────────────────
+//
+// 서버의 차단 스위치(KAW_REQUIRE_REVISION)가 켜져 있는데 이 클라이언트가 revision 없이 저장했다.
+// **저장되지 않았다.** 이 세션에서는 더 이상 저장을 시도하지 않는다(같은 거부를 반복하는 자동
+// 재전송이 된다). 새로고침해서 최신 앱을 받는 것만이 해결책이다 — 모듈 상태가 새로 시작된다.
+let dbRefreshRequired = false;
+export const REFRESH_REQUIRED_MESSAGE =
+  "저장되지 않았습니다: 앱이 최신 버전이 아니라 서버가 저장을 거부했습니다. 새로고침한 뒤 다시 입력해 주세요.";
+
+function markRefreshRequired() {
+  dbRefreshRequired = true;
+  dbError = REFRESH_REQUIRED_MESSAGE;
+  notify();
+}
+
+/** 테스트·화면용: 새로고침이 필요해 저장을 멈춘 상태인가 */
+export function isRefreshRequired(): boolean {
+  return dbRefreshRequired;
+}
+
 /** 가드를 켠 요청에 실어 보낼 필드. 가드가 꺼져 있으면 `{}` 다(= 기존 무가드 요청). */
 function guardFields(): Record<string, unknown> {
   if (!isRevisionGuardEnabled() || !canGuard(revisions)) return {};
@@ -766,7 +786,7 @@ async function dbSave(code: string, user: string, state: StoreState) {
   if (!token || isApplyingRemote || !user) return;
   // 미해결 충돌·보류가 있는 동안은 **시도하지 않는다** — 같은 실패를 반복하는 자동
   // 재시도가 된다. 보류는 조회로 revision 을 되찾을 때만 풀린다(recoverRevisionHold).
-  if (dbConflict || dbHold) return;
+  if (dbConflict || dbHold || dbRefreshRequired) return;
   // **fail-closed.** 가드가 켜졌는데 revision 을 모르면 저장을 보류한다 —
   // 무가드 요청으로 강등하지 않는다(그게 바로 가드를 켠 채 덮어쓰는 경로다).
   if (isRevisionGuardEnabled() && !canGuard(revisions)) { markRevisionHold(); return; }
@@ -786,6 +806,11 @@ async function dbSave(code: string, user: string, state: StoreState) {
     if (res.status === 401) { clearSessionProfile(); throw new Error("세션이 만료됐어요. 다시 로그인해주세요."); }
     if (res.status === 409) {
       markDataConflict((await res.json().catch(() => ({}))) as { conflicts?: unknown });
+      return;
+    }
+    if (res.status === 428) {
+      // 저장 성공으로 보지 않는다. 다시 보내지 않는다.
+      markRefreshRequired();
       return;
     }
     if (!res.ok) {
@@ -854,6 +879,7 @@ async function postAccountRow(
   token: string,
   timeoutMs: number,
 ): Promise<DataWriteAck> {
+  if (dbRefreshRequired) return { ok: false, error: REFRESH_REQUIRED_MESSAGE, status: 428 };
   // fetch 는 자체 타임아웃이 없다. 걸어두지 않으면 응답이 안 오는 회선에서 완료
   // 버튼이 무기한 비활성 상태로 남고, 큐 뒤의 저장도 전부 막힌다.
   const controller = new AbortController();
@@ -880,6 +906,11 @@ async function postAccountRow(
       // (rebalance-session.ts historyOutcomeOfAck). 자동 재시도하지 않는다.
       markDataConflict(body);
       return { ok: false, error: "다른 기기에서 먼저 저장된 변경이 있습니다.", status: 409 };
+    }
+    if (res.status === 428) {
+      // ACK 아님. 자동 재시도 없음 — 새로고침이 필요하다.
+      markRefreshRequired();
+      return { ok: false, error: REFRESH_REQUIRED_MESSAGE, status: 428 };
     }
     if (!res.ok) return { ok: false, error: body.error ?? `HTTP ${res.status}`, status: res.status };
     revisions = applySavedRevisions(revisions, body.revisions);

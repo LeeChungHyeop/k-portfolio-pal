@@ -40,6 +40,8 @@ export interface MockOptions {
   delayMs?: number;
   /** 주문일 장이 끝난 것으로 본다(미접수 정리 허용 조건) */
   dayClosed?: () => boolean;
+  /** 서버의 미접수 정리 flag(운영 기본 OFF 를 흉내낸다) */
+  dismissEnabled?: () => boolean;
   now?: () => number;
 }
 
@@ -147,6 +149,9 @@ export function createMockOrderApi(scenario: MockScenario, opts: MockOptions = {
     async resolve(req) {
       log(`POST /api/kis/order/resolve (${req.action}, 주문 아님)`);
       await wait();
+      if (req.action === "dismiss_not_found" && !opts.dismissEnabled?.()) {
+        return { kind: "refused", code: "dismiss_disabled", message: "미접수 정리는 서버에서 꺼져 있습니다(체결조회 형식 확인 전). 주문번호 연결이나 상태 조회를 사용하세요.", intent: null };
+      }
       if (!intent || intent.id !== req.intentId) return { kind: "refused", code: "not_found", message: "주문을 찾지 못했습니다.", intent: null };
       if (!["unknown", "submitting"].includes(intent.state) || intent.orderNo) {
         return { kind: "refused", code: "not_resolvable", message: "해소할 수 없는 상태입니다.", intent };

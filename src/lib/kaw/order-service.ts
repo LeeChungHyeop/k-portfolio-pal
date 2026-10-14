@@ -73,6 +73,11 @@ export interface OrderServiceDeps {
   now: () => Date;
   newId: () => string;
   newToken: () => string;
+  /**
+   * 미접수 정리(dismiss_not_found) 허용. **기본 false.** 22 계좌의 체결조회 응답 형식(목록·페이지
+   * 신호·취소/거부 표시)이 실측되기 전에는 켜지 않는다. 주문번호 연결·상태 조회에는 영향이 없다.
+   */
+  dismissEnabled?: boolean;
 }
 
 export interface OrderContext {
@@ -487,6 +492,8 @@ export interface ResolveInput {
 
 export type ResolveResult =
   | { kind: "disabled" }
+  /** 미접수 정리 기능이 서버에서 꺼져 있다 — 아무 것도 조회·변경하지 않았다 */
+  | { kind: "dismiss_disabled" }
   | { kind: "not_found" }
   /** 해소 대상 상태가 아니다(unknown / 오래된 submitting 만) */
   | { kind: "not_resolvable"; intent: OrderIntent; reason: string }
@@ -522,6 +529,8 @@ export async function resolveOrder(
   deps: OrderServiceDeps,
 ): Promise<ResolveResult> {
   if (!deps.enabled) return { kind: "disabled" };
+  // UI 를 거치지 않은 직접 요청도 여기서 막는다(조회·저장소를 건드리기 전에).
+  if (input.action === "dismiss_not_found" && deps.dismissEnabled !== true) return { kind: "dismiss_disabled" };
   if (input.confirmIntentId !== input.intentId) {
     return { kind: "bad_input", message: "확인한 주문과 해소할 주문이 다릅니다." };
   }

@@ -244,8 +244,25 @@ describe("POST /api/kis/order/resolve", () => {
     expect(r.status).toBe(403);
   });
 
-  it("다음 날 조회가 비어 있으면 dismissed 로 200, 응답에 비밀값이 없다, 주문은 0건", async () => {
-    const r = await handleOrderResolve(req({ intentId: "i1", action: "dismiss_not_found", note: "증권사 앱에 주문 없음", confirmIntentId: "i1" }), ENV, ov(), [PENSION]);
+  it("**dismiss flag 기본 OFF: UI 를 우회한 직접 요청도 403, 조회·감사 없음**", async () => {
+    for (const v of [undefined, "", "off", "true", "1", "ON"]) {
+      const r = await handleOrderResolve(req({ intentId: "i1", action: "dismiss_not_found", note: "증권사 앱에 주문 없음", confirmIntentId: "i1" }),
+        { ...ENV, KIS_ORDER_DISMISS_ENABLED: v }, ov(), [PENSION]);
+      expect(r.status).toBe(403);
+      expect((await r.json() as { error: string }).error).toBe("dismiss_disabled");
+    }
+    expect(calls.inquire).toBe(0);
+    expect(store.resolutions).toHaveLength(0);
+  });
+
+  it("dismiss flag OFF 여도 주문번호 연결 요청은 조회까지 진행한다(근거 부족이면 422)", async () => {
+    const r = await handleOrderResolve(req({ intentId: "i1", action: "link_order_no", orderNo: "777", note: "증권사 앱에서 봄", confirmIntentId: "i1" }), ENV, ov(), [PENSION]);
+    expect(r.status).toBe(422);
+    expect(calls.inquire).toBe(1);
+  });
+
+  it("dismiss flag ON + 다음 날 조회가 비어 있으면 dismissed 로 200, 응답에 비밀값이 없다, 주문은 0건", async () => {
+    const r = await handleOrderResolve(req({ intentId: "i1", action: "dismiss_not_found", note: "증권사 앱에 주문 없음", confirmIntentId: "i1" }), { ...ENV, KIS_ORDER_DISMISS_ENABLED: "on" }, ov(), [PENSION]);
     expect(r.status).toBe(200);
     const text = await r.text();
     expect(JSON.parse(text)).toMatchObject({ intent: { state: "dismissed" }, resolution: { action: "dismiss_not_found", actor: "me" } });

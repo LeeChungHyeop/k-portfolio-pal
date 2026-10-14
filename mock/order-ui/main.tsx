@@ -19,15 +19,17 @@ function memoryStorage(): IntentIdStorage {
 function App() {
   const [scenario, setScenario] = useState<MockScenario>("accept_then_fill");
   const [dayClosed, setDayClosed] = useState(false);
+  const [dismissOn, setDismissOn] = useState(false);
   const [width, setWidth] = useState<"pc" | "mobile">("pc");
   const [dark, setDark] = useState(true);
   const [run, setRun] = useState(0);
   const [, force] = useState(0);
 
-  const dayRef = useMemo(() => ({ v: false }), []);
+  const dayRef = useMemo(() => ({ v: false, d: false }), []);
   dayRef.v = dayClosed;
+  dayRef.d = dismissOn;
   // run 이 바뀌면 API·저장소·패널을 새로 만든다(= 새로고침 모사는 "패널만 다시 그리기")
-  const api = useMemo(() => createMockOrderApi(scenario, { delayMs: 500, dayClosed: () => dayRef.v }), [scenario, run, dayRef]);
+  const api = useMemo(() => createMockOrderApi(scenario, { delayMs: 500, dayClosed: () => dayRef.v, dismissEnabled: () => dayRef.d }), [scenario, run, dayRef]);
   const storage = useMemo(() => memoryStorage(), [scenario, run]);
   const [panelKey, setPanelKey] = useState(0);
 
@@ -51,6 +53,10 @@ function App() {
         <label className="flex items-center gap-1">
           <input type="checkbox" checked={dayClosed} onChange={(e) => setDayClosed(e.target.checked)} />
           주문일 장 마감됨(다음 날)
+        </label>
+        <label className="flex items-center gap-1">
+          <input type="checkbox" checked={dismissOn} onChange={(e) => setDismissOn(e.target.checked)} />
+          서버 미접수 정리 허용(운영 기본 OFF)
         </label>
         <button className="rounded border px-2 py-1" onClick={() => setWidth(width === "pc" ? "mobile" : "pc")}>
           폭: {width === "pc" ? "PC" : "모바일 390px"}

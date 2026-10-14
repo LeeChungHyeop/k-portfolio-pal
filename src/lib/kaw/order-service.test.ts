@@ -775,8 +775,9 @@ describe("수동 해소 — 증권사 조회 근거로만, 식별이 불충분�
   }
   const link = (id: string, orderNo: string, over: Partial<ResolveInput> = {}) =>
     resolveOrder(CTX, { intentId: id, action: "link_order_no", orderNo, note: NOTE, confirmIntentId: id, actor: "hyeobi", ...over }, deps);
+  // 미접수 정리는 서버 flag 가 켜진 경우만 동작한다 — 아래 정리 규칙 테스트는 flag ON 으로 돈다.
   const dismiss = (id: string, over: Partial<ResolveInput> = {}) =>
-    resolveOrder(CTX, { intentId: id, action: "dismiss_not_found", note: NOTE, confirmIntentId: id, actor: "hyeobi", ...over }, deps);
+    resolveOrder(CTX, { intentId: id, action: "dismiss_not_found", note: NOTE, confirmIntentId: id, actor: "hyeobi", ...over }, { ...deps, dismissEnabled: true });
   const nextDay = () => { clockMs += 24 * 3_600_000; };
   const limitOf = async (id: string) => (await store.getById(SCOPE, id))!.limitPrice;
 
@@ -977,6 +978,35 @@ describe("수동 해소 — 증권사 조회 근거로만, 식별이 불충분�
     expect(store.resolutions).toHaveLength(0);
   });
 
+  // ── 미접수 정리 flag ─────────────────────────────────────────────────────
+
+  it("**flag 기본 OFF: 미접수 정리 직접 요청은 거부되고 조회·저장·감사 모두 없다**", async () => {
+    const id = await lostOrder();
+    broker.book = [];
+    nextDay();
+    const inq = broker.calls.inquire;
+    const r = await resolveOrder(CTX, { intentId: id, action: "dismiss_not_found", note: NOTE, confirmIntentId: id, actor: "hyeobi" }, deps);
+    expect(r.kind).toBe("dismiss_disabled");
+    expect(broker.calls.inquire).toBe(inq);
+    expect(store.resolutions).toHaveLength(0);
+    expect((await store.getById(SCOPE, id))!.state).toBe("unknown");
+    // 잠금도 그대로: 새 주문을 만들 수 없다
+    expect((await prepareOrder(CTX, { ticker: "360750", quantity: 1 }, deps)).kind).not.toBe("proposed");
+  });
+
+  it("flag OFF 여도 주문번호 연결은 그대로 동작한다", async () => {
+    const id = await lostOrder();
+    nextDay();
+    const r = await link(id, broker.book[0].orderNo);
+    expect(r.kind).toBe("resolved");
+  });
+
+  it("flag OFF 여도 상태 조회(reconcile)는 그대로 동작한다", async () => {
+    const id = await lostOrder();
+    clockMs += 5_000;
+    expect((await reconcileOrder(CTX, id, deps)).kind).toBe("reconciled");
+  });
+
   // ── 공통 ──────────────────────────────────────────────────────────────────
 
   it("해소 대상이 아닌 상태(접수됨)는 거절한다", async () => {
@@ -1029,7 +1059,7 @@ describe("수동 해소 — 증권사 조회 근거로만, 식별이 불충분�
   it("다른 프로필은 남의 의도를 해소할 수 없다", async () => {
     const id = await lostOrder();
     const other: OrderContext = { scope: { familyCode: "soye", profile: "dayoung" }, accountInstanceId: CTX.accountInstanceId };
-    const r = await resolveOrder(other, { intentId: id, action: "dismiss_not_found", note: NOTE, confirmIntentId: id, actor: "dayoung" }, deps);
+    const r = await resolveOrder(other, { intentId: id, action: "dismiss_not_found", note: NOTE, confirmIntentId: id, actor: "dayoung" }, { ...deps, dismissEnabled: true });
     expect(r.kind).toBe("not_found");
   });
 

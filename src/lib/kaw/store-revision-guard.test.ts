@@ -53,7 +53,7 @@ describe("409 는 자동으로 풀지 않는다", () => {
   it("충돌이 남아 있으면 저장을 **시도조차 하지 않는다**", () => {
     const body = fnBody(storeSrc, "async function dbSave(");
     // 보류(dbHold)도 같은 자리에서 막는다 — 둘 다 "복구 전 재시도 금지"다.
-    expect(body).toMatch(/if \(dbConflict \|\| dbHold\) return;/);
+    expect(body).toMatch(/if \(dbConflict \|\| dbHold \|\| dbRefreshRequired\) return;/);
   });
 
   it("markDataConflict 는 revisions 를 갱신하지 않는다", () => {
@@ -212,7 +212,7 @@ describe("revision 미확보 = fail-closed (무가드 강등 금지)", () => {
 
   it("보류 중에는 자동저장을 **시도조차 하지 않는다** (복구 전 재시도 금지)", () => {
     const body = fnBody(storeSrc, "async function dbSave(");
-    expect(body).toMatch(/if \(dbConflict \|\| dbHold\) return;/);
+    expect(body).toMatch(/if \(dbConflict \|\| dbHold \|\| dbRefreshRequired\) return;/);
   });
 
   it("보류는 **로컬 입력을 건드리지 않는다** (memState / localStorage 그대로)", () => {
@@ -366,5 +366,37 @@ describe("revision 보호 검증 상태 — 완료 기록 삭제의 근거 (1B-3
     const r = getRevisionProtectionStatus();
     expect(r.verified).toBe(false);
     expect(r.reason).toMatch(/꺼져 있어/);
+  });
+});
+
+describe("서버 무가드 차단(428) — 클라이언트는 성공으로 보지 않고 다시 보내지 않는다", () => {
+  it("dbSave: 428 이면 새로고침 필요 상태로 멈추고 throw·재시도 없이 끝난다", () => {
+    const body = fnBody(storeSrc, "async function dbSave(");
+    const at = body.indexOf("res.status === 428");
+    expect(at).toBeGreaterThan(-1);
+    const branch = body.slice(at, body.indexOf("}", body.indexOf("return;", at)) + 1);
+    expect(branch).toContain("markRefreshRequired()");
+    expect(branch).toContain("return;");
+    // 성공 처리(revisions 갱신·guardedSaveVerified)보다 앞에서 끝난다
+    expect(at).toBeLessThan(body.indexOf("applySavedRevisions"));
+    expect(body).toMatch(/if \(dbConflict \|\| dbHold \|\| dbRefreshRequired\) return;/);
+  });
+
+  it("단건 write: 428 은 ACK 가 아니고, 이후 요청은 fetch 없이 바로 실패한다", () => {
+    const body = fnBody(storeSrc, "async function postAccountRow(");
+    expect(body).toMatch(/if \(dbRefreshRequired\) return \{ ok: false, error: REFRESH_REQUIRED_MESSAGE, status: 428 \};/);
+    expect(body.indexOf("if (dbRefreshRequired)")).toBeLessThan(body.indexOf("fetch("));
+    const at = body.indexOf("res.status === 428");
+    expect(at).toBeGreaterThan(-1);
+    expect(at).toBeLessThan(body.indexOf("applySavedRevisions"));
+    expect(body.slice(at, at + 200)).toContain("ok: false");
+  });
+
+  it("markRefreshRequired 는 안내만 하고 로컬 입력·revision 을 건드리지 않으며 재전송을 예약하지 않는다", () => {
+    const body = fnBody(storeSrc, "function markRefreshRequired(");
+    expect(body).toContain("dbError = REFRESH_REQUIRED_MESSAGE");
+    expect(body).toContain("notify()");
+    expect(body).not.toMatch(/memState\s*=|revisions\s*=|saveLocal\(|scheduleSave\(|enqueue|setTimeout|fetch\(/);
+    expect(storeSrc).toMatch(/REFRESH_REQUIRED_MESSAGE =\s*"저장되지 않았습니다:[^"]*새로고침/);
   });
 });
