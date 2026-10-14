@@ -4,6 +4,7 @@
 //   POST /api/kis/order/prepare   의도 생성 + 1회성 승인 토큰 발급 (주문하지 않는다)
 //   POST /api/kis/order/submit    승인 토큰 + 확인 echo 로 제출 (여기서만 주문이 나간다)
 //   GET  /api/kis/order/status    체결조회로 접수·체결 상태를 해소한다 (주문하지 않는다)
+//   POST /api/kis/order/resolve   응답 불명 의도의 수동 해소 — 증권사 조회 근거가 있을 때만 (주문하지 않는다)
 //
 // ── 통과해야 하는 문 (앞이 막히면 뒤를 실행하지 않는다) ─────────────────────
 //
@@ -25,10 +26,10 @@ import { inquireDailyCcld, placeCashBuyOrder, type FetchLike } from "./kis-order
 import { authorizeKisAccess, parseBrokerAccounts, type KisAccountEnv } from "./kis-account-read";
 import { kisApiQueryGate } from "./broker-connection";
 import { kstDateString } from "./snapshot";
-import { newApprovalToken, ORDER_POLICY, ledgerEligibility, type OrderIntent } from "./order-intent";
+import { isExecutionConfirmed, newApprovalToken, ORDER_POLICY, ledgerEligibility, type OrderIntent } from "./order-intent";
 import { SupabaseOrderStore, type OrderIntentStore } from "./order-store";
 import {
-  prepareOrder, reconcileOrder, submitOrder,
+  prepareOrder, reconcileOrder, resolveOrder, submitOrder,
   type BrokerPort, type ConfirmEcho, type OrderServiceDeps,
 } from "./order-service";
 import type { KisAccountCredentials } from "./kis-account-server";
@@ -70,12 +71,14 @@ export function publicIntent(i: OrderIntent) {
     lastInquiryAt: i.lastInquiryAt,
     ambiguous: i.ambiguous,
     // 주문번호로 연결되지 않은 후보만 있다 — 사용자 확인 전에는 체결로 다루지 않는다.
-    needsUserConfirmation: i.ambiguous && !i.orderNo,
+    needsUserConfirmation: (i.ambiguous && !i.orderNo) || i.orderNoSource === "user_linked",
     lastError: i.lastError,
     createdAt: i.createdAt,
     updatedAt: i.updatedAt,
     // 접수와 체결을 섞지 않는다: 체결 증거가 있을 때만 true
-    executionConfirmed: i.state === "filled" || i.state === "partially_filled",
+    // 증권사 주문 응답의 번호로 대응된 체결조회 증거가 있을 때만 true(수동 연결은 확정 아님)
+    executionConfirmed: isExecutionConfirmed(i),
+    orderNoSource: i.orderNoSource ?? (i.orderNo ? "broker_response" : null),
     ledgerEligible: ledgerEligibility(i).eligible,
   };
 }
@@ -84,6 +87,7 @@ export function publicIntent(i: OrderIntent) {
 
 interface Resolved {
   deps: OrderServiceDeps;
+  actor: string;
   ctx: { scope: { familyCode: string; profile: string }; accountInstanceId: string };
 }
 
@@ -152,8 +156,13 @@ async function resolve(
         fetchBuyingPower(cred, token, { ticker, unitPrice, ordDvsn: "00" }, "22"),
       place: (req) => placeCashBuyOrder(cred, token, req, fetchImpl),
       inquire: async (q) => {
-        const r = await inquireDailyCcld(cred, token, { ticker: q.ticker, date: q.date, orderNo: q.orderNo }, fetchImpl);
-        return { ok: r.ok, rows: r.rows, hasMore: r.hasMore, ...(r.ok ? {} : { error: r.msg1 ?? r.transportError ?? "조회 실패" }) };
+        const r = await inquireDailyCcld(cred, token, {
+          ticker: q.ticker, date: q.date, orderNo: q.orderNo, ...(q.endDate ? { endDate: q.endDate } : {}),
+        }, fetchImpl);
+        return {
+          ok: r.ok, rows: r.rows, hasMore: r.hasMore, complete: r.complete,
+          ...(r.ok ? {} : { error: r.msg1 ?? r.transportError ?? "조회 실패" }),
+        };
       },
     };
   }
@@ -165,6 +174,7 @@ async function resolve(
       newId: ov.newId ?? (() => crypto.randomUUID()),
       newToken: ov.newToken ?? newApprovalToken,
     },
+    actor: session.profile,
     ctx: {
       scope: { familyCode: session.code, profile: session.profile },
       accountInstanceId: gate.instance.id,
@@ -282,5 +292,57 @@ export async function handleOrderStatus(
       return json({ intent: publicIntent(res.intent), inquiryFailed: true, message: res.message });
     case "reconciled": return json({ intent: publicIntent(res.intent), verdict: res.verdict.kind });
     case "store_error": return json({ error: "store_error", message: res.message }, 503);
+  }
+}
+
+/**
+ * POST /api/kis/order/resolve  { intentId, action, orderNo?, note, confirmIntentId }
+ *
+ * 응답 불명 의도의 수동 해소. 서버가 **그 자리에서 체결조회**를 하고 근거가 맞을 때만 바꾼다.
+ * 근거가 부족하면 422 이고 아무 것도 쓰지 않는다. 주문·재주문·원장 기록이 없다.
+ */
+export async function handleOrderResolve(
+  request: Request, env: OrderEnv, ov: OrderHandlerOverrides = {}, registryOverride?: unknown,
+): Promise<Response> {
+  const r = await resolve(request, env, ov, registryOverride);
+  if (isResponse(r)) return r;
+
+  const body = (await request.json().catch(() => null)) as
+    | { intentId?: unknown; action?: unknown; orderNo?: unknown; note?: unknown; confirmIntentId?: unknown } | null;
+  if (!body || typeof body.intentId !== "string" || typeof body.action !== "string"
+      || typeof body.note !== "string" || typeof body.confirmIntentId !== "string") {
+    return json({ error: "intentId, action, note, confirmIntentId 가 필요합니다." }, 400);
+  }
+  const res = await resolveOrder(r.ctx, {
+    intentId: body.intentId,
+    action: body.action as "link_order_no" | "dismiss_not_found",
+    orderNo: typeof body.orderNo === "string" ? body.orderNo : null,
+    note: body.note,
+    confirmIntentId: body.confirmIntentId,
+    actor: r.actor,
+  }, r.deps);
+  switch (res.kind) {
+    case "disabled": return json({ error: "order_disabled" }, 403);
+    case "not_found": return json({ error: "not_found" }, 404);
+    case "bad_input": return json({ error: "bad_input", message: res.message }, 400);
+    case "not_resolvable":
+      return json({ error: "not_resolvable", message: res.reason, intent: publicIntent(res.intent) }, 409);
+    case "order_no_in_use":
+      return json({ error: "order_no_in_use", message: "그 주문번호는 다른 주문에 이미 연결돼 있습니다." }, 409);
+    case "inquiry_failed":
+      return json({ error: "inquiry_failed", message: res.message, intent: publicIntent(res.intent) }, 502);
+    case "insufficient_evidence":
+      return json({ error: "insufficient_evidence", message: res.reason, intent: publicIntent(res.intent) }, 422);
+    case "stale":
+      return json({ error: "stale", intent: res.intent ? publicIntent(res.intent) : null }, 409);
+    case "store_error": return json({ error: "store_error", message: res.message }, 503);
+    case "resolved":
+      return json({
+        intent: publicIntent(res.intent),
+        resolution: {
+          action: res.record.action, decidedAt: res.record.decidedAt, actor: res.record.actor,
+          prevState: res.record.prevState, newState: res.record.newState,
+        },
+      });
   }
 }

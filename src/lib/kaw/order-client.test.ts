@@ -9,7 +9,7 @@ vi.mock("./auth", () => ({ getSessionToken: () => "session-token" }));
 
 const {
   INITIAL_FLOW, ORDER_TARGET, describeOrder, flowReducer, isOrderUiEnabled, orderUiGate,
-  requestPrepare, requestStatus, requestSubmit, secondsLeft, verifyPrepared,
+  requestPrepare, requestResolve, requestStatus, requestSubmit, resolveInputError, secondsLeft, verifyPrepared,
 } = await import("./order-client");
 import type { ConfirmView, FlowState, IntentView } from "./order-client";
 
@@ -315,5 +315,77 @@ describe("secondsLeft", () => {
     expect(secondsLeft(exp, Date.parse("2026-10-14T05:01:30.200Z"))).toBe(30);
     expect(secondsLeft(exp, Date.parse("2026-10-14T05:03:00.000Z"))).toBe(0);
     expect(secondsLeft("bad", 0)).toBe(0);
+  });
+});
+
+// ── 수동 해소 (클라이언트) ──────────────────────────────────────────────────
+
+describe("수동 해소 — 표시·상태기계·요청", () => {
+  it("불명·전송 중(번호 없음)만 수동 해소를 보인다", () => {
+    expect(describeOrder(intent({ state: "unknown" })).canResolve).toBe(true);
+    expect(describeOrder(intent({ state: "submitting" })).canResolve).toBe(true);
+    expect(describeOrder(intent({ state: "unknown", ambiguous: true, needsUserConfirmation: true })).canResolve).toBe(true);
+    for (const st of ["proposed", "accepted", "open", "partially_filled", "filled", "rejected", "expired", "dismissed"] as const) {
+      expect(describeOrder(intent({ state: st, orderNo: st === "proposed" ? null : "1" })).canResolve).toBe(false);
+    }
+  });
+
+  it("dismissed 는 '미접수 정리'이고 체결이 아니며 새 준비만 열린다", () => {
+    const d = describeOrder(intent({ state: "dismissed" }));
+    expect(d).toMatchObject({ label: "미접수 정리", executionConfirmed: false, canPrepareAgain: true, canResolve: false });
+  });
+
+  it("**응답 유실 뒤 화면은 '승인 대기'가 아니라 '불명'이다**", () => {
+    const sending = flowReducer(toFinal(), { type: "begin_submit" });
+    const lost = flowReducer(sending, { type: "submit_lost", intent: null });
+    expect(lost.intent!.state).toBe("unknown");
+    expect(describeOrder(lost.intent!).label).toBe("불명");
+  });
+
+  it("resolved 는 결과 화면에서만 반영되고 lost 를 푼다", () => {
+    const sending = flowReducer(toFinal(), { type: "begin_submit" });
+    const lost = flowReducer(sending, { type: "submit_lost", intent: null });
+    const r = flowReducer(lost, { type: "resolved", intent: intent({ state: "dismissed" }) });
+    expect(r.lost).toBe(false);
+    expect(flowReducer(r, { type: "reset" }).phase).toBe("idle");
+    expect(flowReducer(INITIAL_FLOW, { type: "resolved", intent: intent({ state: "dismissed" }) })).toBe(INITIAL_FLOW);
+  });
+
+  it("입력 검증", () => {
+    expect(resolveInputError("link_order_no", "777", "증권사 앱 확인")).toBeNull();
+    expect(resolveInputError("link_order_no", "", "증권사 앱 확인")).not.toBeNull();
+    expect(resolveInputError("dismiss_not_found", "", "짧음")).not.toBeNull();
+    expect(resolveInputError("dismiss_not_found", "", "다음 날 앱에서 없음 확인")).toBeNull();
+  });
+
+  it("requestResolve: resolve 경로만 호출하고, 거절은 refused(상태 그대로)", async () => {
+    const f = vi.fn().mockResolvedValue(res({ error: "insufficient_evidence", message: "근거 부족", intent: intent({ state: "unknown" }) }, 422));
+    const r = await requestResolve({ intentId: "i1", action: "link_order_no", orderNo: "777", note: "앱에서 확인" }, f as unknown as typeof fetch);
+    expect(r).toMatchObject({ kind: "refused", code: "insufficient_evidence" });
+    expect(f).toHaveBeenCalledTimes(1);
+    const [url, init] = f.mock.calls[0];
+    expect(url).toBe("/api/kis/order/resolve");
+    expect(JSON.parse(init.body)).toEqual({ intentId: "i1", action: "link_order_no", orderNo: "777", note: "앱에서 확인", confirmIntentId: "i1" });
+  });
+
+  it("requestResolve: 네트워크 오류는 재시도하지 않는다", async () => {
+    const f = vi.fn().mockRejectedValue(new TypeError("x"));
+    const r = await requestResolve({ intentId: "i1", action: "dismiss_not_found", note: "앱에서 없음" }, f as unknown as typeof fetch);
+    expect(r.kind).toBe("unavailable");
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("mock API — 운영과 같은 계약, 가상 데이터", () => {
+  it("최종 승인 전에는 가상 주문이 0건이고, 응답 유실 뒤 재제출해도 1건이다", async () => {
+    const { createMockOrderApi } = await import("./order-mock-api");
+    const api = createMockOrderApi("timeout_unknown", { delayMs: 0 });
+    const p = await api.prepare();
+    expect(api.placedCount()).toBe(0);
+    if (p.kind !== "prepared") throw new Error(p.kind);
+    expect((await api.submit(p.intent.id, p.approvalToken, p.confirm)).kind).toBe("unknown");
+    expect((await api.submit(p.intent.id, p.approvalToken, p.confirm)).kind).toBe("already_processed");
+    expect(api.placedCount()).toBe(1);
+    expect((await api.prepare()).kind).toBe("existing");
   });
 });

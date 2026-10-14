@@ -22,7 +22,7 @@ import {
 } from "./lib/kaw/plan-server";
 import { handleHistoryMergePost } from "./lib/kaw/history-server";
 import { handleKisAccountGet } from "./lib/kaw/kis-account-read";
-import { handleOrderPrepare, handleOrderStatus, handleOrderSubmit } from "./lib/kaw/order-handlers";
+import { handleOrderPrepare, handleOrderStatus, handleOrderResolve, handleOrderSubmit } from "./lib/kaw/order-handlers";
 
 // Cloudflare Workers environment bindings
 export interface Env {
@@ -306,6 +306,7 @@ export default {
     if (pathname === "/api/kis/order/prepare" && request.method === "POST") return handleOrderPrepare(request, env);
     if (pathname === "/api/kis/order/submit" && request.method === "POST") return handleOrderSubmit(request, env);
     if (pathname === "/api/kis/order/status" && request.method === "GET") return handleOrderStatus(request, env);
+    if (pathname === "/api/kis/order/resolve" && request.method === "POST") return handleOrderResolve(request, env);
 
     // ── 일별 자산 스냅샷 읽기 (기간 성과용, 세션 토큰 필요) ─────────────────
     if (pathname === "/api/snapshots" && request.method === "GET") return handleSnapshotsGet(request, env);

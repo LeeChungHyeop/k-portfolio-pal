@@ -20,8 +20,10 @@ import { publicIntent } from "./order-handlers";
 import {
   prepareOrder,
   reconcileOrder,
+  resolveOrder,
   submitOrder,
   type BrokerPort,
+  type ResolveInput,
   type ConfirmEcho,
   type OrderContext,
   type OrderServiceDeps,
@@ -35,6 +37,8 @@ const kstHms = () => new Date(clockMsRef() + 9 * 3_600_000).toISOString().slice(
 
 interface BookedOrder {
   orderNo: string; ticker: string; qty: number; price: number; filled: number; cancelled: boolean; time: string;
+  /** 주문일 YYYYMMDD. 없으면 2026-10-14 */
+  date?: string;
 }
 
 class FakeBroker implements BrokerPort {
@@ -49,6 +53,10 @@ class FakeBroker implements BrokerPort {
   inquiryOk = true;
   /** 조회 응답에서 수량 필드를 지운다 */
   hideQty = false;
+  /** 조회 결과에 다음 페이지가 있다고 답한다 */
+  more = false;
+  /** 응답에 목록(output1)이 없었던 것처럼 답한다 */
+  noList = false;
 
   book: BookedOrder[] = [];
   calls = { quote: 0, buyingPower: 0, place: 0, inquire: 0 };
@@ -111,9 +119,9 @@ class FakeBroker implements BrokerPort {
         orderNo: o.orderNo, ticker: o.ticker,
         orderQty: this.hideQty ? null : o.qty, orderPrice: o.price, orderTime: o.time,
         filledQty: this.hideQty ? null : o.filled, avgPrice: o.filled > 0 ? o.price : null,
-        remainingQty: o.qty - o.filled, cancelled: o.cancelled, sideCode: "02",
+        remainingQty: o.qty - o.filled, cancelled: o.cancelled, sideCode: "02", orderDate: o.date ?? "20261014",
       }));
-    return { ok: true, rows, hasMore: false };
+    return { ok: true, rows, hasMore: this.more, complete: !this.more && !this.noList };
   }
 
   /** 거래소에서 체결이 일어난다(테스트가 직접 일으킨다). */
@@ -751,5 +759,288 @@ describe("의도는 가족·프로필 범위에 갇힌다", () => {
     expect((await submitOrder(other, {
       intentId: p.intent.id, approvalToken: p.approvalToken, confirm: echoOf(p.intent),
     }, deps)).kind).toBe("not_found");
+  });
+});
+
+// ── 수동 해소 ───────────────────────────────────────────────────────────────
+
+describe("수동 해소 — 증권사 조회 근거로만, 식별이 불충분하면 확정하지 않는다", () => {
+  const NOTE = "증권사 앱 주문내역에서 확인함";
+  async function lostOrder() {
+    broker.placeMode = "timeout";
+    const p = await propose(deps);
+    await submitOrder(CTX, { intentId: p.intent.id, approvalToken: p.approvalToken, confirm: echoOf(p.intent) }, deps);
+    clockMs += 5_000;
+    return p.intent.id;
+  }
+  const link = (id: string, orderNo: string, over: Partial<ResolveInput> = {}) =>
+    resolveOrder(CTX, { intentId: id, action: "link_order_no", orderNo, note: NOTE, confirmIntentId: id, actor: "hyeobi", ...over }, deps);
+  const dismiss = (id: string, over: Partial<ResolveInput> = {}) =>
+    resolveOrder(CTX, { intentId: id, action: "dismiss_not_found", note: NOTE, confirmIntentId: id, actor: "hyeobi", ...over }, deps);
+  const nextDay = () => { clockMs += 24 * 3_600_000; };
+  const limitOf = async (id: string) => (await store.getById(SCOPE, id))!.limitPrice;
+
+  it("flag OFF 면 disabled 이고 아무 것도 호출하지 않는다", async () => {
+    const id = await lostOrder();
+    const inq = broker.calls.inquire;
+    const r = await resolveOrder(CTX, { intentId: id, action: "dismiss_not_found", note: NOTE, confirmIntentId: id, actor: "x" },
+      makeDeps(store, broker, { enabled: false }));
+    expect(r.kind).toBe("disabled");
+    expect(broker.calls.inquire).toBe(inq);
+  });
+
+  // ── 1. 주문번호 연결 ──────────────────────────────────────────────────────
+
+  it("**주문 당일에는 연결하지 않는다** (늦게 조회되는 앱 주문이 있을 수 있다)", async () => {
+    const id = await lostOrder();
+    const r = await link(id, broker.book[0].orderNo);
+    expect(r.kind).toBe("insufficient_evidence");
+    expect((await store.getById(SCOPE, id))!.state).toBe("unknown");
+    expect(store.resolutions).toHaveLength(0);
+  });
+
+  it("다음 날, 조건이 같은 주문이 기간 전체에서 1건이고 그 번호면 연결한다 — **단 체결 확정·원장 근거는 아니다**", async () => {
+    const id = await lostOrder();
+    const orderNo = broker.book[0].orderNo;
+    broker.fill(orderNo, 1);
+    nextDay();
+    const r = await link(id, orderNo.replace(/^0+/, ""));
+    expect(r.kind).toBe("resolved");
+    if (r.kind !== "resolved") return;
+    expect(r.intent).toMatchObject({ state: "filled", orderNo, orderNoSource: "user_linked", ambiguous: true });
+    expect(r.intent.evidence).toMatchObject({ filledQty: 1, matchedBy: "user_linked" });
+    expect(ledgerEligibility(r.intent).eligible).toBe(false);
+    expect(publicIntent(r.intent)).toMatchObject({
+      executionConfirmed: false, ledgerEligible: false, needsUserConfirmation: true, orderNoSource: "user_linked",
+    });
+    expect(store.resolutions[0]).toMatchObject({
+      action: "link_order_no", actor: "hyeobi", note: NOTE, prevState: "unknown", newState: "filled",
+      evidence: { identification: "user_linked_not_confirmed", sameConditionRows: 1, complete: true },
+    });
+    expect(broker.calls.place).toBe(1);
+  });
+
+  it("연결 뒤 상태 조회를 해도 **응답 번호로 승격되지 않는다**(user_linked 유지)", async () => {
+    const id = await lostOrder();
+    const orderNo = broker.book[0].orderNo;
+    nextDay();
+    await link(id, orderNo);
+    broker.fill(orderNo, 1);
+    const r = await reconcileOrder(CTX, id, deps);
+    if (r.kind !== "reconciled") throw new Error(r.kind);
+    expect(r.intent.state).toBe("filled");
+    expect(r.intent.evidence!.matchedBy).toBe("user_linked");
+    expect(ledgerEligibility(r.intent).eligible).toBe(false);
+    expect(publicIntent(r.intent).executionConfirmed).toBe(false);
+  });
+
+  it("**같은 조건의 수동매매가 겹쳐 2건이면 어느 번호도 연결하지 않는다**", async () => {
+    const id = await lostOrder();
+    broker.book.push({ orderNo: "0000005555", ticker: "360750", qty: 1, price: await limitOf(id), filled: 1, cancelled: false, time: "140100" });
+    nextDay();
+    for (const n of [broker.book[0].orderNo, "5555"]) {
+      const r = await link(id, n);
+      expect(r.kind).toBe("insufficient_evidence");
+    }
+    expect((await store.getById(SCOPE, id))!.state).toBe("unknown");
+  });
+
+  it("**전송 이전 시각의 같은 조건 주문은 연결하지 않는다** (앱 주문이 아예 없던 경우)", async () => {
+    const id = await lostOrder();
+    broker.book = [{ orderNo: "0000004444", ticker: "360750", qty: 1, price: await limitOf(id), filled: 1, cancelled: false, time: "091500" }];
+    nextDay();
+    expect((await link(id, "4444")).kind).toBe("insufficient_evidence");
+  });
+
+  it("입력 번호가 조건이 같은 유일한 주문과 다르면 연결하지 않는다", async () => {
+    const id = await lostOrder();
+    broker.book.push({ orderNo: "0000006666", ticker: "360750", qty: 1, price: 25_000, filled: 1, cancelled: false, time: "140100" });
+    nextDay();
+    expect((await link(id, "6666")).kind).toBe("insufficient_evidence"); // 가격이 다른 수동매매
+  });
+
+  it("다음 날로 넘어간 주문(주문일 이후 날짜)은 기간 조회로 찾아 연결할 수 있다", async () => {
+    const id = await lostOrder();
+    broker.book[0].date = "20261015";
+    broker.book[0].time = "090000";
+    nextDay();
+    const r = await link(id, broker.book[0].orderNo);
+    expect(r.kind).toBe("resolved");
+  });
+
+  it("주문일을 알 수 없는 행은 연결 근거가 아니다", async () => {
+    const id = await lostOrder();
+    broker.book[0].date = "";
+    nextDay();
+    expect((await link(id, broker.book[0].orderNo)).kind).toBe("insufficient_evidence");
+  });
+
+  it("다른 의도에 이미 붙은 번호는 연결하지 않는다", async () => {
+    const p1 = await propose(deps);
+    await submitOrder(CTX, { intentId: p1.intent.id, approvalToken: p1.approvalToken, confirm: echoOf(p1.intent) }, deps);
+    const used = (await store.getById(SCOPE, p1.intent.id))!;
+    await store.insert({ ...used, id: "lost-2", idempotencyKey: "ord:other#1", state: "unknown", orderNo: null, orderNoSource: null, version: 0 });
+    expect((await link("lost-2", used.orderNo!)).kind).toBe("order_no_in_use");
+  });
+
+  // ── 2. 미접수 정리 ────────────────────────────────────────────────────────
+
+  it("미접수 정리는 **주문 당일에는 불가**", async () => {
+    const id = await lostOrder();
+    broker.book = [];
+    expect((await dismiss(id)).kind).toBe("insufficient_evidence");
+    expect((await store.getById(SCOPE, id))!.state).toBe("unknown");
+  });
+
+  it("**다음 날이라도 조건이 같은 주문이 조회되면 정리하지 않는다**", async () => {
+    const id = await lostOrder();
+    nextDay();
+    const r = await dismiss(id);
+    expect(r.kind).toBe("insufficient_evidence");
+  });
+
+  it("**취소된 같은 조건 주문도 '있음'으로 본다**(정리하지 않는다)", async () => {
+    const id = await lostOrder();
+    broker.book[0].cancelled = true;
+    nextDay();
+    expect((await dismiss(id)).kind).toBe("insufficient_evidence");
+  });
+
+  it("**다음 날로 넘어가 접수된 주문도 기간 조회로 잡아 정리하지 않는다**", async () => {
+    const id = await lostOrder();
+    broker.book[0].date = "20261015";
+    nextDay();
+    expect((await dismiss(id)).kind).toBe("insufficient_evidence");
+  });
+
+  it("조회 기간은 주문일~오늘이다", async () => {
+    const id = await lostOrder();
+    broker.book = [];
+    nextDay();
+    const seen: Array<{ date: string; endDate?: string; orderNo: string | null }> = [];
+    const orig = broker.inquire.bind(broker);
+    broker.inquire = async (q) => { seen.push(q); return orig(q); };
+    await dismiss(id);
+    expect(seen.at(-1)).toMatchObject({ date: "20261014", endDate: "20261015", orderNo: null });
+  });
+
+  it.each([
+    ["다음 페이지 신호", (b: FakeBroker) => { b.more = true; }],
+    ["목록(output1) 없음", (b: FakeBroker) => { b.noList = true; }],
+  ])("**%s 이면 0건이어도 정리하지 않는다** (모름 ≠ 없음)", async (_n, setup) => {
+    const id = await lostOrder();
+    broker.book = [];
+    setup(broker);
+    nextDay();
+    expect((await dismiss(id)).kind).toBe("insufficient_evidence");
+    expect((await store.getById(SCOPE, id))!.state).toBe("unknown");
+  });
+
+  it("수량을 읽지 못하는 같은 종목 행이 있으면 정리하지 않는다", async () => {
+    const id = await lostOrder();
+    broker.book = [{ orderNo: "0000003333", ticker: "360750", qty: 2, price: 1, filled: 0, cancelled: false, time: "100000" }];
+    broker.hideQty = true;
+    nextDay();
+    expect((await dismiss(id)).kind).toBe("insufficient_evidence");
+  });
+
+  it("체결조회 기간(90일)을 넘은 주문은 정리하지 않는다", async () => {
+    const id = await lostOrder();
+    broker.book = [];
+    clockMs += 100 * 24 * 3_600_000;
+    expect((await dismiss(id)).kind).toBe("insufficient_evidence");
+  });
+
+  it("완전한 조회에서 같은 조건 0건일 때만 dismissed + 감사 기록, 그 뒤에야 사용자가 다시 준비할 수 있다", async () => {
+    const id = await lostOrder();
+    broker.book = [];
+    nextDay();
+    const r = await dismiss(id);
+    expect(r.kind).toBe("resolved");
+    if (r.kind !== "resolved") return;
+    expect(r.intent).toMatchObject({ state: "dismissed", orderNo: null, evidence: null });
+    expect(ledgerEligibility(r.intent).eligible).toBe(false);
+    expect(store.resolutions[0]).toMatchObject({
+      action: "dismiss_not_found", prevState: "unknown", newState: "dismissed",
+      evidence: { complete: true, inquiryFrom: "2026-10-14", inquiryTo: "2026-10-15", sameConditionRows: 0 },
+    });
+    expect(broker.calls.place).toBe(1);
+    expect((await prepareOrder(CTX, { ticker: "360750", quantity: 1 }, deps)).kind).toBe("proposed");
+    expect(broker.calls.place).toBe(1);
+  });
+
+  it("조회 실패면 inquiry_failed 이고 아무 것도 쓰지 않는다", async () => {
+    const id = await lostOrder();
+    broker.inquiryOk = false;
+    nextDay();
+    expect((await dismiss(id)).kind).toBe("inquiry_failed");
+    expect(store.resolutions).toHaveLength(0);
+  });
+
+  // ── 공통 ──────────────────────────────────────────────────────────────────
+
+  it("해소 대상이 아닌 상태(접수됨)는 거절한다", async () => {
+    const p = await propose(deps);
+    await submitOrder(CTX, { intentId: p.intent.id, approvalToken: p.approvalToken, confirm: echoOf(p.intent) }, deps);
+    expect((await dismiss(p.intent.id)).kind).toBe("not_resolvable");
+  });
+
+  it("아직 전송 중일 수 있는 submitting 은 거절하고, 오래되면(다음 날) 허용한다", async () => {
+    const p = await propose(deps);
+    broker.onPlace = () => { store.failNextUpdate = true; };
+    await submitOrder(CTX, { intentId: p.intent.id, approvalToken: p.approvalToken, confirm: echoOf(p.intent) }, deps);
+    expect((await link(p.intent.id, broker.book[0].orderNo)).kind).toBe("not_resolvable");
+    nextDay();
+    const r = await link(p.intent.id, broker.book[0].orderNo);
+    expect(r.kind).toBe("resolved");
+    if (r.kind === "resolved") expect(store.resolutions[0].prevState).toBe("submitting");
+  });
+
+  it.each([
+    ["근거가 짧다", { note: "확인" }],
+    ["확인한 의도 id 가 다르다", { confirmIntentId: "other" }],
+    ["번호 형식 오류", { orderNo: "12a4" }],
+  ])("입력 오류(%s)는 조회하지 않고 거절한다", async (_n, over) => {
+    const id = await lostOrder();
+    const inq = broker.calls.inquire;
+    const r = await link(id, (over as { orderNo?: string }).orderNo ?? broker.book[0].orderNo, over as Partial<ResolveInput>);
+    expect(r.kind).toBe("bad_input");
+    expect(broker.calls.inquire).toBe(inq);
+  });
+
+  it("저장 실패면 store_error 이고 감사 행도 남지 않는다(원자성)", async () => {
+    const id = await lostOrder();
+    nextDay();
+    store.failNextUpdate = true;
+    expect((await link(id, broker.book[0].orderNo)).kind).toBe("store_error");
+    expect(store.resolutions).toHaveLength(0);
+    expect((await store.getById(SCOPE, id))!.state).toBe("unknown");
+  });
+
+  it("**동시 해소 요청은 하나만 반영된다**", async () => {
+    const id = await lostOrder();
+    nextDay();
+    const no = broker.book[0].orderNo;
+    const [a, b] = await Promise.all([link(id, no), link(id, no)]);
+    expect([a.kind, b.kind].sort()).toEqual(["resolved", "stale"]);
+    expect(store.resolutions).toHaveLength(1);
+  });
+
+  it("다른 프로필은 남의 의도를 해소할 수 없다", async () => {
+    const id = await lostOrder();
+    const other: OrderContext = { scope: { familyCode: "soye", profile: "dayoung" }, accountInstanceId: CTX.accountInstanceId };
+    const r = await resolveOrder(other, { intentId: id, action: "dismiss_not_found", note: NOTE, confirmIntentId: id, actor: "dayoung" }, deps);
+    expect(r.kind).toBe("not_found");
+  });
+
+  it("정상 접수 주문은 응답 번호 출처로 기록되고 체결 시 확정된다(비교 기준)", async () => {
+    const p = await propose(deps);
+    await submitOrder(CTX, { intentId: p.intent.id, approvalToken: p.approvalToken, confirm: echoOf(p.intent) }, deps);
+    broker.fill(broker.book[0].orderNo, 1);
+    const r = await reconcileOrder(CTX, p.intent.id, deps);
+    if (r.kind !== "reconciled") throw new Error(r.kind);
+    expect(r.intent.orderNoSource).toBe("broker_response");
+    expect(publicIntent(r.intent).executionConfirmed).toBe(true);
+    expect(ledgerEligibility(r.intent).eligible).toBe(true);
   });
 });

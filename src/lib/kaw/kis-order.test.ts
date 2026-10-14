@@ -106,3 +106,49 @@ describe("inquireDailyCcld", () => {
     expect(f).not.toHaveBeenCalled();
   });
 });
+
+describe("inquireDailyCcld — '전부 봤다'의 조건", () => {
+  const replyH = (body: unknown, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status: 200, headers });
+  const Q = { ticker: "360750", date: "20261014", endDate: "20261015" };
+
+  it("기간 조회: 종료일을 따로 보낸다", async () => {
+    const f = vi.fn<FetchLike>(async () => replyH({ rt_cd: "0", output1: [] }));
+    const r = await inquireDailyCcld(CRED, "tok", Q, f);
+    const q = new URL(f.mock.calls[0][0]).searchParams;
+    expect([q.get("INQR_STRT_DT"), q.get("INQR_END_DT"), q.get("ODNO")]).toEqual(["20261014", "20261015", ""]);
+    expect(r).toMatchObject({ ok: true, listPresent: true, hasMore: false, complete: true });
+  });
+
+  it("**응답 헤더 tr_cont=M/F 는 다음 페이지가 있다는 뜻이라 complete 가 아니다**", async () => {
+    for (const h of ["M", "F"]) {
+      const f = vi.fn<FetchLike>(async () => replyH({ rt_cd: "0", output1: [] }, { tr_cont: h }));
+      const r = await inquireDailyCcld(CRED, "tok", Q, f);
+      expect(r).toMatchObject({ hasMore: true, complete: false });
+    }
+  });
+
+  it("**output1 이 없으면 0건이 아니라 '모름'이다**", async () => {
+    const f = vi.fn<FetchLike>(async () => replyH({ rt_cd: "0", output: [] }));
+    const r = await inquireDailyCcld(CRED, "tok", Q, f);
+    expect(r).toMatchObject({ ok: true, listPresent: false, complete: false });
+  });
+
+  it("한 페이지 한도(100행)에 닿으면 complete 가 아니다", async () => {
+    const rows = Array.from({ length: 100 }, (_, n) => ({ odno: String(n + 1), pdno: "360750" }));
+    const f = vi.fn<FetchLike>(async () => replyH({ rt_cd: "0", output1: rows }));
+    expect((await inquireDailyCcld(CRED, "tok", Q, f)).complete).toBe(false);
+  });
+
+  it("주문일(ord_dt)을 행에 옮긴다", async () => {
+    const f = vi.fn<FetchLike>(async () => replyH({ rt_cd: "0", output1: [{ odno: "1", pdno: "360750", ord_dt: "20261014" }] }));
+    expect((await inquireDailyCcld(CRED, "tok", Q, f)).rows[0].orderDate).toBe("20261014");
+  });
+
+  it("종료일이 시작일보다 앞서면 호출하지 않는다", async () => {
+    const f = vi.fn<FetchLike>();
+    const r = await inquireDailyCcld(CRED, "tok", { ...Q, endDate: "20261013" }, f);
+    expect(r.ok).toBe(false);
+    expect(f).not.toHaveBeenCalled();
+  });
+});

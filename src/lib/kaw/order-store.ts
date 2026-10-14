@@ -11,14 +11,17 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { OrderIntent, OrderScope, OrderState } from "./order-intent";
+import {
+  RESOLVABLE_STATES,
+  type OrderIntent, type OrderResolutionRecord, type OrderScope, type OrderState,
+} from "./order-intent";
 
 /** 변경 가능한 필드. 종목·수량·단가·방향·계좌는 **생성 후 바꿀 수 없다**. */
 export type OrderIntentPatch = Partial<
   Pick<
     OrderIntent,
     | "state" | "approvalTokenHash" | "approvalExpiresAt" | "approvalConsumedAt"
-    | "submitStartedAt" | "orderNo" | "orderOrgNo" | "orderTime"
+    | "submitStartedAt" | "orderNo" | "orderNoSource" | "orderOrgNo" | "orderTime"
     | "evidence" | "lastInquiryAt" | "ambiguous" | "lastError"
   >
 >;
@@ -40,6 +43,16 @@ export interface OrderIntentStore {
   listOpen(scope: OrderScope): Promise<OrderIntent[]>;
   /** version 이 일치할 때만 갱신한다. 성공하면 version 이 +1 된 의도를 돌려준다 */
   update(scope: OrderScope, id: string, expectedVersion: number, patch: OrderIntentPatch, now: string): Promise<StoreUpdateResult>;
+  /** 같은 범위에서 이 주문번호가 붙은 의도(있으면) */
+  findByOrderNo(scope: OrderScope, orderNo: string): Promise<OrderIntent | null>;
+  /**
+   * 수동 해소: **의도 CAS 갱신 + 감사 행 삽입을 한 트랜잭션으로.** 둘 중 하나만 반영되는
+   * 일이 없다. 해소 가능한 상태(unknown/submitting)가 아니면 쓰지 않는다(stale).
+   */
+  resolve(
+    scope: OrderScope, id: string, expectedVersion: number, patch: OrderIntentPatch,
+    record: OrderResolutionRecord, now: string,
+  ): Promise<StoreUpdateResult>;
 }
 
 const NON_TERMINAL: readonly OrderState[] = [
@@ -108,6 +121,43 @@ export class InMemoryOrderStore implements OrderIntentStore {
     return { ok: true, intent: structuredClone(next) };
   }
 
+  /** 감사 행(수동 해소). 테스트가 확인한다 */
+  readonly resolutions: OrderResolutionRecord[] = [];
+
+  async findByOrderNo(scope: OrderScope, orderNo: string): Promise<OrderIntent | null> {
+    for (const r of this.rows.values()) {
+      if (sameScope(r.scope, scope) && r.orderNo === orderNo) return structuredClone(r);
+    }
+    return null;
+  }
+
+  async resolve(
+    scope: OrderScope, id: string, expectedVersion: number, patch: OrderIntentPatch,
+    record: OrderResolutionRecord, now: string,
+  ): Promise<StoreUpdateResult> {
+    if (this.failNextUpdate) {
+      this.failNextUpdate = false;
+      return { ok: false, reason: "error", message: "주입된 저장 실패" };
+    }
+    const cur = this.rows.get(this.k(scope, id));
+    if (!cur) return { ok: false, reason: "not_found" };
+    if (cur.version !== expectedVersion || !RESOLVABLE_STATES.includes(cur.state)) {
+      return { ok: false, reason: "stale" };
+    }
+    if (patch.orderNo) {
+      for (const r of this.rows.values()) {
+        if (r.id !== id && sameScope(r.scope, scope) && r.orderNo === patch.orderNo) {
+          return { ok: false, reason: "error", message: "같은 주문번호가 다른 의도에 붙어 있습니다" };
+        }
+      }
+    }
+    // 의도 갱신과 감사 행이 함께 반영된다(한쪽만 남지 않는다).
+    const next: OrderIntent = { ...cur, ...structuredClone(patch), version: cur.version + 1, updatedAt: now };
+    this.rows.set(this.k(scope, id), next);
+    this.resolutions.push(structuredClone(record));
+    return { ok: true, intent: structuredClone(next) };
+  }
+
   /** 테스트가 저장된 행을 직접 본다(동결 필드 확인용). */
   peek(scope: OrderScope, id: string): OrderIntent | undefined {
     const r = this.rows.get(this.k(scope, id));
@@ -125,6 +175,8 @@ interface Row {
   state: OrderState; state_version: number;
   approval_token_hash: string; approval_expires_at: string; approval_consumed_at: string | null;
   submit_started_at: string | null; order_no: string | null; order_org_no: string | null; order_time: string | null;
+  /** migration 009 컬럼. 008 만 적용된 DB 에는 없다 */
+  order_no_source?: string | null;
   evidence: OrderIntent["evidence"]; last_inquiry_at: string | null; ambiguous: boolean;
   last_error: string | null; policy_version: number; created_at: string; updated_at: string;
 }
@@ -142,6 +194,8 @@ const toRow = (i: OrderIntent): Row => ({
   order_time: i.orderTime, evidence: i.evidence, last_inquiry_at: i.lastInquiryAt,
   ambiguous: i.ambiguous, last_error: i.lastError, policy_version: i.policyVersion,
   created_at: i.createdAt, updated_at: i.updatedAt,
+  // 값이 있을 때만 싣는다(의도 생성 시점에는 항상 null 이다).
+  ...(i.orderNoSource ? { order_no_source: i.orderNoSource } : {}),
 });
 
 const fromRow = (r: Row): OrderIntent => ({
@@ -154,6 +208,8 @@ const fromRow = (r: Row): OrderIntent => ({
   approvalTokenHash: r.approval_token_hash, approvalExpiresAt: r.approval_expires_at,
   approvalConsumedAt: r.approval_consumed_at,
   submitStartedAt: r.submit_started_at, orderNo: r.order_no, orderOrgNo: r.order_org_no,
+  orderNoSource: r.order_no_source === "user_linked" ? "user_linked"
+    : r.order_no_source === "broker_response" ? "broker_response" : null,
   orderTime: r.order_time, evidence: r.evidence, lastInquiryAt: r.last_inquiry_at,
   ambiguous: r.ambiguous, lastError: r.last_error,
   createdAt: r.created_at, updatedAt: r.updated_at, policyVersion: r.policy_version,
@@ -162,7 +218,7 @@ const fromRow = (r: Row): OrderIntent => ({
 const PATCH_COLUMNS: Record<keyof OrderIntentPatch, string> = {
   state: "state", approvalTokenHash: "approval_token_hash", approvalExpiresAt: "approval_expires_at",
   approvalConsumedAt: "approval_consumed_at", submitStartedAt: "submit_started_at",
-  orderNo: "order_no", orderOrgNo: "order_org_no", orderTime: "order_time", evidence: "evidence",
+  orderNo: "order_no", orderNoSource: "order_no_source", orderOrgNo: "order_org_no", orderTime: "order_time", evidence: "evidence",
   lastInquiryAt: "last_inquiry_at", ambiguous: "ambiguous", lastError: "last_error",
 };
 
@@ -229,5 +285,54 @@ export class SupabaseOrderStore implements OrderIntentStore {
       return cur ? { ok: false, reason: "stale" } : { ok: false, reason: "not_found" };
     }
     return { ok: true, intent: fromRow(rows[0]) };
+  }
+
+  async findByOrderNo(scope: OrderScope, orderNo: string): Promise<OrderIntent | null> {
+    const { data, error } = await this.client.from(SupabaseOrderStore.TABLE).select("*")
+      .eq("family_code", scope.familyCode).eq("profile", scope.profile).eq("order_no", orderNo)
+      .maybeSingle();
+    if (error || !data) return null;
+    return fromRow(data as Row);
+  }
+
+  /**
+   * migration 009 의 `kaw_order_resolve` 한 번 호출 = 한 트랜잭션(의도 CAS + 감사 행).
+   * 함수가 없으면(009 미적용) **쓰지 않고** unavailable 이다 — 두 번의 호출로 나눠
+   * 흉내내지 않는다(한쪽만 반영될 수 있으므로).
+   */
+  async resolve(
+    scope: OrderScope, id: string, expectedVersion: number, patch: OrderIntentPatch,
+    record: OrderResolutionRecord, _now: string,
+  ): Promise<StoreUpdateResult> {
+    const p: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) {
+      const col = PATCH_COLUMNS[k as keyof OrderIntentPatch];
+      if (col) p[col] = v;
+    }
+    const { data, error } = await this.client.rpc("kaw_order_resolve", {
+      p_family_code: scope.familyCode,
+      p_profile: scope.profile,
+      p_intent_id: id,
+      p_expected_version: expectedVersion,
+      p_patch: p,
+      p_resolution: {
+        id: record.id, action: record.action, actor: record.actor, note: record.note,
+        prev_state: record.prevState, new_state: record.newState, prev_version: record.prevVersion,
+        evidence: record.evidence, decided_at: record.decidedAt,
+      },
+    });
+    if (error) {
+      const code = errCode(error);
+      if (code === "42883" || code === "PGRST202") {
+        return { ok: false, reason: "unavailable", message: "migration 009 미적용" };
+      }
+      if (code === "23505") return { ok: false, reason: "error", message: "같은 주문번호가 다른 의도에 붙어 있습니다" };
+      return { ok: false, reason: "error", message: error.message };
+    }
+    const r = (data ?? {}) as { status?: string; row?: Row };
+    if (r.status === "ok" && r.row) return { ok: true, intent: fromRow(r.row) };
+    if (r.status === "not_found") return { ok: false, reason: "not_found" };
+    if (r.status === "stale") return { ok: false, reason: "stale" };
+    return { ok: false, reason: "error", message: "해소 결과를 해석할 수 없습니다" };
   }
 }

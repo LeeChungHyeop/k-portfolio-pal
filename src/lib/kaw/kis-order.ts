@@ -16,7 +16,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { parseKisNumber, redactKisSecrets, type KisAccountCredentials } from "./kis-account-server";
-import type { ExecutionRow, PlaceResponse } from "./order-intent";
+import { CCLD_PAGE_ROWS, type ExecutionRow, type PlaceResponse } from "./order-intent";
 
 const KIS_BASE = "https://openapi.koreainvestment.com:9443";
 
@@ -31,6 +31,8 @@ export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
 interface Raw {
   httpStatus: number;
+  /** 응답 헤더 tr_cont (M/F = 다음 페이지 있음) */
+  trCont?: string | null;
   body: Record<string, unknown> | null;
   transportError?: string;
   timedOut?: boolean;
@@ -55,7 +57,8 @@ async function send(
     } catch {
       unparseable = true;
     }
-    return { httpStatus: res.status, body, ...(unparseable ? { unparseable } : {}) };
+    const trCont = res.headers?.get?.("tr_cont") ?? null;
+    return { httpStatus: res.status, body, trCont, ...(unparseable ? { unparseable } : {}) };
   } catch (e) {
     const aborted = (e as Error)?.name === "AbortError";
     return {
@@ -157,6 +160,8 @@ export interface DailyCcldQuery {
   date: string;
   /** 알면 주문번호로 좁힌다. 모르면(응답 유실) 빈 값 */
   orderNo?: string | null;
+  /** 조회 종료일 YYYYMMDD. 없으면 date 하루만 */
+  endDate?: string;
 }
 
 export interface DailyCcldResult {
@@ -167,6 +172,13 @@ export interface DailyCcldResult {
   rows: ExecutionRow[];
   /** 다음 페이지가 있다는 신호. 이 단계는 첫 페이지만 본다 */
   hasMore: boolean;
+  /** 응답에 행 목록(output1)이 **배열로** 있었는가. 없으면 "0건"이 아니라 "모름"이다 */
+  listPresent: boolean;
+  /**
+   * 이 조회가 그 기간의 주문을 **전부** 보여줬다고 볼 수 있는가: 성공 + 목록 존재 + 다음 페이지
+   * 신호 없음(tr_cont M/F 아님, ctx_area_nk100 비어 있음) + 한 페이지 한도 미만. 아니면 false.
+   */
+  complete: boolean;
   transportError?: string;
 }
 
@@ -184,14 +196,15 @@ export async function inquireDailyCcld(
   fetchImpl: FetchLike,
   timeoutMs: number = ORDER_TIMEOUT_MS,
 ): Promise<DailyCcldResult> {
-  if (!/^[A-Z0-9]{6}$/.test(q.ticker) || !/^\d{8}$/.test(q.date)) {
-    return { ok: false, httpStatus: 0, rows: [], hasMore: false, transportError: "조회 조건 형식 오류" };
+  const end = q.endDate ?? q.date;
+  if (!/^[A-Z0-9]{6}$/.test(q.ticker) || !/^\d{8}$/.test(q.date) || !/^\d{8}$/.test(end) || end < q.date) {
+    return { ok: false, httpStatus: 0, rows: [], hasMore: false, listPresent: false, complete: false, transportError: "조회 조건 형식 오류" };
   }
   const params = new URLSearchParams({
     CANO: cred.cano,
     ACNT_PRDT_CD: "22",
     INQR_STRT_DT: q.date,
-    INQR_END_DT: q.date,
+    INQR_END_DT: end,
     SLL_BUY_DVSN_CD: "02",
     PDNO: q.ticker,
     CCLD_DVSN: "00",
@@ -216,7 +229,8 @@ export async function inquireDailyCcld(
   const body = raw.body ?? {};
   const rtCd = typeof body.rt_cd === "string" ? body.rt_cd : undefined;
   const ok = raw.httpStatus >= 200 && raw.httpStatus < 300 && rtCd === "0";
-  const list = ok && Array.isArray(body.output1) ? body.output1 : [];
+  const listPresent = ok && Array.isArray(body.output1);
+  const list = listPresent ? (body.output1 as unknown[]) : [];
   const s = (r: Record<string, unknown>, k: string) =>
     typeof r[k] === "string" && (r[k] as string).trim() !== "" ? (r[k] as string).trim() : null;
 
@@ -236,15 +250,21 @@ export async function inquireDailyCcld(
       remainingQty: parseKisNumber(r.rmn_qty),
       cancelled: r.cncl_yn === "Y" ? true : r.cncl_yn === "N" ? false : null,
       sideCode: s(r, "sll_buy_dvsn_cd"),
+      orderDate: s(r, "ord_dt"),
     }));
 
+  const trCont = (raw.trCont ?? "").trim().toUpperCase();
+  const hasMore = trCont === "M" || trCont === "F"
+    || (body.ctx_area_nk100 !== undefined && String(body.ctx_area_nk100).trim() !== "");
   return {
     ok,
     httpStatus: raw.httpStatus,
     ...(rtCd !== undefined ? { rtCd } : {}),
     ...(typeof body.msg1 === "string" ? { msg1: redactKisSecrets(body.msg1, secrets).slice(0, 120) } : {}),
     rows,
-    hasMore: body.ctx_area_nk100 !== undefined && String(body.ctx_area_nk100).trim() !== "",
+    hasMore,
+    listPresent,
+    complete: ok && listPresent && !hasMore && rows.length < CCLD_PAGE_ROWS,
     ...(raw.transportError ? { transportError: raw.transportError } : {}),
   };
 }

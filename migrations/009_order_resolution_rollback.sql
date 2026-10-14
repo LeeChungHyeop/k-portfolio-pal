@@ -1,0 +1,23 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 009 되돌리기 — 수동 해소 함수·감사 이력 제거, 'dismissed' 상태 제거
+--
+-- **감사 이력을 지운다.** 수동 해소가 한 번이라도 있었다면 먼저 백업한다.
+--
+-- 1단계: 주문 기능을 끈다(KIS_ORDER_ENABLED 를 지우고 배포).
+-- 2단계: dismissed 의도가 있는지 본다 — 있으면 상태 CHECK 를 되돌릴 수 없다.
+--   select count(*) from public.kaw_order_intent where state = 'dismissed';
+-- 3단계: 백업
+--   select json_agg(t) from public.kaw_order_resolution t;
+-- 4단계: 아래 주석을 풀고 실행한다(실수로 통째 실행되는 것을 막기 위해 주석 처리).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- drop function if exists public.kaw_order_resolve(text, text, text, integer, jsonb, jsonb);
+-- drop table if exists public.kaw_order_resolution;
+-- alter table public.kaw_order_intent drop constraint if exists kaw_order_intent_dismissed_chk;
+-- alter table public.kaw_order_intent drop constraint if exists kaw_order_intent_order_no_source_chk;
+-- alter table public.kaw_order_intent drop column if exists order_no_source;
+-- alter table public.kaw_order_intent drop constraint if exists kaw_order_intent_state_chk;
+-- alter table public.kaw_order_intent add constraint kaw_order_intent_state_chk check (state in (
+--   'proposed','submitting','accepted','rejected','unknown',
+--   'open','partially_filled','filled','cancelled','expired'
+-- ));

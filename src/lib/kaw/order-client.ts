@@ -51,7 +51,7 @@ export function orderUiGate(
 
 export type IntentState =
   | "proposed" | "submitting" | "accepted" | "rejected" | "unknown"
-  | "open" | "partially_filled" | "filled" | "cancelled" | "expired";
+  | "open" | "partially_filled" | "filled" | "cancelled" | "expired" | "dismissed";
 
 export interface IntentView {
   id: string;
@@ -68,6 +68,8 @@ export interface IntentView {
   orderTime: string | null;
   approvalExpiresAt: string;
   evidence: { filledQty: number; avgPrice: number | null; matchedBy: string } | null;
+  /** 주문번호 출처: 증권사 응답 / 사용자 수동 연결 */
+  orderNoSource?: "broker_response" | "user_linked" | null;
   lastInquiryAt: string | null;
   ambiguous: boolean;
   lastError: string | null;
@@ -259,6 +261,81 @@ export async function requestStatus(intentId: string, fetchImpl: Fetch = fetch):
   return { kind: "unavailable", message: `상태를 조회하지 못했습니다 (HTTP ${res.status}).` };
 }
 
+export type ResolveAction = "link_order_no" | "dismiss_not_found";
+
+export interface ResolveRequest {
+  intentId: string;
+  action: ResolveAction;
+  orderNo?: string;
+  note: string;
+}
+
+export type ResolveOutcome =
+  | { kind: "resolved"; intent: IntentView }
+  /** 서버가 근거 부족 등으로 거절했다 — **상태는 그대로다** */
+  | { kind: "refused"; code: string; message: string; intent: IntentView | null }
+  | { kind: "disabled" }
+  | { kind: "denied" }
+  | { kind: "unauthenticated" }
+  | { kind: "unavailable"; message: string };
+
+/**
+ * 수동 해소 요청. 서버가 그 자리에서 증권사 체결조회를 하고 근거가 맞을 때만 바꾼다.
+ * **주문을 보내지 않는다.** 재시도하지 않는다.
+ */
+export async function requestResolve(req: ResolveRequest, fetchImpl: Fetch = fetch): Promise<ResolveOutcome> {
+  const token = getSessionToken();
+  if (!token) return { kind: "unauthenticated" };
+  let res: Response;
+  try {
+    res = await fetchImpl("/api/kis/order/resolve", {
+      method: "POST",
+      headers: authHeaders(token),
+      body: JSON.stringify({
+        intentId: req.intentId, action: req.action, orderNo: req.orderNo ?? null,
+        note: req.note, confirmIntentId: req.intentId,
+      }),
+    });
+  } catch {
+    return { kind: "unavailable", message: "서버에 연결하지 못했습니다. 상태 조회로 결과를 확인하세요." };
+  }
+  const body = await readJson(res);
+  if (res.status === 401) return { kind: "unauthenticated" };
+  if (res.status === 403) return body?.error === "order_disabled" ? { kind: "disabled" } : { kind: "denied" };
+  if (res.ok && body?.intent) return { kind: "resolved", intent: body.intent as IntentView };
+  if (typeof body?.error === "string") {
+    return {
+      kind: "refused", code: body.error,
+      message: typeof body.message === "string" ? body.message : "해소하지 못했습니다.",
+      intent: (body.intent as IntentView | undefined) ?? null,
+    };
+  }
+  return { kind: "unavailable", message: `서버가 응답하지 못했습니다 (HTTP ${res.status}).` };
+}
+
+/** 화면이 쓰는 요청 묶음. 운영은 `LIVE_ORDER_API`, mock 화면은 가짜 구현을 넣는다. */
+export interface OrderApi {
+  prepare(): Promise<PrepareOutcome>;
+  submit(intentId: string, approvalToken: string, confirm: ConfirmView): Promise<SubmitOutcome>;
+  status(intentId: string): Promise<StatusOutcome>;
+  resolve(req: ResolveRequest): Promise<ResolveOutcome>;
+}
+
+export const LIVE_ORDER_API: OrderApi = {
+  prepare: () => requestPrepare(),
+  submit: (id, token, confirm) => requestSubmit(id, token, confirm),
+  status: (id) => requestStatus(id),
+  resolve: (req) => requestResolve(req),
+};
+
+/** 수동 해소 입력 검증(서버가 한 번 더 한다). 문제가 없으면 null */
+export function resolveInputError(action: ResolveAction, orderNo: string, note: string): string | null {
+  const n = note.trim();
+  if (n.length < 5 || n.length > 500) return "근거를 5~500자로 적어 주세요.";
+  if (action === "link_order_no" && !/^\d{1,10}$/.test(orderNo.trim())) return "주문번호는 숫자 1~10자리입니다.";
+  return null;
+}
+
 // ── 상태 표시 모델 ──────────────────────────────────────────────────────────
 
 export type Tone = "neutral" | "info" | "warn" | "danger" | "success";
@@ -274,11 +351,30 @@ export interface OrderDisplay {
   canPrepareAgain: boolean;
   /** 상태 조회 버튼을 보일 상태인가 */
   canInquire: boolean;
+  /** 수동 해소를 보일 상태인가 — 응답 불명·전송 중 멈춤이고 주문번호가 없을 때만 */
+  canResolve: boolean;
 }
 
 const won = (n: number) => `${n.toLocaleString("ko-KR")}원`;
 
 export function describeOrder(i: IntentView): OrderDisplay {
+  const d = describeByState(i);
+  if (i.orderNoSource !== "user_linked") return d;
+  // 수동 연결: 증권사 기록상 상태는 보여주되, 앱 주문으로 **확정하지 않는다**.
+  return {
+    ...d,
+    label: `${d.label} · 수동 연결`,
+    tone: "warn",
+    headline: i.state === "filled" || i.state === "partially_filled"
+      ? `연결한 주문번호의 조회상 체결 수량은 ${i.evidence?.filledQty ?? 0}주입니다(확정 아님).`
+      : d.headline,
+    detail: "주문번호를 사용자가 연결했습니다. 앱이 보낸 주문인지 증권사 기록만으로는 구별되지 않아 "
+      + "체결 확정·원장 기록 근거로 쓰지 않습니다.",
+    executionConfirmed: false,
+  };
+}
+
+function describeByState(i: IntentView): OrderDisplay {
   const filled = i.evidence?.filledQty ?? 0;
   // 서버가 말한 값만 믿는다 — 접수·불명을 체결로 올리지 않는다.
   const confirmed = i.executionConfirmed === true && i.evidence !== null;
@@ -286,41 +382,46 @@ export function describeOrder(i: IntentView): OrderDisplay {
     case "proposed":
       return { label: "승인 대기", tone: "info", headline: "아직 주문하지 않았습니다.",
         detail: "승인 기한 안에 최종 승인해야 주문이 전송됩니다.",
-        executionConfirmed: false, canPrepareAgain: false, canInquire: false };
+        executionConfirmed: false, canPrepareAgain: false, canInquire: false, canResolve: false };
     case "submitting":
       return { label: "전송 중", tone: "warn", headline: "주문을 전송했거나 전송 중입니다.",
         detail: "응답을 확인하는 중입니다. 다시 주문하지 말고 상태를 조회하세요.",
-        executionConfirmed: false, canPrepareAgain: false, canInquire: true };
+        executionConfirmed: false, canPrepareAgain: false, canInquire: true, canResolve: !i.orderNo };
     case "accepted":
       return { label: "접수", tone: "info", headline: "증권사가 주문을 접수했습니다. 체결된 것은 아닙니다.",
         detail: "체결 여부는 상태 조회로 확인합니다.",
-        executionConfirmed: false, canPrepareAgain: false, canInquire: true };
+        executionConfirmed: false, canPrepareAgain: false, canInquire: true, canResolve: false };
     case "open":
       return { label: "미체결", tone: "info", headline: "접수됐고 아직 체결되지 않았습니다.",
         detail: "체결조회에서 주문번호로 확인된 상태입니다.",
-        executionConfirmed: false, canPrepareAgain: false, canInquire: true };
+        executionConfirmed: false, canPrepareAgain: false, canInquire: true, canResolve: false };
     case "partially_filled":
       return { label: "부분체결", tone: "warn",
         headline: `${i.quantity}주 중 ${filled}주가 체결됐습니다.`,
         detail: "나머지는 아직 체결되지 않았습니다.",
-        executionConfirmed: confirmed, canPrepareAgain: false, canInquire: true };
+        executionConfirmed: confirmed, canPrepareAgain: false, canInquire: true, canResolve: false };
     case "filled":
       return { label: "체결", tone: "success",
         headline: `${filled || i.quantity}주 체결이 확인됐습니다.`,
         detail: i.evidence?.avgPrice ? `체결 평균가 ${won(i.evidence.avgPrice)}` : "체결조회로 확인됐습니다.",
-        executionConfirmed: confirmed, canPrepareAgain: false, canInquire: false };
+        executionConfirmed: confirmed, canPrepareAgain: false, canInquire: false, canResolve: false };
     case "rejected":
       return { label: "거부", tone: "danger", headline: "증권사가 주문을 거부했습니다.",
         detail: i.lastError ?? "주문은 나가지 않았습니다.",
-        executionConfirmed: false, canPrepareAgain: true, canInquire: false };
+        executionConfirmed: false, canPrepareAgain: true, canInquire: false, canResolve: false };
     case "cancelled":
       return { label: "취소됨", tone: "neutral", headline: "주문이 취소된 것으로 조회됩니다.",
         detail: filled > 0 ? `취소 전 ${filled}주가 체결됐습니다.` : "체결된 수량이 없습니다.",
-        executionConfirmed: confirmed, canPrepareAgain: true, canInquire: false };
+        executionConfirmed: confirmed, canPrepareAgain: true, canInquire: false, canResolve: false };
+    case "dismissed":
+      return { label: "미접수 정리", tone: "neutral",
+        headline: "증권사 조회에서 이 주문이 없어 미접수로 정리됐습니다.",
+        detail: "장 마감 후 체결조회 근거로 수동 정리했습니다. 체결된 수량은 없습니다.",
+        executionConfirmed: false, canPrepareAgain: true, canInquire: false, canResolve: false };
     case "expired":
       return { label: "만료", tone: "neutral", headline: "승인 기한이 지나 주문이 만들어지지 않았습니다.",
         detail: "주문은 전송되지 않았습니다.",
-        executionConfirmed: false, canPrepareAgain: true, canInquire: false };
+        executionConfirmed: false, canPrepareAgain: true, canInquire: false, canResolve: false };
     case "unknown":
     default:
       if (i.needsUserConfirmation || (i.ambiguous && !i.orderNo)) {
@@ -328,12 +429,12 @@ export function describeOrder(i: IntentView): OrderDisplay {
           headline: "주문 접수 여부를 확정하지 못했습니다.",
           detail: "조건이 같은 체결 후보가 있으나 직접 매매일 수 있어 이 주문의 체결로 확정하지 않습니다. "
             + "증권사 앱에서 확인하세요. 다시 주문하지 마세요.",
-          executionConfirmed: false, canPrepareAgain: false, canInquire: true };
+          executionConfirmed: false, canPrepareAgain: false, canInquire: true, canResolve: !i.orderNo };
       }
       return { label: "불명", tone: "danger",
         headline: "주문이 접수됐는지 알 수 없습니다.",
         detail: "다시 주문하지 말고 상태를 조회하거나 증권사 앱에서 확인하세요.",
-        executionConfirmed: false, canPrepareAgain: false, canInquire: true };
+        executionConfirmed: false, canPrepareAgain: false, canInquire: true, canResolve: !i.orderNo };
   }
 }
 
@@ -368,6 +469,8 @@ export type FlowEvent =
   | { type: "not_sent"; message: string }
   | { type: "expired" }
   | { type: "status"; intent: IntentView }
+  /** 수동 해소 결과(서버가 증권사 근거로 바꾼 의도) */
+  | { type: "resolved"; intent: IntentView }
   /** 새로고침 뒤 저장된 의도 id 로 상태를 조회해 이어서 본다 */
   | { type: "resumed"; intent: IntentView }
   | { type: "failed"; message: string }
@@ -411,7 +514,9 @@ export function flowReducer(s: FlowState, e: FlowEvent): FlowState {
     case "submit_lost":
       if (s.phase !== "sending") return s;
       return {
-        phase: "done", intent: e.intent ?? s.intent, token: null, confirm: null, lost: true,
+        // 서버 의도를 못 받았으면 화면의 의도를 "불명"으로 본다 — 전송 전(proposed)처럼 보이면 안 된다.
+        phase: "done", intent: e.intent ?? (s.intent ? { ...s.intent, state: "unknown" } : null),
+        token: null, confirm: null, lost: true,
         message: "응답을 받지 못했습니다. 주문이 접수됐을 수 있으니 다시 주문하지 말고 상태를 조회하세요.",
       };
 
@@ -426,6 +531,10 @@ export function flowReducer(s: FlowState, e: FlowEvent): FlowState {
     case "status":
       if (s.phase !== "done") return s;
       return { ...s, intent: e.intent, message: null };
+
+    case "resolved":
+      if (s.phase !== "done") return s;
+      return { ...s, intent: e.intent, message: null, lost: false };
 
     case "resumed":
       if (s.phase !== "idle") return s;

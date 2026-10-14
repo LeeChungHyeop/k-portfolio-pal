@@ -27,7 +27,15 @@ import {
   idempotencyKeyOf,
   isTerminal,
   judgeExecution,
+  kstClockFloor,
+  CCLD_LOOKBACK_DAYS,
+  normalizeOrderNo,
+  RESOLVABLE_STATES,
+  RESOLUTION_NOTE_MAX,
+  RESOLUTION_NOTE_MIN,
   type ExecutionRow,
+  type OrderResolutionRecord,
+  type ResolutionAction,
   type OrderIntent,
   type OrderScope,
   type OrderState,
@@ -50,8 +58,10 @@ export interface BrokerPort {
   /** 주문 1회 전송 (TTTC0012U, POST). sent=false 면 아무 것도 전송되지 않았다 */
   place(req: { ticker: string; quantity: number; limitPrice: number }): Promise<PlaceResponse & { sent: boolean }>;
   /** 일별 체결조회 (TTTC0081R, GET) */
-  inquire(q: { ticker: string; date: string; orderNo: string | null }): Promise<{
+  inquire(q: { ticker: string; date: string; orderNo: string | null; endDate?: string }): Promise<{
     ok: boolean; rows: ExecutionRow[]; hasMore: boolean; error?: string;
+    /** 그 기간의 주문을 전부 봤다고 볼 수 있는가(목록 존재·다음 페이지 없음·한도 미만). 모르면 false */
+    complete?: boolean;
   }>;
 }
 
@@ -355,7 +365,7 @@ export async function submitOrder(
 
   const patch: OrderIntentPatch =
     outcome.kind === "accepted"
-      ? { state: "accepted", orderNo: outcome.orderNo, orderOrgNo: outcome.orderOrgNo, orderTime: outcome.orderTime, lastError: null }
+      ? { state: "accepted", orderNo: outcome.orderNo, orderNoSource: "broker_response", orderOrgNo: outcome.orderOrgNo, orderTime: outcome.orderTime, lastError: null }
       : outcome.kind === "rejected"
         ? { state: "rejected", lastError: outcome.error }
         : { state: "unknown", lastError: outcome.reason };
@@ -425,7 +435,10 @@ export async function reconcileOrder(
     if (verdict.filledQty > 0) {
       patch.evidence = {
         filledQty: verdict.filledQty, avgPrice: verdict.avgPrice,
-        source: "inquire_daily_ccld", matchedBy: verdict.matchedBy, at: nowIso,
+        source: "inquire_daily_ccld",
+        // 사용자가 연결한 번호로 읽은 체결은 확정 근거가 아니다 — 출처를 증거에 그대로 남긴다.
+        matchedBy: intent.orderNoSource === "user_linked" ? "user_linked" : verdict.matchedBy,
+        at: nowIso,
       };
     }
   } else if (verdict.kind === "candidate") {
@@ -455,4 +468,213 @@ export async function reconcileOrder(
   const upd = await deps.store.update(ctx.scope, intent.id, intent.version, patch, nowIso);
   if (!upd.ok) return { kind: "store_error", message: upd.message ?? upd.reason };
   return { kind: "reconciled", intent: upd.intent, verdict };
+}
+
+// ── 수동 해소 ───────────────────────────────────────────────────────────────
+
+export interface ResolveInput {
+  intentId: string;
+  action: ResolutionAction;
+  /** link_order_no 일 때: 사용자가 증권사 앱에서 본 주문번호 */
+  orderNo?: string | null;
+  /** 근거 메모(필수) */
+  note: string;
+  /** 사용자가 화면에서 본 의도 id 를 그대로 돌려보낸다(다른 의도를 해소하는 실수 방지) */
+  confirmIntentId: string;
+  /** 처리자(세션 프로필). 감사 기록용 */
+  actor: string;
+}
+
+export type ResolveResult =
+  | { kind: "disabled" }
+  | { kind: "not_found" }
+  /** 해소 대상 상태가 아니다(unknown / 오래된 submitting 만) */
+  | { kind: "not_resolvable"; intent: OrderIntent; reason: string }
+  | { kind: "bad_input"; message: string }
+  | { kind: "inquiry_failed"; intent: OrderIntent; message: string }
+  /** 증권사 조회가 근거가 되지 못한다 — **상태를 바꾸지 않았다** */
+  | { kind: "insufficient_evidence"; intent: OrderIntent; reason: string }
+  | { kind: "order_no_in_use"; intent: OrderIntent }
+  /** 다른 요청이 먼저 바꿨다 — 아무 것도 쓰지 않았다 */
+  | { kind: "stale"; intent: OrderIntent | null }
+  | { kind: "store_error"; message: string }
+  | { kind: "resolved"; intent: OrderIntent; record: OrderResolutionRecord };
+
+const sameBuyConditions = (r: ExecutionRow, i: OrderIntent) =>
+  r.ticker === i.ticker && r.orderQty === i.quantity && r.orderPrice === i.limitPrice;
+
+/**
+ * 응답 불명 의도를 **증권사 체결조회 근거로만** 해소한다. 주문을 보내지 않는다. 원장에 쓰지 않는다.
+ *
+ *   link_order_no      그 번호로 조회한 행이 정확히 1건이고 종목·매수(02)·수량·지정가가 같고
+ *                      주문시각이 전송 이후일 때만 번호를 붙인다. 상태는 조회 결과(접수·미체결·
+ *                      부분체결·체결·취소)를 따른다 — 사람이 체결을 선언하지 않는다
+ *   dismiss_not_found  주문일이 **오늘 이전**(장이 끝남)이고, 그 날 조회가 완전(다음 페이지 없음)하며,
+ *                      종목이 같은 매수 행 중 수량·지정가가 같은 행이 **0건**이고 수량을 읽지 못한
+ *                      행도 없을 때만 dismissed 로 정리한다
+ *
+ * 둘 다 아니면 상태는 그대로다. 이 함수는 어떤 경우에도 새 주문·재주문을 만들지 않는다
+ * (dismissed 가 된 뒤 사용자가 **다시 준비**해야 새 의도가 생긴다).
+ */
+export async function resolveOrder(
+  ctx: OrderContext,
+  input: ResolveInput,
+  deps: OrderServiceDeps,
+): Promise<ResolveResult> {
+  if (!deps.enabled) return { kind: "disabled" };
+  if (input.confirmIntentId !== input.intentId) {
+    return { kind: "bad_input", message: "확인한 주문과 해소할 주문이 다릅니다." };
+  }
+  const note = typeof input.note === "string" ? input.note.trim() : "";
+  if (note.length < RESOLUTION_NOTE_MIN || note.length > RESOLUTION_NOTE_MAX) {
+    return { kind: "bad_input", message: `근거를 ${RESOLUTION_NOTE_MIN}~${RESOLUTION_NOTE_MAX}자로 적어 주세요.` };
+  }
+  if (input.action !== "link_order_no" && input.action !== "dismiss_not_found") {
+    return { kind: "bad_input", message: "알 수 없는 해소 방법입니다." };
+  }
+
+  const intent = await deps.store.getById(ctx.scope, input.intentId);
+  if (!intent) return { kind: "not_found" };
+  if (!RESOLVABLE_STATES.includes(intent.state)) {
+    return { kind: "not_resolvable", intent, reason: `해소할 수 없는 상태입니다 (${intent.state})` };
+  }
+  if (intent.orderNo) {
+    return { kind: "not_resolvable", intent, reason: "이미 주문번호가 있습니다 — 상태 조회로 확인하세요" };
+  }
+  const now = deps.now();
+  const nowIso = iso(now);
+  if (intent.state === "submitting") {
+    const started = Date.parse(intent.submitStartedAt ?? intent.createdAt);
+    if ((now.getTime() - started) / 1000 < ORDER_POLICY.submittingStaleSeconds) {
+      return { kind: "not_resolvable", intent, reason: "아직 전송 중일 수 있습니다. 잠시 뒤 다시 시도하세요" };
+    }
+  }
+
+  const orderDate = kstDateString(new Date(intent.submitStartedAt ?? intent.createdAt));
+  const base = {
+    id: deps.newId(), scope: ctx.scope, intentId: intent.id, action: input.action,
+    actor: input.actor, note, decidedAt: nowIso, prevState: intent.state, prevVersion: intent.version,
+  };
+
+  let orderNo: string | null = null;
+  if (input.action === "link_order_no") {
+    orderNo = normalizeOrderNo(input.orderNo);
+    if (!orderNo) return { kind: "bad_input", message: "주문번호는 숫자 1~10자리여야 합니다." };
+    const other = await deps.store.findByOrderNo(ctx.scope, orderNo);
+    if (other && other.id !== intent.id) return { kind: "order_no_in_use", intent };
+  }
+
+  // ── 공통: 주문일 장이 끝난 뒤, 주문일~오늘을 **전부** 본 조회만 근거로 쓴다 ─────────────
+  //   · 당일에는 하지 않는다: 아직 조회에 반영되지 않은 주문(앱이 보낸 진짜 주문)이 뒤에 나타날 수 있다
+  //   · 주문일~오늘 기간으로 본다: 장 마감 후 접수돼 다음 날로 넘어간 주문도 놓치지 않는다
+  //   · 조회가 "전부"가 아니면(목록 없음·다음 페이지·한도) 근거가 아니다 — 0건은 "없음"이 아니라 "모름"
+  const today = kstDateString(now);
+  if (orderDate >= today) {
+    return { kind: "insufficient_evidence", intent,
+      reason: "주문일 장이 끝난 뒤(다음 날부터)에만 수동 해소할 수 있습니다 — 그 전에는 조회에 늦게 나타나는 주문이 있을 수 있습니다" };
+  }
+  const ageDays = (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${orderDate}T00:00:00Z`)) / 86_400_000;
+  if (ageDays > CCLD_LOOKBACK_DAYS) {
+    return { kind: "insufficient_evidence", intent, reason: "체결조회 기간을 넘은 오래된 주문이라 조회로 확인할 수 없습니다" };
+  }
+
+  const inq = await deps.broker.inquire({
+    ticker: intent.ticker, date: yyyymmdd(orderDate), endDate: yyyymmdd(today), orderNo: null,
+  });
+  if (!inq.ok) return { kind: "inquiry_failed", intent, message: inq.error ?? "체결조회에 실패했습니다" };
+  if (inq.complete !== true || inq.hasMore) {
+    return { kind: "insufficient_evidence", intent,
+      reason: "조회 결과가 완전하지 않습니다(목록 없음·다음 페이지·한도 도달) — 전부 확인하지 못해 해소하지 않습니다" };
+  }
+  // 같은 종목의 매수(또는 구분 미상) 행 — 취소·거부·정정된 주문도 여기 들어온다(제외하지 않는다).
+  const sameTicker = inq.rows.filter((r) => (r.ticker === intent.ticker || r.ticker === null)
+    && (r.sideCode === null || r.sideCode === "02"));
+  if (sameTicker.some((r) => r.ticker === null || r.orderQty === null || r.orderPrice === null)) {
+    return { kind: "insufficient_evidence", intent, reason: "조회 응답의 일부 필드를 읽지 못해 판단할 수 없습니다" };
+  }
+  const same = sameTicker.filter((r) => sameBuyConditions(r, intent));
+
+  if (input.action === "link_order_no") {
+    // **조건이 같은 주문이 기간 전체에서 정확히 1건**이고 그것이 입력한 번호일 때만 연결한다.
+    // 2건 이상이면 어느 것이 앱 주문인지 증권사 기록으로 가릴 수 없다 — 연결하지 않는다.
+    if (same.length !== 1) {
+      return { kind: "insufficient_evidence", intent,
+        reason: same.length === 0
+          ? "조건이 같은 주문이 조회되지 않습니다 — 주문번호를 연결할 수 없습니다"
+          : `조건이 같은 주문이 ${same.length}건이라 어느 것이 이 주문인지 구별할 수 없습니다` };
+    }
+    const r = same[0];
+    if (normalizeOrderNo(r.orderNo ?? "") !== orderNo) {
+      return { kind: "insufficient_evidence", intent, reason: "입력한 주문번호가 조건이 같은 유일한 주문과 다릅니다" };
+    }
+    if (r.sideCode !== "02") {
+      return { kind: "insufficient_evidence", intent, reason: "매수 주문인지 확인되지 않습니다" };
+    }
+    // 주문일에 들어온 주문이면 시각이 전송 이후여야 한다(날짜·시각을 모르면 근거가 아니다).
+    const floor = kstClockFloor(intent.submitStartedAt);
+    if (!r.orderDate || !r.orderTime
+        || r.orderDate < yyyymmdd(orderDate)
+        || (r.orderDate === yyyymmdd(orderDate) && floor !== null && r.orderTime < floor)) {
+      return { kind: "insufficient_evidence", intent,
+        reason: "그 주문의 주문일·시각이 이 주문의 전송 이전이거나 확인되지 않습니다" };
+    }
+    const verdict = judgeExecution({ ...intent, orderNo: orderNo! }, [{ ...r, orderNo }]);
+    if (verdict.kind !== "matched") {
+      return { kind: "insufficient_evidence", intent, reason: "조회 응답의 수량을 읽지 못했습니다" };
+    }
+    const newState: OrderState = verdict.state;
+    if (!canTransition(intent.state, newState)) {
+      return { kind: "not_resolvable", intent, reason: `전이할 수 없습니다 (${intent.state} → ${newState})` };
+    }
+    const patch: OrderIntentPatch = {
+      state: newState, orderNo, orderNoSource: "user_linked", orderTime: r.orderTime,
+      // 연결은 **식별 확정이 아니다**: 증권사 기록으로는 앱 주문과 직접 매매를 구별할 수 없다.
+      // 그래서 확인 필요 표시를 유지하고, 체결 증거도 user_linked 로 남겨 원장 근거에서 제외한다.
+      ambiguous: true, lastInquiryAt: nowIso,
+      lastError: "주문번호를 사용자가 연결했습니다 — 앱이 보낸 주문인지 증권사 기록만으로는 구별되지 않아 체결 확정·원장 근거로 쓰지 않습니다",
+      ...(verdict.filledQty > 0 ? {
+        evidence: { filledQty: verdict.filledQty, avgPrice: verdict.avgPrice,
+          source: "inquire_daily_ccld" as const, matchedBy: "user_linked" as const, at: nowIso },
+      } : {}),
+    };
+    const record: OrderResolutionRecord = {
+      ...base, newState,
+      evidence: {
+        source: "inquire_daily_ccld", inquiryFrom: orderDate, inquiryTo: today, complete: true,
+        orderNo, orderDate: r.orderDate, orderTime: r.orderTime, orderQty: r.orderQty,
+        orderPrice: r.orderPrice, filledQty: r.filledQty, sideCode: r.sideCode, sameConditionRows: 1,
+        identification: "user_linked_not_confirmed",
+      },
+    };
+    return commit(ctx, intent, patch, record, deps, nowIso);
+  }
+
+  // dismiss_not_found: 조건이 같은 매수 주문이 기간 전체에서 **0건**일 때만.
+  if (same.length > 0) {
+    return { kind: "insufficient_evidence", intent,
+      reason: `조건이 같은 매수 주문이 ${same.length}건 있습니다 — 미접수로 정리할 수 없습니다` };
+  }
+  const patch: OrderIntentPatch = {
+    state: "dismissed", ambiguous: false, lastInquiryAt: nowIso,
+    lastError: "장 마감 후 주문일~조회일 체결조회에서 조건이 같은 주문이 없어 미접수로 정리했습니다(수동 해소)",
+  };
+  const record: OrderResolutionRecord = {
+    ...base, newState: "dismissed",
+    evidence: {
+      source: "inquire_daily_ccld", inquiryFrom: orderDate, inquiryTo: today, complete: true, dayClosed: true,
+      rowsTotal: inq.rows.length, sameTickerBuyRows: sameTicker.length, sameConditionRows: 0,
+    },
+  };
+  return commit(ctx, intent, patch, record, deps, nowIso);
+}
+
+async function commit(
+  ctx: OrderContext, intent: OrderIntent, patch: OrderIntentPatch, record: OrderResolutionRecord,
+  deps: OrderServiceDeps, nowIso: string,
+): Promise<ResolveResult> {
+  const r = await deps.store.resolve(ctx.scope, intent.id, intent.version, patch, record, nowIso);
+  if (r.ok) return { kind: "resolved", intent: r.intent, record };
+  if (r.reason === "stale") return { kind: "stale", intent: await deps.store.getById(ctx.scope, intent.id) };
+  if (r.reason === "not_found") return { kind: "not_found" };
+  return { kind: "store_error", message: r.message ?? r.reason };
 }

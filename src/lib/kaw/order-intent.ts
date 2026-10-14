@@ -67,11 +67,17 @@ export type OrderState =
   /** 체결조회로 확인: 취소됨(우리가 취소한 것이 아니다 — 취소 기능은 없다) */
   | "cancelled"
   /** 승인 기한이 지나 쓸 수 없다 */
-  | "expired";
+  | "expired"
+  /**
+   * **수동 해소**: 응답 불명이던 주문을 사용자가 "증권사에 없음"으로 정리했다. 장 마감 후
+   * 체결조회에서 조건이 같은 주문이 하나도 없다는 **증권사 조회 결과**가 있을 때만 서버가
+   * 허용한다(order-service.ts resolveOrder). 주문번호가 없고, 체결 증거도 없다.
+   */
+  | "dismissed";
 
 /** 더 이상 앞으로 가지 않는 상태. 새 주문 의도를 막지 않는다. */
 export const TERMINAL_STATES: readonly OrderState[] = [
-  "rejected", "filled", "cancelled", "expired",
+  "rejected", "filled", "cancelled", "expired", "dismissed",
 ];
 
 /** 주문이 증권사에 **존재할 수 있는** 상태. 같은 의도의 재전송을 금지한다. */
@@ -85,9 +91,10 @@ export const isTerminal = (s: OrderState) => TERMINAL_STATES.includes(s);
 const TRANSITIONS: Readonly<Record<OrderState, readonly OrderState[]>> = {
   proposed: ["submitting", "expired"],
   // 재시작 후 조회로 곧바로 접수/체결을 읽을 수 있다(submitting 이 남아 있던 경우).
-  submitting: ["accepted", "rejected", "unknown", "open", "partially_filled", "filled", "cancelled"],
+  // dismissed 는 수동 해소(증권사 조회 근거)로만 간다.
+  submitting: ["accepted", "rejected", "unknown", "open", "partially_filled", "filled", "cancelled", "dismissed"],
   // unknown → 조회로 해소: 접수/체결 증거가 나오면 앞으로, 아무것도 못 찾으면 그대로
-  unknown: ["accepted", "open", "partially_filled", "filled", "cancelled", "unknown"],
+  unknown: ["accepted", "open", "partially_filled", "filled", "cancelled", "unknown", "dismissed"],
   accepted: ["open", "partially_filled", "filled", "cancelled", "accepted"],
   open: ["partially_filled", "filled", "cancelled", "open"],
   partially_filled: ["partially_filled", "filled", "cancelled"],
@@ -95,6 +102,7 @@ const TRANSITIONS: Readonly<Record<OrderState, readonly OrderState[]>> = {
   filled: [],
   cancelled: [],
   expired: [],
+  dismissed: [],
 };
 
 export function canTransition(from: OrderState, to: OrderState): boolean {
@@ -115,10 +123,19 @@ export interface ExecutionEvidence {
   avgPrice: number | null;
   /** 증거를 만든 조회. 이것이 아니면 체결 증거가 아니다 */
   source: "inquire_daily_ccld";
-  /** 주문번호로 정확히 대응됐는가, 조건 일치(heuristic)로 대응됐는가 */
-  matchedBy: "order_no" | "heuristic";
+  /**
+   * 어떻게 이 주문과 대응됐는가.
+   *   order_no     증권사 **주문 응답**이 준 주문번호로 대응(우리가 보낸 주문임이 확실)
+   *   user_linked  사용자가 수동으로 연결한 주문번호로 대응 — 증권사 기록만으로는 앱이 보낸
+   *                주문인지 직접 매매인지 구별할 수 없다. **체결 확정·원장 근거가 아니다**
+   *   heuristic    조건 일치(과거 호환. 지금은 만들지 않는다)
+   */
+  matchedBy: "order_no" | "user_linked" | "heuristic";
   at: string;
 }
+
+/** 주문번호의 출처. 응답이 준 번호만 "우리 주문"의 증거다. */
+export type OrderNoSource = "broker_response" | "user_linked";
 
 export interface OrderIntent {
   id: string;
@@ -152,6 +169,8 @@ export interface OrderIntent {
   // 접수
   submitStartedAt: string | null;
   orderNo: string | null;
+  /** 주문번호 출처. 없으면(null/미기록) 응답 번호로 보지 않는다 — 단, 기존 행 호환을 위해 orderNo 가 있고 이 값이 없으면 broker_response 로 읽는다 */
+  orderNoSource?: OrderNoSource | null;
   orderOrgNo: string | null;
   orderTime: string | null;
 
@@ -328,6 +347,8 @@ export interface ExecutionRow {
   cancelled: boolean | null;
   /** 02 = 매수 */
   sideCode: string | null;
+  /** 주문일 YYYYMMDD(ord_dt). 기간 조회에서 날짜를 구별하는 데 쓴다. 모르면 null/미기록 */
+  orderDate?: string | null;
 }
 
 export type ReconcileVerdict =
@@ -354,7 +375,7 @@ export type ReconcileVerdict =
   | { kind: "unreadable" };
 
 /** 전송 시작 시각(KST HHMMSS)에서 1분 뺀 값. 시계 오차 여유. 모르면 null */
-function kstClockFloor(submitStartedAt: string | null | undefined): string | null {
+export function kstClockFloor(submitStartedAt: string | null | undefined): string | null {
   if (!submitStartedAt) return null;
   const ms = Date.parse(submitStartedAt);
   if (!Number.isFinite(ms)) return null;
@@ -438,9 +459,73 @@ export function ledgerEligibility(intent: OrderIntent): LedgerEligibility {
     return { eligible: false, reason: "체결조회 증거가 없습니다" };
   }
   if (!(e.filledQty > 0)) return { eligible: false, reason: "체결 수량이 0 입니다" };
-  if (e.matchedBy !== "order_no" || !intent.orderNo) {
+  if (e.matchedBy !== "order_no" || !intent.orderNo || intent.orderNoSource === "user_linked") {
     return { eligible: false, reason: "주문번호로 대응되지 않은 증거라 사람의 확인이 필요합니다" };
   }
   if (intent.ambiguous) return { eligible: false, reason: "일치하는 주문이 여러 건이라 확인이 필요합니다" };
   return { eligible: true, filledQty: e.filledQty, avgPrice: e.avgPrice, orderNo: intent.orderNo };
 }
+
+// ── 수동 해소 ───────────────────────────────────────────────────────────────
+//
+// 응답 불명(`unknown`)·전송 중 멈춤(`submitting`)·"확인 필요" 의도는 체결조회만으로 풀리지
+// 않을 수 있다(주문번호를 모르면 후보를 확정하지 않기 때문). 사람이 풀되, **사람의 말만으로는
+// 아무 것도 확정하지 않는다** — 서버가 그 자리에서 증권사 체결조회를 다시 하고, 증거가 맞을
+// 때만 상태를 바꾼다. 두 가지뿐이다:
+//
+//   link_order_no      사용자가 증권사 앱에서 본 주문번호를 넣는다 → 서버가 그 번호로 조회해
+//                      한 건이 있고, 종목·매수·수량·지정가가 같고, 주문시각이 전송 이후일 때만
+//                      그 번호를 붙이고 조회 결과대로 접수/미체결/체결을 정한다
+//   dismiss_not_found  주문일 장이 끝난 뒤(다음 날 이후) 조회했는데 조건이 같은 주문이 **한 건도**
+//                      없을 때만 "미접수(dismissed)"로 정리한다 → 그 뒤에야 새 시도가 열린다
+//
+// 기록: 해소는 의도 행을 지우지 않고(상태 컬럼만 CAS 로 바꾼다) **별도 감사 행**을 남긴다
+// (근거·처리시각·처리자·이전/이후 상태). 원장에는 아무 것도 쓰지 않는다.
+
+export type ResolutionAction = "link_order_no" | "dismiss_not_found";
+
+export const RESOLVABLE_STATES: readonly OrderState[] = ["unknown", "submitting"];
+
+export interface OrderResolutionRecord {
+  id: string;
+  scope: OrderScope;
+  intentId: string;
+  action: ResolutionAction;
+  /** 처리자: 세션의 프로필. 감사용 */
+  actor: string;
+  /** 사용자가 적은 근거(증권사 앱에서 무엇을 봤는가) */
+  note: string;
+  decidedAt: string;
+  prevState: OrderState;
+  newState: OrderState;
+  prevVersion: number;
+  /** 서버가 그 자리에서 조회한 증권사 근거 요약. 계좌번호·키는 없다 */
+  evidence: Record<string, unknown>;
+}
+
+export const RESOLUTION_NOTE_MIN = 5;
+export const RESOLUTION_NOTE_MAX = 500;
+
+/** 증권사 주문번호를 비교 가능한 10자리로. 숫자 1~10자리가 아니면 null */
+export function normalizeOrderNo(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  if (!/^\d{1,10}$/.test(t)) return null;
+  if (/^0+$/.test(t)) return null;
+  return t.padStart(10, "0");
+}
+
+/**
+ * 체결이 **확정**됐는가 — 증권사 주문 응답의 주문번호로 대응된 체결조회 증거가 있을 때만.
+ * 사용자가 연결한 주문번호(user_linked)로 읽은 체결은 화면에 보이되 확정이 아니다.
+ */
+export function isExecutionConfirmed(i: Pick<OrderIntent, "state" | "evidence" | "orderNo" | "orderNoSource">): boolean {
+  return (i.state === "filled" || i.state === "partially_filled")
+    && !!i.evidence && i.evidence.source === "inquire_daily_ccld" && i.evidence.filledQty > 0
+    && i.evidence.matchedBy === "order_no" && !!i.orderNo && i.orderNoSource !== "user_linked";
+}
+
+/** 체결조회(TTTC0081R) 한 번의 조회 기간 한도. 이보다 오래된 주문은 조회 근거로 정리하지 않는다 */
+export const CCLD_LOOKBACK_DAYS = 90;
+/** 한 페이지 최대 행 수로 본다. 이만큼 오면 다음 페이지가 있을 수 있어 "전부 봤다"고 하지 않는다 */
+export const CCLD_PAGE_ROWS = 100;
