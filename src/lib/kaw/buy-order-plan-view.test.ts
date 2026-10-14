@@ -30,7 +30,8 @@ const readyPlan = (verified: boolean): BuyOrderPlan =>
     { "1": { price: 10_000, source: "kis", asOf: NOW } },
     verified
       ? {
-          kind: "kis_api", observedAt: NOW, buyingPower: { amount: 500_000, asOf: NOW },
+          kind: "kis_api", observedAt: NOW,
+          buyingPower: { asOf: NOW, entries: [{ ticker: "1", price: 10_000, amount: 500_000, qty: 50 }] },
           plan: {
             accountInstanceId: "bai:x", accountType: "irp", productCode: "29", broker: "kis",
             stateAsOf: "2026-10-12", holdings: {}, holdingsCompleteness: "non_zero_only", cash: 500_000,
@@ -78,7 +79,8 @@ describe("참고용·전환 안내", () => {
 
   it("보유가 있는 연금저축의 신규 매수는 보유 반영 전환을 안내한다", () => {
     const p = buildBuyOrderPlan(
-      one, quote, { kind: "manual", quantities: { a: 10 }, cash: 500_000 }, { accountType: "pension", now: NOW },
+      one, quote, { kind: "manual", quantities: { a: 10 }, cash: 500_000 },
+      { accountType: "pension", now: NOW, strategy: "cash_new_buy" },
     );
     const h = strategySwitchHint(p)!;
     expect(h.to).toBe("with_holdings");
@@ -184,8 +186,8 @@ describe("미리보기 카드의 호출 경계 (소스 단위)", () => {
     expect(card).toContain('plan.reliability === "reference_only"');
     expect(card).toContain("strategySwitchHint(plan)");
     // 전환은 사용자가 누를 때만 일어난다
-    expect(card).toContain("onClick={() => setStrategy(switchHint.to)}");
-    expect(card.match(/setStrategy\(/g) ?? []).toHaveLength(2); // select onChange + 전환 버튼
+    expect(card).toContain("onClick={() => setStrategyChoice(switchHint.to)}");
+    expect(card.match(/setStrategyChoice\(/g) ?? []).toHaveLength(2); // select onChange + 전환 버튼
   });
 
   it("카드가 쓰는 AccountPage 입력은 읽기 전용 prop 이다", () => {

@@ -37,6 +37,7 @@ import {
   KIS_ACCOUNT_IDENTITY,
   type BuyPlanInputs,
 } from "./kis-account-observe";
+import type { VerifiedBuyingPowerEntry } from "./kis-buying-power";
 
 // ── 입력 ────────────────────────────────────────────────────────────────────
 
@@ -79,8 +80,12 @@ export type BalanceInput =
       plan: BuyPlanInputs;
       /** 조회 시각 */
       observedAt: string;
-      /** 확인된 매수가능금액. 없으면 예수금을 상한으로 쓰는 "예상"이다 */
-      buyingPower?: { amount: number; asOf: string } | null;
+      /**
+       * 증권사 매수가능조회(종목·지정가별) 결과. 없으면 예수금을 상한으로 쓰는 "예상"이다.
+       * 계획이 쓰는 단가와 **같은 단가로 조회된 종목별 항목이 전부 있을 때만** 확인된
+       * 예산으로 인정한다(하나라도 어긋나면 전체를 믿지 않는다).
+       */
+      buyingPower?: { asOf: string; entries: VerifiedBuyingPowerEntry[] } | null;
     };
 
 export type Strategy =
@@ -165,6 +170,8 @@ export interface PlanWarning {
     /** 현금 기반 신규 매수인데 기존 보유를 확인하지 못했다 */
     | "new_buy_holdings_unconfirmed"
     | "holdings_not_entered"
+    /** 증권사 매수가능조회를 했지만 계획의 단가와 맞지 않아 인정하지 않았다 */
+    | "buying_power_unmatched"
     /** 평가금액이 불완전해 계좌 전체 목표 비중을 정확히 계산할 수 없다 */
     | "valuation_incomplete";
   level: WarningLevel;
@@ -226,6 +233,11 @@ export interface BuyOrderPlan {
     /** 예산의 원천 금액(매수가능금액 또는 예수금) */
     amount: number;
     reserve: number;
+    /**
+     * 여유분의 근거. `broker_verified_none` — 증권사 주문가능금액을 그대로 쓰므로 우리 여유분을
+     * 빼지 않았다. `app_estimate` — 확인되지 않은 예산이라 앱의 보수적 여유분을 뺐다.
+     */
+    reserveBasis: "broker_verified_none" | "app_estimate";
     spendable: number;
   } | null;
   totals: {
@@ -270,7 +282,9 @@ export function buildBuyOrderPlan(
   balance: BalanceInput,
   options: PlanOptions,
 ): BuyOrderPlan {
-  const strategy = options.strategy ?? defaultStrategy(options.accountType);
+  // 전략을 명시하지 않으면 계좌 상태로 정한다(아래 3단계 이후 확정). 지금은 기본값이다.
+  const requestedStrategy = options.strategy;
+  let strategy: Strategy = requestedStrategy ?? defaultStrategy(options.accountType);
   const reserveRate = options.reserveRate ?? DEFAULT_RESERVE_RATE;
   const minReserve = options.minReserve ?? DEFAULT_MIN_RESERVE;
   const staleMin = options.staleAfterMinutes ?? DEFAULT_STALE_MINUTES;
@@ -281,7 +295,7 @@ export function buildBuyOrderPlan(
   const incomplete: string[] = [];
 
   const mode = balance.kind === "kis_api" ? "kis_api" : "manual";
-  const scope: PlanScope = strategy === "cash_new_buy" ? "additional_purchase" : "rebalance_buys";
+  let scope: PlanScope = strategy === "cash_new_buy" ? "additional_purchase" : "rebalance_buys";
   const sources: BuyOrderPlan["sources"] = {
     prices: [],
     cash: {
@@ -308,7 +322,8 @@ export function buildBuyOrderPlan(
   let cash: number | null;
   const qtyByRow: Record<string, number | null> = {};
   let unmapped: Record<string, number> = {};
-  let buyingPower: { amount: number; asOf: string } | null = null;
+  // 증권사 매수가능조회 결과(검증 전). 단가 일치 검증은 시세가 정해진 뒤(6단계)에 한다.
+  let rawBuyingPower: { asOf: string; entries: VerifiedBuyingPowerEntry[] } | null = null;
 
   if (balance.kind === "manual") {
     cash = balance.cash === null ? null : nonNeg(balance.cash);
@@ -334,7 +349,9 @@ export function buildBuyOrderPlan(
     for (const r of rows) {
       if (r.ticker) {
         // 조회가 준비됨(ready)이면 목록 전체가 관측된 것이라 부재 = 0 주다.
-        qtyByRow[r.rowId] = nonNeg(held[r.ticker] ?? 0);
+        // 같은 종목코드가 여러 행이면 **첫 행에만** 배정한다 — 증권사 보유수량은 종목 단위라
+        // 행마다 같은 수량을 주면 보유가 이중으로 계산된다.
+        qtyByRow[r.rowId] = tickers.has(r.ticker) ? 0 : nonNeg(held[r.ticker] ?? 0);
         tickers.add(r.ticker);
       } else {
         qtyByRow[r.rowId] = null; // 종목코드가 없으면 보유수량을 대응시킬 수 없다
@@ -343,9 +360,8 @@ export function buildBuyOrderPlan(
     unmapped = Object.fromEntries(
       Object.entries(held).filter(([t, q]) => !tickers.has(t) && q > 0),
     );
-    if (balance.buyingPower && Number.isFinite(balance.buyingPower.amount)) {
-      buyingPower = balance.buyingPower;
-      sources.buyingPower = { source: "kis_api", asOf: balance.buyingPower.asOf, verified: true };
+    if (balance.buyingPower && balance.buyingPower.entries.length > 0) {
+      rawBuyingPower = balance.buyingPower;
     }
     // 22/29 동일 종합계좌번호 가정은 미검증이다 — 주문 계좌의 식별 근거로 쓰지 않는다.
     warnings.push({
@@ -398,6 +414,14 @@ export function buildBuyOrderPlan(
     notEnteredRows.length > 0 ? "not_confirmed"
       : anyKnownHeld ? "has_holdings"
       : "confirmed_zero";
+
+  // 전략을 명시하지 않았으면 계좌 상태로 정한다. **보유가 확인된 연금저축은 보유를 반영한다** —
+  // 현금 기반 신규 매수는 보유를 목표에 넣지 않으므로 이미 ETF 를 가진 계좌에서는 맞지 않다.
+  // (보유를 확인하지 못했거나 0 으로 확인된 경우는 기존 기본값을 유지한다.)
+  if (!requestedStrategy && options.accountType === "pension" && holdingsBasis === "has_holdings") {
+    strategy = "with_holdings";
+    scope = "rebalance_buys";
+  }
 
   // 보유 반영 전략에서 수량을 모르는 행은 **사지 않는다**(0 주로 가정하면 이미 가진 종목을
   // 또 사게 된다).
@@ -496,18 +520,59 @@ export function buildBuyOrderPlan(
   }
 
   // ── 6) 예산 ──────────────────────────────────────────────────────────────
+  // 증권사 매수가능조회 결과를 **계획의 단가와 대조해** 인정한다.
+  //   · 가격이 있는 매수 대상 종목 전부에 대해, 같은 단가로 조회된 항목이 있어야 한다
+  //   · 하나라도 없거나 단가가 다르면 전체를 인정하지 않는다(그 금액은 다른 가격의 근거다)
+  // 인정되면 종목별 항목 중 **가장 작은 주문가능금액**을 예산 상한으로 쓰고, 종목별 최대
+  // 수량도 증권사가 준 값을 그대로 쓴다(우리가 금액 ÷ 단가로 다시 계산하지 않는다).
+  const maxBuyByTicker = new Map<string, number>();
+  let verifiedAmount: number | null = null;
+  if (rawBuyingPower) {
+    const priced = tradable.filter((r) => isPosPrice(quoteOf(r).price));
+    const byTicker = new Map(rawBuyingPower.entries.map((e) => [e.ticker, e]));
+    const unmatched = priced.filter((r) => {
+      const e = r.ticker ? byTicker.get(r.ticker) : undefined;
+      return !e || e.price !== quoteOf(r).price;
+    });
+    if (priced.length > 0 && unmatched.length === 0) {
+      let min = Number.POSITIVE_INFINITY;
+      for (const r of priced) {
+        const e = byTicker.get(r.ticker as string)!;
+        min = Math.min(min, e.amount);
+        maxBuyByTicker.set(r.ticker as string, e.qty);
+      }
+      verifiedAmount = min;
+      sources.buyingPower = { source: "kis_api", asOf: rawBuyingPower.asOf, verified: true };
+    } else {
+      warnings.push({
+        code: "buying_power_unmatched",
+        level: "caution",
+        message:
+          "증권사 매수가능금액을 조회했지만 이 계획의 단가와 맞지 않아 인정하지 않았습니다" +
+          (unmatched.length ? ` (${unmatched.map((r) => r.etfName).join(", ")})` : "") +
+          ". 시세가 바뀌었다면 다시 조회하세요.",
+      });
+    }
+  }
+
   // 매수가능금액이 확인됐으면 그 값과 예수금 중 작은 쪽, 아니면 예수금(상한 추정).
-  const budgetAmount = buyingPower ? Math.min(cash, nonNeg(buyingPower.amount)) : cash;
-  const basis: BudgetBasis = buyingPower
+  const budgetAmount = verifiedAmount !== null ? Math.min(cash, nonNeg(verifiedAmount)) : cash;
+  const basis: BudgetBasis = verifiedAmount !== null
     ? "buying_power"
     : balance.kind === "kis_api" ? "cash_upper_bound" : "manual_cash";
-  const reserve = Math.min(
-    budgetAmount,
-    Math.max(minReserve, Math.floor(budgetAmount * reserveRate)),
-  );
+
+  // **여유분 중복 차감을 하지 않는다.** 증권사가 돌려준 주문가능금액은 그 단가로 실제 주문할
+  // 수 있는 금액이므로 거기서 우리 여유분을 또 빼면 이중 차감이다. 이것은 특정 비율(0.5%
+  // 등)을 증권사의 공식 규칙으로 안다는 뜻이 아니다 — 비율은 계산에 쓰이지 않고, 증권사 값을
+  // 그대로 쓴다는 뜻이다. 확인되지 않은 예산(예수금 상한 추정)에는 기존 여유분을 유지한다.
+  const reserveBasis: "broker_verified_none" | "app_estimate" =
+    verifiedAmount !== null ? "broker_verified_none" : "app_estimate";
+  const reserve = reserveBasis === "broker_verified_none"
+    ? 0
+    : Math.min(budgetAmount, Math.max(minReserve, Math.floor(budgetAmount * reserveRate)));
   const spendable = Math.max(0, Math.floor(budgetAmount - reserve));
 
-  const verified = buyingPower !== null;
+  const verified = verifiedAmount !== null;
   if (!verified) {
     warnings.push({
       code: "estimate_only",
@@ -580,6 +645,8 @@ export function buildBuyOrderPlan(
     qty: number | null;
     canBuy: boolean;
     notEntered: boolean;
+    /** 증권사가 준 이 종목의 최대 매수 수량(확인된 예산일 때만). 없으면 null */
+    maxBuy: number | null;
   }
   const work: Work[] = rows.map((r) => {
     const quote = quoteOf(r);
@@ -590,6 +657,7 @@ export function buildBuyOrderPlan(
     const notEntered = strategy === "with_holdings" && Boolean(r.ticker) && !r.orphaned && qty === null;
     return {
       row: r, quote, price, held, target, bought: 0, qty, notEntered,
+      maxBuy: r.ticker && maxBuyByTicker.has(r.ticker) ? (maxBuyByTicker.get(r.ticker) as number) : null,
       canBuy: Boolean(r.ticker) && !r.orphaned && price !== null && r.allocPct > 0 && !notEntered,
     };
   });
@@ -598,12 +666,19 @@ export function buildBuyOrderPlan(
   // 남은 부족분이 가장 큰 종목부터 1주씩 산다. 부족분이 한 주 가격보다 작으면 사지 않는다
   // (floor 와 같은 규칙 — 목표를 넘기지 않는다). 예산이 넉넉하면 floor 결과와 같다.
   let remaining = spendable;
+  // 종목별 누적 매수 수량. 같은 종목코드가 여러 행이어도 증권사의 최대 수량은 **종목 단위**다.
+  const boughtByTicker = new Map<string, number>();
   for (let it = 0; it < MAX_ITERATIONS; it += 1) {
     let best: Work | null = null;
     let bestDeficit = 0;
     for (const w of work) {
       if (!w.canBuy || w.price === null) continue;
       if (w.price > remaining) continue;
+      // 증권사가 알려준 종목별 최대 수량을 넘지 않는다.
+      if (
+        w.maxBuy !== null && w.row.ticker &&
+        (boughtByTicker.get(w.row.ticker) ?? 0) >= w.maxBuy
+      ) continue;
       const deficit = w.target - (w.held + w.bought * w.price);
       if (deficit + 1e-9 < w.price) continue; // 한 주를 사면 목표를 넘긴다
       if (deficit > bestDeficit) {
@@ -614,6 +689,9 @@ export function buildBuyOrderPlan(
     if (!best || best.price === null) break;
     best.bought += 1;
     remaining -= best.price;
+    if (best.row.ticker) {
+      boughtByTicker.set(best.row.ticker, (boughtByTicker.get(best.row.ticker) ?? 0) + 1);
+    }
   }
 
   // ── 10) 줄 구성 ──────────────────────────────────────────────────────────
@@ -695,7 +773,7 @@ export function buildBuyOrderPlan(
     blockers,
     warnings,
     lines,
-    budget: { basis, amount: budgetAmount, reserve, spendable },
+    budget: { basis, amount: budgetAmount, reserve, reserveBasis, spendable },
     totals: {
       planningBase,
       totalBuyAmount,

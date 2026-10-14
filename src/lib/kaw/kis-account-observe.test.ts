@@ -345,7 +345,9 @@ describe("매수 주문안 예산", () => {
     expect(KIS_BUYING_POWER_SUPPORT["29"].trId).toBe("TTTC0503R");
     expect(KIS_BUYING_POWER_SUPPORT["29"].path).toContain("pension/inquire-psbl-order");
     expect(KIS_BUYING_POWER_SUPPORT["29"].status).toBe("documented_unverified");
-    expect(KIS_BUYING_POWER_SUPPORT["22"].status).toBe("unverified");
+    // 22 는 2026-10-14 에 실증됐다 (사용자 승인 하 읽기 전용 1회 조회)
+    expect(KIS_BUYING_POWER_SUPPORT["22"].status).toBe("verified_2026_10_14");
+    expect(KIS_BUYING_POWER_SUPPORT["22"].trId).toBe("TTTC8908R");
     // 종목·단가를 요구한다 = 계좌 단위 한도가 아니다
     expect(KIS_BUYING_POWER_SUPPORT["29"].requires).toContain("PDNO");
     expect(KIS_BUYING_POWER_SUPPORT["29"].requires).toContain("ORD_UNPR");

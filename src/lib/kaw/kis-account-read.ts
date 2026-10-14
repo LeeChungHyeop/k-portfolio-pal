@@ -15,7 +15,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { json, requireSession, serviceClient, type DataEnv } from "./data-server";
-import { getKisAccessToken, type KVLike } from "./kis-server";
+import { fetchKisPrices, getKisAccessToken, type KVLike } from "./kis-server";
+import {
+  fetchBuyingPower,
+  toVerifiedBuyingPower,
+  type BuyingPowerResult,
+  type VerifiedBuyingPowerEntry,
+} from "./kis-buying-power";
 import {
   fetchIrpDeposit,
   fetchIrpPresentBalance,
@@ -53,6 +59,11 @@ export interface KisReadDeps {
   fetchPensionSavings: typeof fetchPensionSavingsBalance;
   fetchIrpPresent: typeof fetchIrpPresentBalance;
   fetchIrpDeposit: typeof fetchIrpDeposit;
+  fetchBuyingPower: typeof fetchBuyingPower;
+  /** 지정가 기준가로 쓸 현재가. 서버가 직접 조회한다(클라이언트가 보낸 값을 쓰지 않는다) */
+  fetchPrices: (
+    tickers: string[], appKey: string, appSecret: string,
+  ) => Promise<{ results: Record<string, { price: number; source: string }>; timestamp: string }>;
   now: () => Date;
 }
 
@@ -60,6 +71,8 @@ export const defaultKisReadDeps: KisReadDeps = {
   fetchPensionSavings: fetchPensionSavingsBalance,
   fetchIrpPresent: fetchIrpPresentBalance,
   fetchIrpDeposit,
+  fetchBuyingPower,
+  fetchPrices: (tickers, appKey, appSecret) => fetchKisPrices(tickers, appKey, appSecret),
   now: () => new Date(),
 };
 
@@ -131,6 +144,116 @@ export async function readKisAccount(
     deps.fetchIrpDeposit(cred, req.token),
   ]);
   return finish({ balance, deposit });
+}
+
+// ── 매수가능조회 (연금저축 22, 종목별 지정가) ─────────────────────────────
+
+export type BuyingPowerStatus =
+  /** 요청한 모든 종목이 검증됐다 */
+  | "verified"
+  /** 일부만 검증됐다 — 클라이언트는 이것을 예산으로 인정하지 않는다 */
+  | "partial"
+  /** 조회하지 않았다(계좌 조회가 안 됐거나 미지원 상품·시세 없음) */
+  | "not_queried"
+  | "failed";
+
+export interface KisBuyingPowerResponse {
+  status: BuyingPowerStatus;
+  reason?: string;
+  /** 조회 시각(ISO). 지정가의 기준시각이기도 하다 */
+  asOf: string | null;
+  /** 검증된 종목별 항목(단가·주문가능금액·최대수량). 클라이언트가 계획 단가와 대조한다 */
+  entries: VerifiedBuyingPowerEntry[];
+  /** 종목별 결과 요약 — 금액 없이 성공 여부와 응답코드만 */
+  perTicker: Array<{ ticker: string; price: number | null; ok: boolean; rtCd?: string; msgCd?: string }>;
+}
+
+const TICKER_QUERY_RE = /^[A-Z0-9]{6}$/;
+export const BUYING_POWER_MAX_TICKERS = 10;
+
+/** `?tickers=a,b` 를 읽는다. 모양이 틀리면 전체를 거부한다(일부만 조용히 버리지 않는다). */
+export function parseTickerQuery(raw: string | null): string[] | null {
+  if (raw === null || raw.trim() === "") return [];
+  const list = [...new Set(raw.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean))];
+  if (list.length > BUYING_POWER_MAX_TICKERS) return null;
+  if (!list.every((t) => TICKER_QUERY_RE.test(t))) return null;
+  return list;
+}
+
+/**
+ * 종목별 지정가 매수가능조회. **GET 만 한다.**
+ *
+ * 앞 단계(권한·등록·운용방식·계좌 조회 성공)를 통과한 요청에서만 부른다. 22 에서만 실증
+ * 됐으므로 29 는 조회하지 않는다. 시세가 없는 종목은 조회하지 않는다(0 원 단가로
+ * 묻지 않는다).
+ */
+export async function readKisBuyingPower(
+  req: {
+    productCode: KisProductCode;
+    observation: KisAccountObservation;
+    credentials: KisAccountCredentials | null;
+    token?: string;
+    tickers: string[];
+  },
+  deps: KisReadDeps = defaultKisReadDeps,
+): Promise<KisBuyingPowerResponse> {
+  const none = (status: BuyingPowerStatus, reason: string): KisBuyingPowerResponse => ({
+    status, reason, asOf: null, entries: [], perTicker: [],
+  });
+
+  if (req.productCode !== "22") {
+    return none("not_queried", "이 상품은 아직 매수가능조회를 지원하지 않습니다 (22 만 실증됨)");
+  }
+  if (!req.tickers.length) return none("not_queried", "종목이 지정되지 않았습니다");
+  // 계좌 조회가 성공하지 못했으면(미등록·이전 중·권한 없음 등) 묻지 않는다.
+  if (req.observation.cash.kind !== "observed") {
+    return none("not_queried", "계좌 조회가 되지 않아 매수가능조회를 하지 않았습니다");
+  }
+  if (!req.credentials || !req.token) return none("not_queried", "credential 이 없습니다");
+
+  const { appKey, appSecret } = req.credentials;
+  let prices: Record<string, { price: number; source: string }> = {};
+  let timestamp = deps.now().toISOString();
+  try {
+    const r = await deps.fetchPrices(req.tickers, appKey, appSecret);
+    prices = r.results;
+    timestamp = r.timestamp || timestamp;
+  } catch {
+    return none("failed", "시세를 가져오지 못해 지정가 기준을 정할 수 없습니다");
+  }
+
+  const entries: VerifiedBuyingPowerEntry[] = [];
+  const perTicker: KisBuyingPowerResponse["perTicker"] = [];
+  for (const ticker of req.tickers) {
+    const quote = prices[ticker];
+    const price = quote && quote.price > 0 ? quote.price : null;
+    if (price === null || !Number.isInteger(price)) {
+      perTicker.push({ ticker, price: null, ok: false });
+      continue; // 시세가 없거나 정수가 아니면 묻지 않는다
+    }
+    const r: BuyingPowerResult = await deps.fetchBuyingPower(
+      req.credentials, req.token, { ticker, unitPrice: price, ordDvsn: "00" }, "22",
+    );
+    const entry = toVerifiedBuyingPower(r);
+    perTicker.push({
+      ticker, price, ok: entry !== null,
+      ...(r.rtCd !== undefined ? { rtCd: r.rtCd } : {}),
+      ...(r.msgCd !== undefined ? { msgCd: r.msgCd } : {}),
+    });
+    if (entry) entries.push(entry);
+  }
+
+  const status: BuyingPowerStatus =
+    entries.length === req.tickers.length ? "verified"
+      : entries.length > 0 ? "partial"
+      : "failed";
+  return {
+    status,
+    ...(status === "failed" ? { reason: "매수가능조회가 확인되지 않았습니다" } : {}),
+    asOf: timestamp,
+    entries,
+    perTicker,
+  };
 }
 
 // ── Worker 핸들러 ───────────────────────────────────────────────────────────
@@ -209,6 +332,12 @@ export async function handleKisAccountGet(request: Request, env: KisAccountEnv):
     return json({ error: "product 는 22(연금저축) 또는 29(IRP) 입니다." }, 400);
   }
 
+  // 요청 모양 검증 — 권한 판단 전에 끝낸다(잘못된 요청은 어떤 외부 호출도 일으키지 않는다).
+  const tickers = parseTickerQuery(new URL(request.url).searchParams.get("tickers"));
+  if (tickers === null) {
+    return json({ error: `tickers 는 6자리 종목코드를 쉼표로 구분해 ${BUYING_POWER_MAX_TICKERS}개까지입니다.` }, 400);
+  }
+
   // 1) 권한. 실패하면 DB 도 credential 도 건드리지 않는다. 사유는 본문에 싣지 않는다
   //    (서버 설정 상태를 알려주지 않는다).
   const auth = authorizeKisAccess(session, env);
@@ -258,9 +387,16 @@ export async function handleKisAccountGet(request: Request, env: KisAccountEnv):
     token,
   });
 
+  // 종목별 매수가능조회(선택). 계좌 조회가 성공한 경우에만 하며, 요청한 종목만 묻는다.
+  // (모양 검증은 앞에서 끝냈다 — 잘못된 요청으로 증권사를 호출하지 않는다.)
+  const buyingPower: KisBuyingPowerResponse | null = tickers.length
+    ? await readKisBuyingPower({ productCode: product, observation, credentials, token, tickers })
+    : null;
+
   return json({
     observation,
     plan,
+    buyingPower,
     buyingPowerSupport: KIS_BUYING_POWER_SUPPORT[product],
     broker: KIS_BROKER,
     // 22/29 가 같은 종합계좌번호라는 가정은 **검증되지 않았다**. 소비자가 이 응답을 주문

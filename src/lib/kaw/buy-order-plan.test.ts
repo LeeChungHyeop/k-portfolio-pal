@@ -179,7 +179,7 @@ describe("연금저축 = 현금 기반 신규 매수 / IRP = 보유 반영", () 
   });
 
   it("연금저축은 예수금(여유 제외)만 비중대로 나눈다 — 보유가 있어도 목표에 넣지 않는다", () => {
-    const p = build(manual(1_000_000, { a: 50 }), "pension");
+    const p = build(manual(1_000_000, { a: 50 }), "pension", [A, B], quotes, "cash_new_buy");
     expect(p.strategy).toBe("cash_new_buy");
     expect(p.totals!.planningBase).toBe(p.budget!.spendable);
     const a = p.lines.find((l) => l.rowId === "a")!;
@@ -189,7 +189,7 @@ describe("연금저축 = 현금 기반 신규 매수 / IRP = 보유 반영", () 
   });
 
   it("같은 입력이라도 IRP 는 보유를 반영해 덜 산다", () => {
-    const pension = build(manual(1_000_000, { a: 50 }), "pension");
+    const pension = build(manual(1_000_000, { a: 50 }), "pension", [A, B], quotes, "cash_new_buy");
     const irp = build(manual(1_000_000, { a: 50 }), "irp");
     const pa = pension.lines.find((l) => l.rowId === "a")!.buyQty;
     const ia = irp.lines.find((l) => l.rowId === "a")!.buyQty;
@@ -295,8 +295,17 @@ describe("API 모드 — 검증된 조회값만", () => {
     expect(p.warnings.find((x) => x.code === "estimate_only")!.message).toContain("예상 주문안");
   });
 
+  /** 계획 단가(069500 @10,000 / 360750 @20,000)와 같은 단가로 조회된 항목 */
+  const bpEntries = (amount: number, qtyA = 20, qtyB = 10) => ({
+    asOf: NOW,
+    entries: [
+      { ticker: "069500", price: 10_000, amount, qty: qtyA },
+      { ticker: "360750", price: 20_000, amount, qty: qtyB },
+    ],
+  });
+
   it("매수가능금액이 확인되면 예수금과 비교해 작은 쪽을 쓴다", () => {
-    const p = build(api({ cash: 500_000 }, { buyingPower: { amount: 200_000, asOf: NOW } }), "irp");
+    const p = build(api({ cash: 500_000 }, { buyingPower: bpEntries(200_000) }), "irp");
     expect(p.orderability).toBe("budget_verified");
     expect(p.budget!.basis).toBe("buying_power");
     expect(p.budget!.amount).toBe(200_000);
@@ -305,8 +314,107 @@ describe("API 모드 — 검증된 조회값만", () => {
   });
 
   it("매수가능금액이 예수금보다 커도 예수금을 넘지 않는다", () => {
-    const p = build(api({ cash: 100_000 }, { buyingPower: { amount: 900_000, asOf: NOW } }), "irp");
+    const p = build(api({ cash: 100_000 }, { buyingPower: bpEntries(900_000) }), "irp");
     expect(p.budget!.amount).toBe(100_000);
+  });
+
+  it("**확인된 매수가능금액에서는 우리 여유분을 다시 빼지 않는다** (중복 차감 없음)", () => {
+    const p = build(api({ cash: 500_000 }, { buyingPower: bpEntries(300_000) }), "irp");
+    expect(p.budget!.reserve).toBe(0);
+    expect(p.budget!.reserveBasis).toBe("broker_verified_none");
+    expect(p.budget!.spendable).toBe(300_000);
+    // 증권사 값을 그대로 쓴다 — 어떤 비율도 계산에 들어가지 않는다
+    expect(p.budget!.spendable).toBe(p.budget!.amount);
+  });
+
+  it("확인되지 않은 예산(예수금 상한 추정)에는 앱 여유분을 유지한다", () => {
+    const p = build(api({ cash: 500_000 }), "irp");
+    expect(p.budget!.reserveBasis).toBe("app_estimate");
+    expect(p.budget!.reserve).toBeGreaterThan(0);
+  });
+
+  it("**종목별로 가장 작은 주문가능금액을 예산 상한으로 쓴다**", () => {
+    const p = build(api({ cash: 900_000 }, {
+      buyingPower: {
+        asOf: NOW,
+        entries: [
+          { ticker: "069500", price: 10_000, amount: 700_000, qty: 70 },
+          { ticker: "360750", price: 20_000, amount: 400_000, qty: 20 },
+        ],
+      },
+    }), "irp");
+    expect(p.budget!.amount).toBe(400_000);
+  });
+
+  it("증권사가 준 종목별 최대 수량을 넘지 않는다", () => {
+    const p = build(api({ cash: 900_000 }, {
+      buyingPower: {
+        asOf: NOW,
+        entries: [
+          { ticker: "069500", price: 10_000, amount: 900_000, qty: 5 },
+          { ticker: "360750", price: 20_000, amount: 900_000, qty: 3 },
+        ],
+      },
+    }), "irp");
+    expect(p.lines.find((l) => l.rowId === "a")!.buyQty).toBeLessThanOrEqual(5);
+    expect(p.lines.find((l) => l.rowId === "b")!.buyQty).toBeLessThanOrEqual(3);
+  });
+
+  it("**조회 단가가 계획 단가와 다르면 인정하지 않는다** (다른 가격의 근거다)", () => {
+    const stale = bpEntries(300_000);
+    stale.entries[0] = { ...stale.entries[0], price: 9_900 };
+    const p = build(api({ cash: 500_000 }, { buyingPower: stale }), "irp");
+    expect(p.orderability).toBe("estimate_only");
+    expect(p.budget!.basis).toBe("cash_upper_bound");
+    expect(p.budget!.reserveBasis).toBe("app_estimate");
+    const w = p.warnings.find((x) => x.code === "buying_power_unmatched")!;
+    expect(w.message).toContain("ETF-a");
+  });
+
+  it("종목 일부만 조회됐으면 전체를 인정하지 않는다", () => {
+    const partial = bpEntries(300_000);
+    partial.entries.pop();
+    const p = build(api({ cash: 500_000 }, { buyingPower: partial }), "irp");
+    expect(p.orderability).toBe("estimate_only");
+    expect(p.warnings.map((x) => x.code)).toContain("buying_power_unmatched");
+  });
+
+  it("조회 항목이 비어 있으면 조회하지 않은 것과 같다", () => {
+    const p = build(api({ cash: 500_000 }, { buyingPower: { asOf: NOW, entries: [] } }), "irp");
+    expect(p.orderability).toBe("estimate_only");
+    expect(p.warnings.map((x) => x.code)).not.toContain("buying_power_unmatched");
+  });
+
+  it("**실측 시나리오**: 보유 230/64주 + 확인된 주문가능금액으로 추가 매수를 계산한다", () => {
+    const rows = [
+      row({ rowId: "us", ticker: "360750", allocPct: 50, etfName: "TIGER 미국S&P500" }),
+      row({ rowId: "nas", ticker: "367380", allocPct: 50, etfName: "ACE 미국나스닥100" }),
+    ];
+    const qs = { "360750": q(25_985), "367380": q(31_215) };
+    const p = buildBuyOrderPlan(
+      rows, qs,
+      {
+        kind: "kis_api", observedAt: NOW,
+        plan: apiPlan({ holdings: { "360750": 230, "367380": 64 }, cash: 2_318_826 }),
+        buyingPower: {
+          asOf: NOW,
+          entries: [
+            { ticker: "360750", price: 25_985, amount: 2_307_289, qty: 88 },
+            { ticker: "367380", price: 31_215, amount: 2_307_289, qty: 73 },
+          ],
+        },
+      },
+      { accountType: "pension", now: NOW },
+    );
+    expect(p.status).toBe("ready");
+    // 보유가 있는 연금저축 → 보유 반영 (별도 추가매수가 아니다)
+    expect(p.strategy).toBe("with_holdings");
+    expect(p.holdingsBasis).toBe("has_holdings");
+    expect(p.budget!.spendable).toBe(2_307_289); // 증권사 값 그대로, 여유분 중복 차감 없음
+    expect(p.totals!.totalBuyAmount).toBeLessThanOrEqual(2_307_289);
+    expect(p.lines.find((l) => l.rowId === "us")!.currentQty).toBe(230);
+    expect(p.lines.find((l) => l.rowId === "nas")!.currentQty).toBe(64);
+    for (const l of p.lines) expect(Number.isInteger(l.buyQty)).toBe(true);
   });
 
   it("**계좌 식별 미검증 경고**가 항상 붙는다", () => {
@@ -379,7 +487,7 @@ describe("cash_new_buy — 기존 보유를 전체 리밸런싱으로 오인하�
   });
 
   it("**기존 보유가 있으면 별도 추가매수임을 표시하고 보유 반영 전환을 권한다**", () => {
-    const p = build(manual(1_000_000, { a: 50 }), "pension");
+    const p = build(manual(1_000_000, { a: 50 }), "pension", [A, B], quotes, "cash_new_buy");
     expect(p.scope).toBe("additional_purchase");
     expect(p.holdingsBasis).toBe("has_holdings");
     expect(p.recommendedStrategy).toBe("with_holdings");
@@ -435,12 +543,31 @@ describe("cash_new_buy — 기존 보유를 전체 리밸런싱으로 오인하�
     expect(p.warnings.map((w) => w.code)).not.toContain("holdings_not_entered");
   });
 
-  it("전략 전환은 자동이 아니다 — 같은 입력은 같은 전략으로 계산된다", () => {
-    const p1 = build(manual(1_000_000, { a: 50 }), "pension");
-    const p2 = build(manual(1_000_000, { a: 50 }), "pension");
+  it("**전략을 명시하면 그대로 계산한다** — 권고는 권고일 뿐 자동 전환이 아니다", () => {
+    const p1 = build(manual(1_000_000, { a: 50 }), "pension", [A, B], quotes, "cash_new_buy");
+    const p2 = build(manual(1_000_000, { a: 50 }), "pension", [A, B], quotes, "cash_new_buy");
     expect(p1.strategy).toBe("cash_new_buy");
     expect(p2.strategy).toBe("cash_new_buy");
     expect(p1.recommendedStrategy).toBe("with_holdings"); // 권고일 뿐이다
+  });
+
+  it("**전략을 명시하지 않으면 보유가 확인된 연금저축은 보유를 반영한다**", () => {
+    const p = build(manual(1_000_000, { a: 50 }), "pension");
+    expect(p.strategy).toBe("with_holdings");
+    expect(p.scope).toBe("rebalance_buys");
+    expect(p.holdingsBasis).toBe("has_holdings");
+    expect(p.warnings.map((w) => w.code)).not.toContain("new_buy_ignores_holdings");
+  });
+
+  it("보유 0 으로 확인된 연금저축은 자동으로도 신규 매수다", () => {
+    const p = build(manual(1_000_000), "pension");
+    expect(p.strategy).toBe("cash_new_buy");
+  });
+
+  it("보유를 확인하지 못한 연금저축은 신규 매수(경고 포함)를 유지한다", () => {
+    const p = build(manualRaw(1_000_000, {}), "pension");
+    expect(p.strategy).toBe("cash_new_buy");
+    expect(p.warnings.map((w) => w.code)).toContain("new_buy_holdings_unconfirmed");
   });
 });
 
@@ -492,6 +619,103 @@ describe("평가금액 불완전 — 참고용이며 안전하다고 단정하�
   it("참고용이어도 계산 결과(수량)는 예산 불변식을 지킨다", () => {
     const p = build(api({ holdings: { "069500": 1, "999999": 7 } }), "irp");
     expect(p.totals!.totalBuyAmount).toBeLessThanOrEqual(p.budget!.spendable);
+  });
+});
+
+describe("두 ETF 가 같은 주문가능예산을 공유한다", () => {
+  const RA = row({ rowId: "us", ticker: "360750", allocPct: 50, etfName: "TIGER 미국S&P500" });
+  const RB = row({ rowId: "nas", ticker: "367380", allocPct: 50, etfName: "ACE 미국나스닥100" });
+  const QS = { "360750": q(25_985), "367380": q(31_215) };
+  const SHARED = 2_307_289; // 실측: 두 종목 모두 같은 미수없는매수금액
+
+  const plan = (cash: number, held: Record<string, number>, amountA = SHARED, amountB = SHARED, qtyA = 88, qtyB = 73, rows = [RA, RB]) =>
+    buildBuyOrderPlan(
+      rows, QS,
+      {
+        kind: "kis_api", observedAt: NOW,
+        plan: apiPlan({ holdings: held, cash }),
+        buyingPower: {
+          asOf: NOW,
+          entries: [
+            { ticker: "360750", price: 25_985, amount: amountA, qty: qtyA },
+            { ticker: "367380", price: 31_215, amount: amountB, qty: qtyB },
+          ],
+        },
+      },
+      { accountType: "pension", now: NOW, strategy: "with_holdings" },
+    );
+
+  it("**두 종목을 각각 최대 수량까지 사면 예산을 넘는 상황에서도 합계가 예산 이하다**", () => {
+    // 현금이 많고 목표가 커서 각 종목이 자기 최대 수량(88 / 73)을 원한다.
+    // 88×25,985 + 73×31,215 = 4,565,375 > 2,307,289 — 따로 계산하면 예산을 넘는다.
+    const p = plan(5_000_000, {});
+    const a = p.lines.find((l) => l.rowId === "us")!;
+    const b = p.lines.find((l) => l.rowId === "nas")!;
+    expect(88 * 25_985 + 73 * 31_215).toBeGreaterThan(SHARED);
+    expect(p.totals!.totalBuyAmount).toBeLessThanOrEqual(SHARED);
+    expect(a.buyQty).toBeLessThanOrEqual(88);
+    expect(b.buyQty).toBeLessThanOrEqual(73);
+    // 예산 안에서 실제로 샀다 (아무것도 안 사서 통과한 것이 아니다)
+    expect(a.buyQty + b.buyQty).toBeGreaterThan(0);
+    expect(p.totals!.totalBuyAmount).toBeGreaterThan(SHARED - 31_215);
+  });
+
+  it("각 종목 매수 수량은 증권사 최대 수량 이하다 (예산이 충분해도)", () => {
+    const p = plan(50_000_000, {}, 50_000_000, 50_000_000, 10, 7);
+    expect(p.lines.find((l) => l.rowId === "us")!.buyQty).toBeLessThanOrEqual(10);
+    expect(p.lines.find((l) => l.rowId === "nas")!.buyQty).toBeLessThanOrEqual(7);
+  });
+
+  it("종목별 주문가능금액이 다르면 가장 작은 쪽이 공통 예산이다", () => {
+    const p = plan(5_000_000, {}, 2_000_000, 1_500_000);
+    expect(p.budget!.amount).toBe(1_500_000);
+    expect(p.totals!.totalBuyAmount).toBeLessThanOrEqual(1_500_000);
+  });
+
+  it("예수금이 주문가능금액보다 작으면 예수금이 상한이다", () => {
+    const p = plan(1_000_000, {});
+    expect(p.budget!.amount).toBe(1_000_000);
+    expect(p.totals!.totalBuyAmount).toBeLessThanOrEqual(1_000_000);
+    expect(p.totals!.remainingCash).toBeGreaterThanOrEqual(0);
+  });
+
+  it("**같은 종목코드가 두 행이어도 종목 단위 최대 수량을 합쳐서 지킨다**", () => {
+    const dup = row({ rowId: "us2", ticker: "360750", allocPct: 30, etfName: "TIGER 미국S&P500(중복 행)" });
+    const rows = [
+      row({ rowId: "us", ticker: "360750", allocPct: 30, etfName: "TIGER 미국S&P500" }),
+      dup,
+      row({ rowId: "nas", ticker: "367380", allocPct: 40, etfName: "ACE 미국나스닥100" }),
+    ];
+    const p = plan(5_000_000, {}, SHARED, SHARED, 20, 73, rows);
+    const tigerTotal = p.lines.filter((l) => l.ticker === "360750").reduce((s, l) => s + l.buyQty, 0);
+    expect(tigerTotal).toBeLessThanOrEqual(20);
+    expect(p.totals!.totalBuyAmount).toBeLessThanOrEqual(SHARED);
+  });
+
+  it("**같은 종목코드의 보유수량은 첫 행에만 배정한다** (이중 계산 방지)", () => {
+    const dup = row({ rowId: "us2", ticker: "360750", allocPct: 0, etfName: "TIGER(중복)" });
+    const p = plan(2_318_826, { "360750": 230, "367380": 64 }, SHARED, SHARED, 88, 73, [RA, dup, RB]);
+    const qtys = p.lines.filter((l) => l.ticker === "360750").map((l) => l.currentQty);
+    expect(qtys).toEqual([230, 0]);
+  });
+
+  it("임의 입력에서 합계 ≤ 공통 예산, 종목 수량 ≤ 증권사 최대 수량이 깨지지 않는다 (성질 검사)", () => {
+    let seed = 987654;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let i = 0; i < 300; i += 1) {
+      const cash = 100_000 + Math.floor(rnd() * 6_000_000);
+      const budgetA = Math.floor(rnd() * 3_000_000);
+      const budgetB = Math.floor(rnd() * 3_000_000);
+      const qtyA = Math.floor(rnd() * 120);
+      const qtyB = Math.floor(rnd() * 120);
+      const held = { "360750": Math.floor(rnd() * 300), "367380": Math.floor(rnd() * 300) };
+      const p = plan(cash, held, budgetA, budgetB, qtyA, qtyB);
+      expect(p.status).toBe("ready");
+      const cap = Math.min(cash, budgetA, budgetB);
+      expect(p.totals!.totalBuyAmount).toBeLessThanOrEqual(cap);
+      expect(p.lines.find((l) => l.rowId === "us")!.buyQty).toBeLessThanOrEqual(qtyA);
+      expect(p.lines.find((l) => l.rowId === "nas")!.buyQty).toBeLessThanOrEqual(qtyB);
+    }
   });
 });
 

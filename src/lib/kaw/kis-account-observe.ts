@@ -233,21 +233,22 @@ export interface BuyingPowerObservation {
 // ── 매수가능금액 API 지원 현황 ──────────────────────────────────────────────
 
 /**
- * 한국투자 매수가능조회 API 의 **확인된 사실**. 호출 코드는 이 단계에서 만들지 않았다.
+ * 한국투자 매수가능조회 API 의 **확인된 사실**.
  *
- * 확인 출처: 한국투자증권 공식 예제 저장소(koreainvestment/open-trading-api)의
- * `pension_inquire_psbl_order`, `inquire_psbl_order`.
+ * 연금저축(22): 일반 주식 매수가능조회(TTTC8908R)가 **실증됐다**(2026-10-14, 사용자 승인 하에
+ * 읽기 전용 1회 조회: HTTP 200 / rt_cd 0). `nrcvb_buy_amt`(미수없는매수금액)가 한투 앱의
+ * 주문가능원화와 정확히 일치했다. 조회 구현은 `kis-buying-power.ts` 에 있다.
  *
- * 호출을 켜지 않은 이유:
- *   · 둘 다 **종목(PDNO) + 주문단가(ORD_UNPR) 를 요구한다** — "계좌가 쓸 수 있는 돈"이
- *     아니라 "그 종목을 그 가격에 사려 할 때의 한도"를 묻는 호출이다. 계좌 단위
- *     잔고 조회와 성격이 다르고 종목별로 N 번 불러야 한다
- *   · 응답 필드명이 공식 예제에 문서화돼 있지 않다 (실응답으로만 확인된다)
- *   · 연금저축(22)에서 일반 주식 매수가능 API 가 동작하는지는 **미확인**이다
- *   · DC(55) 계좌는 이 API 를 쓸 수 없다고 공식 예제가 명시한다
+ * IRP(29): 연금 전용 API(TTTC0503R)가 공식 예제에 있으나 **이 계좌로 실응답을 확인하지
+ * 않았다.** 응답 필드도 5개(`ord_psbl_cash`, `ruse_psbl_amt`, `psbl_qty_calc_unpr`,
+ * `max_buy_amt`, `max_buy_qty`)뿐이라 22 와 같은 방식으로 쓸 수 있는지 미확인이다.
  *
- * 그래서 매수 주문안은 `cash`(예수금)를 **상한 추정**으로만 쓰고, 매수가능금액이 확인되기
- * 전까지 그렇게 표시한다(`buyBudgetOf`).
+ * 공통: 둘 다 **종목(PDNO) + 주문단가(ORD_UNPR)를 요구**한다 — 계좌 단위 한도가 아니라
+ * "그 종목을 그 가격에 사려 할 때"의 한도다. 그래서 계획의 단가와 **같은 단가로 조회한
+ * 값만** 예산으로 인정한다(buy-order-plan.ts).
+ *
+ * **관측된 비율을 규칙으로 쓰지 않는다.** 응답 안에서 `nrcvb_buy_amt ≈ ord_psbl_cash/1.005`
+ * 가 관측됐지만 이유(수수료·증거금·여유율)와 일반성은 공식 문서로 확인되지 않았다.
  */
 export const KIS_BUYING_POWER_SUPPORT = Object.freeze({
   "29": {
@@ -258,11 +259,40 @@ export const KIS_BUYING_POWER_SUPPORT = Object.freeze({
     note: "퇴직연금 전용 매수가능조회. 공식 예제에 있으나 이 계좌로 실응답을 확인하지 않았다.",
   },
   "22": {
-    status: "unverified",
+    status: "verified_2026_10_14",
     path: "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
     trId: "TTTC8908R",
     requires: ["PDNO", "ORD_UNPR", "ORD_DVSN", "CMA_EVLU_AMT_ICLD_YN", "OVRS_ICLD_YN"],
-    note: "일반 주식 매수가능조회. 연금저축(22)에서의 동작은 확인되지 않았다.",
+    note: "연금저축(22)에서 실증됨. nrcvb_buy_amt 가 앱의 주문가능원화와 일치했다.",
+  },
+} as const);
+
+/**
+ * **주문 API 의 지원 여부 (연금저축 22).** 이 단계에서 주문 기능은 **구현하지 않았다.**
+ *
+ * 공식 예제 저장소(koreainvestment/open-trading-api, examples_llm/domestic_stock) 확인:
+ *   · 연금 전용 API(`pension_*`)는 **조회 5종뿐**이다 — balance / daily_ccld / deposit /
+ *     present_balance / psbl_order. 연금 전용 주문 API 는 없다
+ *   · 일반 주식 주문(`order_cash`, TTTC0012U 매수 / TTTC0011U 매도)은 있으나, 예제의
+ *     계좌 상품코드 설명은 "계좌상품코드(상품유형코드)"뿐이고 **연금저축(22)을 지원하는지
+ *     명시하지 않는다**
+ *
+ * 그래서 22 에서 주문이 되는지는 **공식 문서로 확인되지 않았다.** 확인하려면 실제 주문이
+ * 필요하고 그것은 별도의 명시적 승인이 있어야 한다. 확인 전에는 주문 요청 코드(POST)를
+ * 이 저장소에 두지 않는다.
+ */
+export const KIS_ORDER_SUPPORT = Object.freeze({
+  "22": {
+    status: "unverified",
+    candidate: { path: "/uapi/domestic-stock/v1/trading/order-cash", buyTrId: "TTTC0012U" },
+    pensionSpecificOrderApi: false,
+    note: "연금 전용 주문 API 는 없고, 일반 주문 API 의 22 지원은 공식 예제에 명시되지 않았다.",
+  },
+  "29": {
+    status: "unverified",
+    candidate: null,
+    pensionSpecificOrderApi: false,
+    note: "연금 전용 주문 API 가 없고 일반 주문 API 의 29 지원도 확인되지 않았다.",
   },
 } as const);
 

@@ -132,7 +132,7 @@ export function redactKisSecrets(
 
 // ── 공통 authenticated GET ───────────────────────────────────────────────────
 
-interface KisRawResponse {
+export interface KisRawResponse {
   httpStatus: number;
   body: Record<string, unknown> | null;
   transportError?: string;
@@ -142,7 +142,7 @@ interface KisRawResponse {
  * KIS 인증 GET. 공식 샘플과 동일한 header 구성.
  * **URL / params / body 를 로그로 남기지 않는다** (CANO 가 query string 에 있음).
  */
-async function kisAuthorizedGet(
+export async function kisAuthorizedGet(
   path: string,
   trId: string,
   params: Record<string, string>,
@@ -177,7 +177,7 @@ async function kisAuthorizedGet(
 }
 
 /** HTTP 2xx + rt_cd === "0" 만 성공으로 본다. */
-function toReadResult(raw: KisRawResponse, cred: KisAccountCredentials, token: string): KisAccountReadResult {
+export function toReadResult(raw: KisRawResponse, cred: KisAccountCredentials, token: string): KisAccountReadResult {
   const secrets = [cred.cano, cred.appKey, cred.appSecret, token];
   const body = raw.body ?? {};
   const rtCd = typeof body.rt_cd === "string" ? body.rt_cd : undefined;

@@ -40,6 +40,9 @@ function fakeDeps(over: Partial<{
     fetchPensionSavings: vi.fn(async () => { calls.push("22:balance"); return over.savings ?? bal(); }),
     fetchIrpPresent: vi.fn(async () => { calls.push("29:present"); return over.present ?? bal(); }),
     fetchIrpDeposit: vi.fn(async () => { calls.push("29:deposit"); return over.deposit ?? dep(0); }),
+    // 이 파일의 조회 테스트는 매수가능조회를 쓰지 않는다 — 불리면 실패해야 한다.
+    fetchBuyingPower: vi.fn(async () => { throw new Error("매수가능조회가 호출되면 안 된다"); }),
+    fetchPrices: vi.fn(async () => { throw new Error("시세 조회가 호출되면 안 된다"); }),
     now: () => NOW,
   };
   return { deps, calls };
@@ -448,6 +451,51 @@ describe("GET /api/kis/account", () => {
     expect(text).not.toContain("12345678");
     expect(text).not.toContain(CRED.appSecret);
     expect(text).not.toContain(CRED.appKey);
+  });
+});
+
+describe("GET /api/kis/account — tickers (종목별 매수가능조회 요청)", () => {
+  it.each(["?product=22&tickers=36075", "?product=22&tickers=360750,abc", "?product=22&tickers=1;2"])(
+    "tickers 모양이 틀리면 400 이고 어떤 외부 호출도 하지 않는다 (%s)", async (qs) => {
+      mocks.registry = [{ ...KIS_PENSION }];
+      const fetchSpy = vi.fn();
+      vi.stubGlobal("fetch", fetchSpy);
+      const res = await handleKisAccountGet(req(qs), env);
+      vi.unstubAllGlobals();
+      expect(res.status).toBe(400);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(mocks.dbReads).toBe(0);
+    },
+  );
+
+  it("**소유자가 아니면 tickers 가 있어도 403 이다** (조회·시세 호출 없음)", async () => {
+    mocks.session = { code: "otherfam", profile: "hyeobi" };
+    mocks.registry = [{ ...KIS_PENSION }];
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const res = await handleKisAccountGet(req("?product=22&tickers=360750,367380"), env);
+    vi.unstubAllGlobals();
+    expect(res.status).toBe(403);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("계산만 제공 계좌는 tickers 가 있어도 매수가능조회를 하지 않는다", async () => {
+    mocks.registry = [{ ...KIS_PENSION, connectionMode: "calc_only" }];
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const res = await handleKisAccountGet(req("?product=22&tickers=360750"), env);
+    vi.unstubAllGlobals();
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { buyingPower: { status: string } | null };
+    expect(body.buyingPower?.status).toBe("not_queried");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("tickers 가 없으면 buyingPower 는 null 이다 (기존 응답과 호환)", async () => {
+    mocks.registry = [];
+    const res = await handleKisAccountGet(req("?product=22"), env);
+    const body = (await res.json()) as { buyingPower: unknown };
+    expect(body.buyingPower).toBeNull();
   });
 });
 

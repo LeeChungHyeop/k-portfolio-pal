@@ -65,7 +65,9 @@ export function BuyOrderPreviewCard({
   );
   const apiMode = connection.mode === "api_readonly";
 
-  const [strategy, setStrategy] = useState<Strategy>(defaultStrategy(accountId));
+  // null = 자동. 자동이면 계산 모듈이 계좌 상태(보유 확인 여부)로 전략을 정한다 —
+  // 이미 ETF 를 가진 연금저축에는 보유 반영, 보유 0 으로 확인된 연금저축에는 신규 매수.
+  const [strategyChoice, setStrategyChoice] = useState<Strategy | null>(null);
   const [fetched, setFetched] = useState<KisClientResult | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -73,7 +75,9 @@ export function BuyOrderPreviewCard({
     if (loading) return;
     setLoading(true);
     try {
-      setFetched(await requestKisAccount(state.brokerAccounts ?? [], accountId, today));
+      // 매수 대상 종목의 매수가능조회를 같이 요청한다(서버가 종목별 지정가로 GET 조회).
+      const tickers = rows.filter((r) => r.ticker && r.allocPct > 0 && !r.orphaned).map((r) => r.ticker as string);
+      setFetched(await requestKisAccount(state.brokerAccounts ?? [], accountId, today, fetch, tickers));
     } finally {
       setLoading(false);
     }
@@ -103,20 +107,37 @@ export function BuyOrderPreviewCard({
 
   const apiResult = fetched?.kind === "result" ? fetched : null;
 
+  // 증권사가 매수가능금액을 계산한 단가(지정가)를 계획 단가로 쓴다. 그래야 "이 가격에 이
+  // 수량을 살 수 있다"가 그 가격의 근거를 갖는다. 검증된 항목이 없는 종목은 화면 시세 그대로다.
+  const effectiveQuotes = useMemo(() => {
+    const bp = apiResult?.buyingPower;
+    if (!bp || bp.entries.length === 0) return quotes;
+    const out = { ...quotes };
+    for (const e of bp.entries) {
+      out[e.ticker] = { price: e.price, source: "kis", asOf: bp.asOf };
+    }
+    return out;
+  }, [apiResult, quotes]);
+
   const plan = useMemo(() => {
     if (apiMode) {
       if (!apiResult) return null; // 아직 조회하지 않았다 — 계산하지 않는다
+      const bp = apiResult.buyingPower;
       return buildBuyOrderPlan(
-        rows, quotes,
-        { kind: "kis_api", plan: apiResult.plan, observedAt: apiResult.observation.observedAt },
-        { accountType: accountId, strategy },
+        rows, effectiveQuotes,
+        {
+          kind: "kis_api", plan: apiResult.plan, observedAt: apiResult.observation.observedAt,
+          // 검증된 항목만 넘긴다. 계획의 단가와 대조하는 것은 계산 모듈의 일이다.
+          buyingPower: bp && bp.entries.length ? { asOf: bp.asOf ?? apiResult.observation.observedAt, entries: bp.entries } : null,
+        },
+        { accountType: accountId, ...(strategyChoice ? { strategy: strategyChoice } : {}) },
       );
     }
     return buildBuyOrderPlan(
       rows, quotes, { kind: "manual", quantities, cash },
-      { accountType: accountId, strategy },
+      { accountType: accountId, ...(strategyChoice ? { strategy: strategyChoice } : {}) },
     );
-  }, [apiMode, apiResult, rows, quotes, quantities, cash, accountId, strategy]);
+  }, [apiMode, apiResult, rows, quotes, effectiveQuotes, quantities, cash, accountId, strategyChoice]);
 
   const badge = plan ? orderabilityBadge(plan) : null;
   // 이 계좌 상태에 맞지 않는 전략이면 전환을 안내한다. 자동으로 바꾸지 않는다.
@@ -150,8 +171,8 @@ export function BuyOrderPreviewCard({
         {accountId === "pension" && (
           <select
             className="text-xs border rounded-md px-2 py-1 bg-background"
-            value={strategy}
-            onChange={(e) => setStrategy(e.target.value as Strategy)}
+            value={plan?.strategy ?? strategyChoice ?? defaultStrategy(accountId)}
+            onChange={(e) => setStrategyChoice(e.target.value as Strategy)}
             aria-label="계산 방식"
           >
             {(Object.keys(STRATEGY_TEXT) as Strategy[]).map((s) => (
@@ -200,7 +221,7 @@ export function BuyOrderPreviewCard({
               {switchHint && (
                 <div className="flex items-start gap-2 flex-wrap text-xs border rounded-md p-2 bg-muted/40">
                   <span className="flex-1 min-w-[12rem]">{switchHint.text}</span>
-                  <Button size="sm" variant="outline" onClick={() => setStrategy(switchHint.to)}>
+                  <Button size="sm" variant="outline" onClick={() => setStrategyChoice(switchHint.to)}>
                     {STRATEGY_TEXT[switchHint.to]}(으)로 전환
                   </Button>
                 </div>
