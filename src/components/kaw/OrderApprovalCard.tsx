@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import type { AccountId } from "@/lib/kaw/constants";
 import { usePortfolioStore } from "@/lib/kaw/store";
 import { kstDateString } from "@/lib/kaw/snapshot";
-import { LIVE_ORDER_API, ORDER_TARGET, ORDER_UI_ENV_KEY, orderUiGate } from "@/lib/kaw/order-client";
+import { LIVE_ORDER_API, ORDER_TARGET, orderUiGate } from "@/lib/kaw/order-client";
 import { BROWSER_INTENT_STORAGE, OrderApprovalPanel } from "@/components/kaw/OrderApprovalPanel";
 
 /**
@@ -12,7 +12,8 @@ import { BROWSER_INTENT_STORAGE, OrderApprovalPanel } from "@/components/kaw/Ord
 export function OrderApprovalCard({ accountId }: { accountId: AccountId }) {
   const { state: store } = usePortfolioStore();
   const today = kstDateString();
-  const uiFlag = (import.meta.env as Record<string, unknown>)[ORDER_UI_ENV_KEY];
+  // 정적 접근(이름 그대로) — 객체째 읽으면 .env 의 모든 VITE_* 가 번들에 들어간다.
+  const uiFlag: unknown = import.meta.env.VITE_KAW_KIS_ORDER_UI;
   const gate = useMemo(
     () => orderUiGate(accountId === "pension" ? (store.brokerAccounts ?? []) : [], today, uiFlag),
     [accountId, store.brokerAccounts, today, uiFlag],

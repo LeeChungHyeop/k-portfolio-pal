@@ -88,9 +88,16 @@ function readSources(
   let env: string | undefined;
   let dev = false;
   try {
-    const meta = (import.meta as unknown as { env?: Record<string, unknown> }).env;
-    env = typeof meta?.[envKey] === "string" ? (meta[envKey] as string) : undefined;
-    dev = meta?.DEV === true;
+    // **정적 속성 접근만 쓴다.** `import.meta.env` 를 객체째 읽으면(또는 키를 변수로 고르면) Vite 가
+    // env 객체 전체(.env 의 모든 VITE_* 값)를 클라이언트 번들에 박는다 — 쓰지도 않는 Supabase
+    // anon key 까지 공개된다. 필요한 flag 만 이름으로 읽는다.
+    const known: Record<string, unknown> = {
+      [SESSION_TRACKING_ENV_KEY]: import.meta.env.VITE_KAW_REBALANCE_SESSION,
+      [REVISION_GUARD_ENV_KEY]: import.meta.env.VITE_KAW_DATA_REVISION_GUARD,
+    };
+    const raw = known[envKey];
+    env = typeof raw === "string" ? raw : undefined;
+    dev = import.meta.env.DEV === true;
   } catch {
     env = undefined;
     dev = false;
