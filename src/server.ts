@@ -38,6 +38,10 @@ export interface Env {
   KIS_ORDER_DISMISS_ENABLED?: string;
   /** `/api/data` 무가드 저장 차단(428). **기본 꺼짐** */
   KAW_REQUIRE_REVISION?: string;
+  /** 비밀 질문 새 정답 해시(JSON 배열 5개, secret). 없으면 비밀 질문 인증 비활성 */
+  SECRET_QUESTION_ANSWER_HASHES?: string;
+  /** 초기 설정 코드 해시(secret). 아무도 PIN 을 설정하지 않은 가족의 첫 PIN 등록용 */
+  FAMILY_SETUP_CODE_HASH?: string;
   /** 위 계좌의 소유 가족 코드 + 소유 프로필 id(비밀값 아님). 하나라도 없으면 아무도 조회할 수 없다 */
   KIS_ACCOUNT_OWNER_FAMILY_CODE?: string;
   KIS_ACCOUNT_OWNER_PROFILE?: string;

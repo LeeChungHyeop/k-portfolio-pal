@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { loginWithCode, ACCESS_CODE } from "@/lib/kaw/store";
 import {
-  SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, type SQIndex,
+  SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, sqFailureMessage, type SQIndex,
 } from "@/lib/kaw/secretQuestions";
 
 type Step = "entry" | "secret_question";
@@ -52,7 +52,7 @@ export function AuthGate() {
     const ok = await verifySQAnswer(sqIdx, sqAnswer);
     if (!ok) {
       setSqLoading(false);
-      setSqError("정답이 맞지 않습니다. 다시 시도해주세요.");
+      setSqError(sqFailureMessage());
       setSqAnswer("");
       return;
     }

@@ -2,10 +2,10 @@ import { useState, useRef, useEffect } from "react";
 import { ArrowLeft, RefreshCw, AlertCircle, KeyRound, HelpCircle } from "lucide-react";
 import {
   type ProfileConfig, type FamilyData,
-  verifyPin, updatePin, updatePinViaSecretQuestion, verifyMasterCode,
+  verifyPin, updatePin, setFirstPin, updatePinViaSecretQuestion, verifyMasterCode,
 } from "@/lib/kaw/auth";
 import {
-  SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, type SQIndex,
+  SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, sqFailureMessage, type SQIndex,
 } from "@/lib/kaw/secretQuestions";
 
 interface Props {
@@ -17,7 +17,7 @@ interface Props {
   onFamilyUpdate: (fd: FamilyData) => void;
 }
 
-type Step = "entry" | "setup" | "forgot_master" | "secret_question" | "reset_pin";
+type Step = "entry" | "setup_auth" | "setup" | "forgot_master" | "secret_question" | "reset_pin";
 
 const AVATAR_COLORS = [
   "from-violet-500 to-blue-500",
@@ -79,7 +79,12 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
   const avatarColor = AVATAR_COLORS[Math.max(0, colorIdx)];
 
   const hasPinSet = Boolean(profile.pin_hash);
-  const [step, setStep] = useState<Step>(hasPinSet ? "entry" : "setup");
+  // PIN 이 아직 없는 프로필의 첫 PIN 은 액세스 코드(공개값)로 등록할 수 없다 — 마스터 코드 또는
+  // 운영자가 발급한 초기 설정 코드로 먼저 인증한다(setup_auth).
+  const [step, setStep] = useState<Step>(hasPinSet ? "entry" : "setup_auth");
+  const [setupProof, setSetupProof] = useState("");
+  const [setupProofErr, setSetupProofErr] = useState<string | null>(null);
+  const familyInitialized = familyData.initialized ?? familyData.profiles.some((x) => Boolean(x.pin_hash));
 
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
@@ -142,9 +147,19 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
         }
         setLoading(true);
         try {
-          const updated = await updatePin(familyCode, profile.id, pin, familyData);
+          // 최초 등록: 인증값(마스터 코드 또는 초기 설정 코드)을 함께 보낸다. 서버가 다시 검증한다.
+          const updated = await setFirstPin(familyCode, profile.id, pin, {
+            masterCode: familyData.hasMasterCode ? setupProof : undefined,
+            setupCode: familyInitialized ? undefined : setupProof,
+          });
           onFamilyUpdate(updated); onSuccess(updated);
-        } catch { setError("저장 중 오류가 발생했습니다."); setLoading(false); }
+        } catch (e) {
+          const msg = (e as Error)?.message ?? "";
+          setSetupProofErr(msg.includes("인증") ? "인증에 실패했습니다. 코드를 다시 확인해주세요." : "저장 중 오류가 발생했습니다.");
+          setLoading(false);
+          setPin(""); setPinConfirm(""); setOnConfirmStep(false);
+          setStep("setup_auth");
+        }
       }
     }
   }
@@ -196,7 +211,7 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
     const ok = await verifySQAnswer(sqIdx, sqAnswer);
     setSqLoading(false);
     if (!ok) {
-      setSqError("정답이 맞지 않습니다. 다시 시도해주세요.");
+      setSqError(sqFailureMessage());
       setSqAnswer("");
       return;
     }
@@ -225,11 +240,61 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
           <h2 className="text-xl font-bold">{profile.label}</h2>
         </div>
 
+        {/* ── 최초 PIN 등록 전 인증 ─────────────────────────────── */}
+        {step === "setup_auth" && (
+          <div className="mt-6 space-y-4">
+            {familyInitialized && !familyData.hasMasterCode ? (
+              <>
+                <p className="text-center text-sm text-muted-foreground">
+                  이 프로필은 아직 비밀번호가 없습니다.<br />
+                  다른 관리자 계정으로 로그인한 뒤<br />설정 → 사용자 관리에서 비밀번호를 설정해 주세요.
+                </p>
+                <button type="button" onClick={onBack}
+                  className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors">
+                  돌아가기
+                </button>
+              </>
+            ) : (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!setupProof.trim()) return;
+                  setSetupProofErr(null);
+                  setStep("setup");
+                }}
+                className="space-y-3"
+              >
+                <p className="text-center text-sm text-muted-foreground">
+                  {familyData.hasMasterCode
+                    ? "비밀번호를 처음 설정하려면 마스터 코드가 필요합니다."
+                    : "처음 설정하려면 운영자가 발급한 초기 설정 코드가 필요합니다."}
+                </p>
+                <input
+                  type="password"
+                  value={setupProof}
+                  onChange={(e) => { setSetupProof(e.target.value); setSetupProofErr(null); }}
+                  placeholder={familyData.hasMasterCode ? "마스터 코드" : "초기 설정 코드"}
+                  className="w-full h-11 px-4 rounded-xl border bg-background text-sm outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500 transition-all"
+                />
+                {setupProofErr && (
+                  <div className="flex items-center gap-2 text-rose-500 text-xs bg-rose-500/10 rounded-lg px-3 py-2">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />{setupProofErr}
+                  </div>
+                )}
+                <button type="submit" disabled={!setupProof.trim()}
+                  className="w-full h-11 rounded-xl bg-gradient-to-r from-violet-500 to-blue-500 text-white text-sm font-semibold disabled:opacity-50 transition-all">
+                  다음
+                </button>
+              </form>
+            )}
+          </div>
+        )}
+
         {/* ── 마스터 코드 인증 ──────────────────────────────────── */}
         {step === "forgot_master" && (
           <div className="mt-6 space-y-4">
             <p className="text-center text-sm text-muted-foreground">
-              액세스 코드를 입력하면<br />비밀번호를 초기화할 수 있습니다.
+              마스터 코드를 입력하면<br />비밀번호를 초기화할 수 있습니다.
             </p>
             <form onSubmit={handleMasterVerify} className="space-y-3">
               <input
@@ -237,7 +302,7 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
                 type="password"
                 value={masterInput}
                 onChange={(e) => { setMasterInput(e.target.value); setMasterError(null); }}
-                placeholder="액세스 코드를 입력하세요"
+                placeholder="마스터 코드를 입력하세요"
                 className="w-full h-11 px-4 rounded-xl border bg-background text-sm outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500 transition-all"
               />
               {masterError && (
@@ -249,7 +314,7 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
                 className="w-full h-11 rounded-xl bg-gradient-to-r from-violet-500 to-blue-500 text-white text-sm font-semibold disabled:opacity-50 transition-all">
                 {masterLoading ? <RefreshCw className="w-4 h-4 animate-spin mx-auto" /> : "확인 후 비밀번호 재설정"}
               </button>
-              <button type="button" onClick={() => { setStep(hasPinSet ? "entry" : "setup"); resetState(); }}
+              <button type="button" onClick={() => { setStep(hasPinSet ? "entry" : "setup_auth"); resetState(); }}
                 className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors">
                 취소
               </button>
@@ -303,7 +368,7 @@ export function PinGate({ profile, familyData, familyCode, onSuccess, onBack, on
                 className="w-full h-11 rounded-xl bg-gradient-to-r from-violet-500 to-blue-500 text-white text-sm font-semibold disabled:opacity-50 transition-all">
                 {sqLoading ? "확인 중..." : "확인 후 비밀번호 재설정"}
               </button>
-              <button type="button" onClick={() => { setStep(hasPinSet ? "entry" : "setup"); resetState(); }}
+              <button type="button" onClick={() => { setStep(hasPinSet ? "entry" : "setup_auth"); resetState(); }}
                 className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors">
                 취소
               </button>

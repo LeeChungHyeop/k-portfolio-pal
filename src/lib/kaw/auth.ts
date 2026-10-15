@@ -12,6 +12,10 @@ export interface ProfileConfig {
 export interface FamilyData {
   profiles: ProfileConfig[];
   master_code_hash?: string | null;
+  /** 서버가 알려주는 실제 설정 여부. false 면 마스터 인증이 거부되므로 초기 설정이 필요하다 */
+  hasMasterCode?: boolean;
+  /** 서버가 알려주는 값: 어느 프로필이든 PIN 이 설정돼 있는가. false 면 초기 등록 가족 */
+  initialized?: boolean;
   deleted_profiles?: ProfileConfig[];
   isNew?: boolean; // /api/auth/family 응답에서만 내려옴 — 이 family_code가 방금 처음 생성됐는지
 }
@@ -47,9 +51,11 @@ function consumePinProof(profileId: string): string | undefined {
 }
 
 async function api<T>(path: string, body: unknown): Promise<T> {
+  // 세션이 있으면 함께 보낸다(서버가 다른 관리자의 PIN 설정 같은 요청의 근거로 검증한다).
+  const token = typeof sessionStorage !== "undefined" ? sessionStorage.getItem(SESSION_TOKEN_KEY) : null;
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify(body),
   });
   return res.json() as Promise<T>;
@@ -111,6 +117,37 @@ export async function updatePin(
   return updated;
 }
 
+/**
+ * PIN 이 아직 없는 프로필의 **최초 PIN 등록**. 근거는 마스터 코드 또는(아무도 PIN 이 없는 가족이면)
+ * 운영자가 발급한 초기 설정 코드다. 액세스 코드는 근거가 아니다.
+ */
+export async function setFirstPin(
+  code: string,
+  profileId: string,
+  pin: string,
+  proof: { masterCode?: string; setupCode?: string },
+): Promise<FamilyData> {
+  const updated = await api<FamilyData & { error?: string }>("/api/auth/set-pin", {
+    code, profileId, newPin: pin,
+    ...(proof.masterCode ? { masterCode: proof.masterCode } : {}),
+    ...(proof.setupCode ? { setupCode: proof.setupCode } : {}),
+  });
+  if (updated.error) throw new Error(updated.error);
+  localStorage.setItem(FAMILY_CACHE_KEY(code), JSON.stringify(updated));
+  return updated;
+}
+
+/**
+ * 로그인한 **다른 관리자**가 PIN 이 없는 프로필의 첫 PIN 을 설정한다. 근거는 세션(Authorization)
+ * 이며 서버가 서명·만료·pin_version·관리자 권한을 확인한다.
+ */
+export async function setFirstPinAsAdmin(code: string, profileId: string, pin: string): Promise<FamilyData> {
+  const updated = await api<FamilyData & { error?: string }>("/api/auth/set-pin", { code, profileId, newPin: pin });
+  if (updated.error) throw new Error(updated.error);
+  localStorage.setItem(FAMILY_CACHE_KEY(code), JSON.stringify(updated));
+  return updated;
+}
+
 // 비밀질문 통과 후 PIN 재설정 시 사용 (서버에서 정답을 재검증함)
 export async function updatePinViaSecretQuestion(
   code: string,
@@ -159,6 +196,23 @@ export async function updateMasterCode(
   const updated = await api<FamilyData & { error?: string }>("/api/auth/set-master", {
     code: familyCode, newCode, currentMaster,
   });
+  if (updated.error) throw new Error(updated.error);
+  localStorage.setItem(FAMILY_CACHE_KEY(familyCode), JSON.stringify(updated));
+  return updated;
+}
+
+/**
+ * 마스터 코드가 **미설정**인 가족의 최초 설정. 로그인한 관리자 세션(Authorization)이 근거다 —
+ * 액세스 코드는 공개값이라 인증 근거로 쓰지 않는다.
+ */
+export async function setInitialMasterCode(newCode: string, familyCode: string): Promise<FamilyData> {
+  const token = getSessionToken();
+  const res = await fetch("/api/auth/set-master", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify({ code: familyCode, newCode }),
+  });
+  const updated = (await res.json()) as FamilyData & { error?: string };
   if (updated.error) throw new Error(updated.error);
   localStorage.setItem(FAMILY_CACHE_KEY(familyCode), JSON.stringify(updated));
   return updated;

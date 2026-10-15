@@ -26,6 +26,16 @@ export interface DataEnv {
    * 있어야 한다(아니면 모든 저장이 막힌다).
    */
   KAW_REQUIRE_REVISION?: string;
+  /**
+   * 비밀 질문 새 정답의 해시(JSON 배열 5개). 없으면 비밀 질문 인증은 비활성이다.
+   * 정답 자체를 소스·저장소에 두지 않는다.
+   */
+  SECRET_QUESTION_ANSWER_HASHES?: string;
+  /**
+   * 초기 설정 코드의 해시(sha256("setup:<가족 코드>:<설정 코드>"), secret). **아직 아무도 PIN 을 설정하지 않은**
+   * 가족의 첫 PIN 등록에만 쓴다. 없으면 그 등록은 불가능하다(fail closed).
+   */
+  FAMILY_SETUP_CODE_HASH?: string;
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SESSION_SECRET?: string;
@@ -127,8 +137,36 @@ async function hashMaster(entered: string): Promise<string> {
   return sha256Hex(`master:${entered}`);
 }
 
-// 서버 전용 — 정답은 클라이언트 번들에 절대 포함하지 않는다 (질문 텍스트만 클라이언트에 공개)
-const SECRET_QUESTIONS_ANSWERS = ["대전", "러닝", "진현", "12시", "맥북"];
+// ── 비밀 질문 ──────────────────────────────────────────────────────────────
+// **정답은 소스에 두지 않는다.** 예전 정답이 공개 저장소(소스·git 이력)에 있었으므로 그 값은
+// 더 이상 인증 근거가 아니다(= 이미 노출된 값). 서버는 운영자가 Cloudflare secret
+// `SECRET_QUESTION_ANSWER_HASHES`(길이 5 JSON 배열, 각 원소 = sha256("sq:<번호>:<정답 trim>"))에
+// 넣은 **새 정답의 해시**로만 검증한다. 이 secret 이 없거나 모양이 틀리면 비밀 질문 인증은
+// **비활성(fail closed)** 이며 마스터 코드·현재 PIN 인증은 그대로 동작한다.
+const SQ_COUNT = 5;
+
+function secretQuestionHashes(env: DataEnv): string[] | null {
+  const raw = env.SECRET_QUESTION_ANSWER_HASHES;
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as unknown;
+    if (!Array.isArray(v) || v.length !== SQ_COUNT) return null;
+    if (!v.every((h) => typeof h === "string" && /^[0-9a-f]{64}$/.test(h))) return null;
+    return v as string[];
+  } catch {
+    return null;
+  }
+}
+
+/** 비밀 질문 인증이 켜져 있는가(운영자가 새 정답 해시를 등록했는가). */
+export const isSecretQuestionEnabled = (env: DataEnv): boolean => secretQuestionHashes(env) !== null;
+
+function constantTimeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
 
 // pin_version: PIN이 바뀔 때마다 증가 — 세션 토큰에 발급 당시 버전을 같이 담아둬서,
 // PIN이 바뀐 뒤에는 그 전에 발급된 토큰이 자동으로 무효화되게 한다.
@@ -161,6 +199,78 @@ async function saveFamilyRaw(client: SupabaseClient, code: string, family: Famil
   if (error) throw new Error(error.message);
 }
 
+// ── 가족 설정 행의 낙관적 잠금 ───────────────────────────────────────────────
+// 가족 설정(`_system/_family`)은 통째로 교체되는 문서라서, 읽은 뒤 쓰기 전에 다른 변경이 끼면
+// 그 변경을 지운다(PIN 설정·프로필 추가·삭제 사이의 경합). 쓰는 방식은 읽은 상태로 정해진다:
+//   cas     행이 있고 revision 을 읽었다 → 읽은 revision 과 같을 때만 쓰고 +1(migration 006)
+//   insert  행이 없다(새 가족) → INSERT. 동시 생성은 유일 제약이 하나만 통과시킨다
+//   legacy  revision 컬럼을 읽을 수 없다(구 스키마·테스트 더블) → 기존 upsert
+interface FamilyLoad { family: FamilyData; mode: "cas" | "insert" | "legacy"; revision: number | null }
+
+async function loadFamilyVersioned(client: SupabaseClient, code: string): Promise<FamilyLoad> {
+  const { data, error } = await client
+    .from("kaw_data").select("data, revision")
+    .eq("family_code", code).eq("profile", "_system").eq("account_type", "_family")
+    .maybeSingle();
+  if (error) return { family: await loadFamilyRaw(client, code), mode: "legacy", revision: null };
+  const row = data as { data?: FamilyData; revision?: unknown } | null;
+  if (!row) return { family: defaultFamilyData(), mode: "insert", revision: null };
+  if (typeof row.revision !== "number") return { family: row.data ?? defaultFamilyData(), mode: "legacy", revision: null };
+  return { family: row.data ?? defaultFamilyData(), mode: "cas", revision: row.revision };
+}
+
+const CONFLICT_BODY = { error: "동시에 다른 변경이 있어 저장하지 않았습니다. 다시 시도해 주세요." };
+
+/** 충돌이면 409 응답을, 성공하면 null 을 돌려준다. */
+async function commitFamily(
+  client: SupabaseClient, code: string, family: FamilyData, load: FamilyLoad,
+): Promise<Response | null> {
+  const now = new Date().toISOString();
+  if (load.mode === "legacy") {
+    await saveFamilyRaw(client, code, family);
+    return null;
+  }
+  if (load.mode === "insert") {
+    const { error } = await client.from("kaw_data").insert({
+      family_code: code, profile: "_system", account_type: "_family", data: family, updated_at: now,
+    });
+    if (!error) return null;
+    if ((error as { code?: string }).code === "23505") return json(CONFLICT_BODY, 409);
+    throw new Error(error.message);
+  }
+  const { data, error } = await client.from("kaw_data")
+    .update({ data: family, updated_at: now, revision: (load.revision ?? 0) + 1 })
+    .eq("family_code", code).eq("profile", "_system").eq("account_type", "_family")
+    .eq("revision", load.revision ?? 0)
+    .select("revision");
+  if (error) throw new Error(error.message);
+  if (!data?.length) return json(CONFLICT_BODY, 409);
+  return null;
+}
+
+/** 초기 설정 코드 검증. 해시가 없으면 비활성(fail closed). */
+async function verifySetupCode(env: DataEnv, entered: string, code: string): Promise<boolean> {
+  const expected = env.FAMILY_SETUP_CODE_HASH;
+  if (!expected || !/^[0-9a-f]{64}$/.test(expected)) return false;
+  // 추측 횟수를 제한할 수 없으면(KV 미설정) 이 경로를 쓰지 않는다 — 마스터·PIN 과 달리 새 경로라
+  // 가용성보다 닫힌 쪽을 택한다.
+  if (!env.RATE_LIMIT) return false;
+  const rlKey = `rl:setup:${code}`;
+  if (!(await checkRateLimit(env, rlKey, 10, 10 * 60))) return false;
+  // 가족 코드에 묶는다: 다른 가족·환경에서 만든 같은 문자열의 해시가 재사용되지 않는다.
+  const ok = constantTimeEqualHex(await sha256Hex(`setup:${code}:${entered.trim()}`), expected);
+  if (ok) await resetRateLimit(env, rlKey);
+  return ok;
+}
+
+/**
+ * 어느 프로필이든(삭제된 프로필 포함) PIN 이 한 번이라도 설정됐는가. 삭제된 프로필을 빼면, PIN 을
+ * 가진 프로필을 모두 삭제한 가족이 "초기화 전"으로 보여 설정 코드 경로가 다시 열린다.
+ */
+function familyHasAnyPin(f: FamilyData): boolean {
+  return [...f.profiles, ...(f.deleted_profiles ?? [])].some((p) => Boolean(p.pin_hash));
+}
+
 function sanitizeProfile(p: ProfileConfig) {
   return { id: p.id, label: p.label, is_admin: p.is_admin, pin_hash: p.pin_hash ? "•" : null };
 }
@@ -168,18 +278,40 @@ function sanitizeFamily(f: FamilyData) {
   return {
     profiles: f.profiles.map(sanitizeProfile),
     deleted_profiles: (f.deleted_profiles ?? []).map(sanitizeProfile),
-    hasMasterCode: true, // master_code_hash가 없어도 family_code 자체가 항상 유효한 마스터코드로 동작함
+    // 실제로 설정돼 있는가. (예전에는 항상 true 였다 — 미설정이어도 액세스 코드가 마스터로 통했기 때문.
+    // 지금은 미설정이면 마스터 인증이 **거부**되므로, 화면이 "초기 설정"을 안내할 수 있어야 한다.)
+    hasMasterCode: Boolean(f.master_code_hash),
+    // 어느 프로필이든 PIN 이 한 번이라도 설정됐는가. false 면 "초기 등록" 가족이다 —
+    // 첫 PIN 은 운영자가 발급한 설정 코드(또는 마스터)로만 등록할 수 있다.
+    initialized: familyHasAnyPin(f),
   };
 }
 
+/**
+ * 마스터 코드 검증. **설정된 마스터만 인정한다(fail closed).**
+ *
+ * 예전에는 master_code_hash 가 없으면 액세스 코드(`code`)를 마스터로 받아들였다. 그 값은 브라우저
+ * 번들과 공개 저장소에 있어서, 미설정 가족은 누구나 마스터 권한(프로필 추가·삭제, PIN 재설정,
+ * 마스터 변경)을 얻을 수 있었다. 이제 미설정이면 어떤 입력도 거부한다 — 속도 제한 카운트도 올리지
+ * 않는다(미설정 가족의 마스터 시도가 정상 사용자를 잠그지 못하게).
+ * 미설정 가족의 최초 설정은 `handleSetMaster` 의 "로그인한 관리자 세션" 경로로만 한다.
+ */
 async function verifyMaster(env: DataEnv, family: FamilyData, entered: string, code: string): Promise<boolean> {
+  if (!family.master_code_hash) return false;
   const rlKey = `rl:master:${code}`;
   if (!(await checkRateLimit(env, rlKey, 10, 10 * 60))) return false;
-  const ok = family.master_code_hash
-    ? (await hashMaster(entered)) === family.master_code_hash
-    : entered.trim() === code;
+  const ok = (await hashMaster(entered)) === family.master_code_hash;
   if (ok) await resetRateLimit(env, rlKey);
   return ok;
+}
+
+/** 새 마스터 코드의 최소 요건. 액세스 코드(공개값)와 같거나 너무 짧으면 거부한다. */
+export const MASTER_MIN_LENGTH = 8;
+function masterCodeProblem(newCode: string, code: string): string | null {
+  const t = newCode.trim();
+  if (t.length < MASTER_MIN_LENGTH) return `마스터 코드는 ${MASTER_MIN_LENGTH}자 이상이어야 합니다.`;
+  if (t === code || t.toLowerCase() === code.toLowerCase()) return "마스터 코드는 액세스 코드와 달라야 합니다.";
+  return null;
 }
 
 async function verifyPinHash(env: DataEnv, code: string, profileId: string, pin: string, expectedHash: string | null): Promise<boolean> {
@@ -218,9 +350,13 @@ export async function requireSession(
 }
 
 async function verifySecretQuestion(env: DataEnv, sqIdx: number, answer: string): Promise<boolean> {
+  const hashes = secretQuestionHashes(env);
+  if (!hashes) return false; // 비활성: 어떤 답도 통과하지 않는다(속도 제한 카운트도 올리지 않는다)
+  if (!Number.isInteger(sqIdx) || sqIdx < 0 || sqIdx >= SQ_COUNT) return false;
   const rlKey = `rl:sq:${sqIdx}`;
   if (!(await checkRateLimit(env, rlKey, 10, 10 * 60))) return false;
-  const ok = sqIdx >= 0 && sqIdx < SECRET_QUESTIONS_ANSWERS.length && answer.trim() === SECRET_QUESTIONS_ANSWERS[sqIdx];
+  const given = await sha256Hex(`sq:${sqIdx}:${answer.trim()}`);
+  const ok = constantTimeEqualHex(given, hashes[sqIdx]);
   if (ok) await resetRateLimit(env, rlKey);
   return ok;
 }
@@ -233,12 +369,12 @@ export async function handleAuthFamily(request: Request, env: DataEnv): Promise<
   if (!code || code !== env.ACCESS_CODE) return json({ error: "액세스 코드가 올바르지 않습니다." }, 401);
   if (!client) return json({ ...sanitizeFamily(defaultFamilyData()), isNew: true });
 
-  // 이 family_code로 저장된 행이 하나도 없으면 신규 — 기본 프로필 메타데이터를 만들어둔다
-  // (계좌 데이터 자체는 클라이언트가 /api/data 조회 실패 시 알아서 emptyState/seedState로 폴백함)
+  // 이 family_code 로 저장된 행이 하나도 없으면 신규 — **쓰지 않는다.** 액세스 코드는 공개값이라
+  // 인증 없는 요청이 DB 행을 만들게 두지 않는다. 기본 프로필 목록만 돌려주고, 설정 행은
+  // 인증된 첫 PIN 등록(handleSetPin)이 만든다.
   const { data: existing } = await client.from("kaw_data").select("id").eq("family_code", code).limit(1);
   const isNew = !existing?.length;
   const family = isNew ? defaultFamilyData() : await loadFamilyRaw(client, code);
-  if (isNew) await saveFamilyRaw(client, code, family);
   return json({ ...sanitizeFamily(family), isNew });
 }
 
@@ -275,18 +411,23 @@ export async function handleVerifySecretQuestion(request: Request, env: DataEnv)
   const body = (await request.json().catch(() => ({}))) as { sqIdx?: unknown; answer?: unknown };
   const idx = typeof body.sqIdx === "number" ? body.sqIdx : -1;
   const answer = typeof body.answer === "string" ? body.answer : "";
+  if (!isSecretQuestionEnabled(env)) return json({ ok: false, disabled: true });
   const ok = await verifySecretQuestion(env, idx, answer);
   return json({ ok });
 }
 
-// 인증 방식 셋 중 하나로 PIN 변경을 승인: (1) 프로필에 PIN이 아직 없음(최초 설정) (2) 현재 PIN 일치
-// (3) 마스터 코드 일치 (4) 비밀질문 정답
+// PIN 설정/변경 승인 방식.
+//   · PIN 이 이미 있는 프로필: (1) 현재 PIN (2) 마스터 코드 (3) 비밀 질문(운영자가 새 정답을 등록한 경우)
+//   · PIN 이 아직 없는 프로필(최초 설정) — **공개된 액세스 코드만으로는 되지 않는다**:
+//       (1) 같은 가족의 **다른 관리자**가 PIN 으로 로그인한 세션(서명·만료·pin_version 검증)
+//       (2) 마스터 코드 (3) 운영자가 발급한 초기 설정 코드 — 아무도 PIN 을 설정하지 않은 가족만
+//       (4) 비밀 질문(운영자가 새 정답을 등록한 경우)
 export async function handleSetPin(request: Request, env: DataEnv): Promise<Response> {
   const client = serviceClient(env);
   if (!client) return json({ ok: false }, 503);
   const body = (await request.json().catch(() => ({}))) as {
     code?: unknown; profileId?: unknown; newPin?: unknown;
-    currentPin?: unknown; masterCode?: unknown; sqIdx?: unknown; sqAnswer?: unknown;
+    currentPin?: unknown; masterCode?: unknown; setupCode?: unknown; sqIdx?: unknown; sqAnswer?: unknown;
   };
   const code = typeof body.code === "string" ? body.code.trim() : "";
   const profileId = typeof body.profileId === "string" ? body.profileId : "";
@@ -295,13 +436,27 @@ export async function handleSetPin(request: Request, env: DataEnv): Promise<Resp
     return json({ error: "잘못된 요청입니다." }, 400);
   }
 
-  const family = await loadFamilyRaw(client, code);
+  const load = await loadFamilyVersioned(client, code);
+  const family = load.family;
   const profile = family.profiles.find((p) => p.id === profileId);
   if (!profile) return json({ error: "프로필을 찾을 수 없습니다." }, 404);
 
-  let authorized = !profile.pin_hash; // 최초 설정
-  if (!authorized && typeof body.currentPin === "string") {
-    authorized = await verifyPinHash(env, code, profileId, body.currentPin, profile.pin_hash);
+  let authorized = false;
+  if (profile.pin_hash) {
+    if (typeof body.currentPin === "string") {
+      authorized = await verifyPinHash(env, code, profileId, body.currentPin, profile.pin_hash);
+    }
+  } else {
+    // (1) 다른 관리자의 PIN 로그인 세션. requireSession 이 서명·만료·pin_version 을 확인한다.
+    const session = await requireSession(request, env);
+    if (session && session.code === code && session.profile !== profileId) {
+      const actor = family.profiles.find((p) => p.id === session.profile);
+      authorized = actor?.is_admin === true && Boolean(actor.pin_hash);
+    }
+    // (3) 초기 설정 코드 — 아무 프로필도 PIN 이 없는 가족에서만
+    if (!authorized && typeof body.setupCode === "string" && !familyHasAnyPin(family)) {
+      authorized = await verifySetupCode(env, body.setupCode, code);
+    }
   }
   if (!authorized && typeof body.masterCode === "string") {
     authorized = await verifyMaster(env, family, body.masterCode, code);
@@ -318,7 +473,8 @@ export async function handleSetPin(request: Request, env: DataEnv): Promise<Resp
       p.id === profileId ? { ...p, pin_hash: hash, pin_version: (p.pin_version ?? 0) + 1 } : p,
     ),
   };
-  await saveFamilyRaw(client, code, updated);
+  const conflict = await commitFamily(client, code, updated, load);
+  if (conflict) return conflict;
   return json(sanitizeFamily(updated));
 }
 
@@ -332,16 +488,32 @@ export async function handleSetMaster(request: Request, env: DataEnv): Promise<R
   const newCode = typeof body.newCode === "string" ? body.newCode : "";
   if (!code || code !== env.ACCESS_CODE || !newCode.trim()) return json({ error: "잘못된 요청입니다." }, 400);
 
-  const family = await loadFamilyRaw(client, code);
+  const load = await loadFamilyVersioned(client, code);
+  const family = load.family;
   let authorized = false;
-  if (typeof body.currentMaster === "string") authorized = await verifyMaster(env, family, body.currentMaster, code);
+  if (family.master_code_hash) {
+    // 설정돼 있다: 현재 마스터 코드로만 바꾼다(기존 방식 그대로).
+    if (typeof body.currentMaster === "string") authorized = await verifyMaster(env, family, body.currentMaster, code);
+  } else {
+    // **미설정: 최초 설정.** 액세스 코드 같은 공개값으로는 되지 않는다 — PIN 으로 로그인한
+    // 관리자 프로필의 세션이 있어야 한다.
+    const session = await requireSession(request, env);
+    if (session && session.code === code) {
+      authorized = family.profiles.find((p) => p.id === session.profile)?.is_admin === true;
+    }
+  }
+  // 운영자가 새 정답 해시를 등록했을 때만 비밀 질문이 통한다(기본 비활성).
   if (!authorized && typeof body.sqIdx === "number" && typeof body.sqAnswer === "string") {
     authorized = await verifySecretQuestion(env, body.sqIdx, body.sqAnswer);
   }
   if (!authorized) return json({ error: "인증에 실패했습니다." }, 403);
 
+  const problem = masterCodeProblem(newCode, code);
+  if (problem) return json({ error: problem }, 400);
+
   const updated: FamilyData = { ...family, master_code_hash: await hashMaster(newCode) };
-  await saveFamilyRaw(client, code, updated);
+  const conflict = await commitFamily(client, code, updated, load);
+  if (conflict) return conflict;
   return json(sanitizeFamily(updated));
 }
 
@@ -358,7 +530,8 @@ export async function handleAddProfile(request: Request, env: DataEnv): Promise<
   if (!code || code !== env.ACCESS_CODE || !label || !/^\d{4}$/.test(pin)) {
     return json({ error: "잘못된 요청입니다." }, 400);
   }
-  const family = await loadFamilyRaw(client, code);
+  const load = await loadFamilyVersioned(client, code);
+  const family = load.family;
   if (!(await verifyMaster(env, family, masterCode, code))) return json({ error: "인증에 실패했습니다." }, 403);
 
   const id = label.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_가-힣]/g, "") || `profile_${Date.now()}`;
@@ -367,7 +540,8 @@ export async function handleAddProfile(request: Request, env: DataEnv): Promise<
     ...family,
     profiles: [...family.profiles, { id: finalId, label, pin_hash: await hashPin(code, finalId, pin), is_admin: false }],
   };
-  await saveFamilyRaw(client, code, updated);
+  const conflict = await commitFamily(client, code, updated, load);
+  if (conflict) return conflict;
   return json(sanitizeFamily(updated));
 }
 
@@ -380,7 +554,8 @@ export async function handleRestoreProfile(request: Request, env: DataEnv): Prom
   const pin = typeof body.pin === "string" ? body.pin : "";
   if (!code || code !== env.ACCESS_CODE || !profileId) return json({ error: "잘못된 요청입니다." }, 400);
 
-  const family = await loadFamilyRaw(client, code);
+  const load = await loadFamilyVersioned(client, code);
+  const family = load.family;
   const deleted = (family.deleted_profiles ?? []).find((p) => p.id === profileId);
   if (!deleted || !(await verifyPinHash(env, code, profileId, pin, deleted.pin_hash))) {
     return json({ error: "인증에 실패했습니다." }, 403);
@@ -390,7 +565,8 @@ export async function handleRestoreProfile(request: Request, env: DataEnv): Prom
     profiles: [...family.profiles, deleted],
     deleted_profiles: (family.deleted_profiles ?? []).filter((p) => p.id !== profileId),
   };
-  await saveFamilyRaw(client, code, updated);
+  const conflict = await commitFamily(client, code, updated, load);
+  if (conflict) return conflict;
   return json(sanitizeFamily(updated));
 }
 
@@ -403,7 +579,8 @@ export async function handleDeleteProfile(request: Request, env: DataEnv, hard: 
   const masterCode = typeof body.masterCode === "string" ? body.masterCode : "";
   if (!code || code !== env.ACCESS_CODE || !profileId) return json({ error: "잘못된 요청입니다." }, 400);
 
-  const family = await loadFamilyRaw(client, code);
+  const load = await loadFamilyVersioned(client, code);
+  const family = load.family;
   if (!(await verifyMaster(env, family, masterCode, code))) return json({ error: "인증에 실패했습니다." }, 403);
 
   const profile = family.profiles.find((p) => p.id === profileId);
@@ -414,7 +591,6 @@ export async function handleDeleteProfile(request: Request, env: DataEnv, hard: 
       profiles: family.profiles.filter((p) => p.id !== profileId),
       deleted_profiles: (family.deleted_profiles ?? []).filter((p) => p.id !== profileId),
     };
-    await client.from("kaw_data").delete().eq("family_code", code).eq("profile", profileId);
   } else {
     if (!profile) return json({ error: "프로필을 찾을 수 없습니다." }, 404);
     updated = {
@@ -423,7 +599,10 @@ export async function handleDeleteProfile(request: Request, env: DataEnv, hard: 
       deleted_profiles: [...(family.deleted_profiles ?? []), profile],
     };
   }
-  await saveFamilyRaw(client, code, updated);
+  const conflict = await commitFamily(client, code, updated, load);
+  if (conflict) return conflict;
+  // 설정 변경이 확정된 뒤에만 데이터 행을 지운다(충돌이면 아무 것도 지우지 않는다).
+  if (hard) await client.from("kaw_data").delete().eq("family_code", code).eq("profile", profileId);
   return json(sanitizeFamily(updated));
 }
 

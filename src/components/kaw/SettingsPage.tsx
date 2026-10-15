@@ -32,11 +32,11 @@ import {
 import { toast } from "sonner";
 import {
   type FamilyData, type ProfileConfig,
-  verifyPin, updatePin, verifyMasterCode, updateMasterCode, updateMasterCodeViaSecretQuestion,
+  verifyPin, updatePin, verifyMasterCode, updateMasterCode, setInitialMasterCode, setFirstPinAsAdmin, updateMasterCodeViaSecretQuestion,
   softDeleteProfile, hardDeleteProfile,
 } from "@/lib/kaw/auth";
 import {
-  SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, type SQIndex,
+  SECRET_QUESTIONS, pickRandomSQIndex, verifySQAnswer, sqFailureMessage, type SQIndex,
 } from "@/lib/kaw/secretQuestions";
 import type { Page } from "@/components/kaw/Sidebar";
 
@@ -1906,7 +1906,7 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
     const ok = await verifySQAnswer(resetQIdx, resetAnswer);
     setResetLoading(false);
     if (!ok) {
-      setResetAnswerErr("정답이 맞지 않습니다. 다시 시도해주세요.");
+      setResetAnswerErr(sqFailureMessage());
       setResetAnswer("");
       return;
     }
@@ -1951,11 +1951,18 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
     if (!familyCode) return;
     if (!mcNew.trim()) { setMcMsg({ type: "err", text: "새 마스터 코드를 입력해주세요." }); return; }
     if (mcNew !== mcNewConfirm) { setMcMsg({ type: "err", text: "새 마스터 코드가 일치하지 않습니다." }); return; }
+    if (mcNew.trim().length < 8) { setMcMsg({ type: "err", text: "마스터 코드는 8자 이상이어야 합니다." }); return; }
     setMcLoading(true);
-    const ok = await verifyMasterCode(mcCurrent, familyData, familyCode);
-    if (!ok) { setMcMsg({ type: "err", text: "현재 마스터 코드가 틀렸습니다." }); setMcLoading(false); return; }
+    // 서버가 "미설정"이라고 알리면 현재 코드가 없다 — 로그인한 관리자 세션으로 최초 설정한다.
+    const needsSetup = familyData.hasMasterCode === false;
+    if (!needsSetup) {
+      const ok = await verifyMasterCode(mcCurrent, familyData, familyCode);
+      if (!ok) { setMcMsg({ type: "err", text: "현재 마스터 코드가 틀렸습니다." }); setMcLoading(false); return; }
+    }
     try {
-      const updated = await updateMasterCode(mcNew, familyData, familyCode);
+      const updated = needsSetup
+        ? await setInitialMasterCode(mcNew, familyCode)
+        : await updateMasterCode(mcNew, familyData, familyCode);
       onFamilyUpdate(updated);
       setMcMsg({ type: "ok", text: "마스터 코드가 변경되었습니다." });
       setMcCurrent(""); setMcNew(""); setMcNewConfirm("");
@@ -2004,13 +2011,17 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
           <div className="flex items-center gap-2">
             <Shield className="w-5 h-5 text-amber-500" />
             <div>
-              <h3 className="font-semibold">액세스 코드(마스터) 변경</h3>
-              <p className="text-xs text-muted-foreground">혀비 프로필 전용 · 기본값은 앱 액세스 코드와 동일</p>
+              <h3 className="font-semibold">{familyData.hasMasterCode === false ? "마스터 코드 최초 설정" : "마스터 코드 변경"}</h3>
+              <p className="text-xs text-muted-foreground">
+                {familyData.hasMasterCode === false
+                  ? "혀비 프로필 전용 · 아직 설정되지 않아 프로필 추가·삭제와 비밀번호 재설정(마스터 인증)이 막혀 있습니다. 8자 이상, 액세스 코드와 다르게 정하세요."
+                  : "혀비 프로필 전용 · 8자 이상, 액세스 코드와 다르게 정하세요."}
+              </p>
             </div>
           </div>
           <form onSubmit={handleMcChange} className="space-y-3 max-w-sm">
             {[
-              { label: "현재 마스터 코드", value: mcCurrent, set: setMcCurrent },
+              ...(familyData.hasMasterCode === false ? [] : [{ label: "현재 마스터 코드", value: mcCurrent, set: setMcCurrent }]),
               { label: "새 마스터 코드", value: mcNew, set: setMcNew },
               { label: "새 마스터 코드 확인", value: mcNewConfirm, set: setMcNewConfirm },
             ].map(({ label, value, set }) => (
@@ -2028,9 +2039,9 @@ function SecurityTab({ familyData, onFamilyUpdate }: SecurityTabProps) {
                 {mcMsg.text}
               </div>
             )}
-            <Button type="submit" size="sm" variant="outline" disabled={mcLoading || !mcCurrent || !mcNew}>
+            <Button type="submit" size="sm" variant="outline" disabled={mcLoading || (familyData.hasMasterCode !== false && !mcCurrent) || !mcNew}>
               {mcLoading ? <RefreshCw className="w-3.5 h-3.5 mr-1 animate-spin" /> : <Shield className="w-3.5 h-3.5 mr-1" />}
-              마스터 코드 변경
+              {familyData.hasMasterCode === false ? "마스터 코드 설정" : "마스터 코드 변경"}
             </Button>
           </form>
 
@@ -2132,7 +2143,7 @@ type DeleteStep = "choose" | "verify";
 type DeleteMode = "soft" | "hard";
 
 function UserManagementTab({ familyData, onFamilyUpdate }: UserManagementTabProps) {
-  const { familyCode } = usePortfolioStore();
+  const { familyCode, currentUser } = usePortfolioStore();
   const [deleteTarget, setDeleteTarget] = useState<ProfileConfig | null>(null);
   const [deleteMode, setDeleteMode] = useState<DeleteMode | null>(null);
   const [deleteStep, setDeleteStep] = useState<DeleteStep>("choose");
@@ -2142,6 +2153,27 @@ function UserManagementTab({ familyData, onFamilyUpdate }: UserManagementTabProp
   const [doneMsg, setDoneMsg] = useState<string | null>(null);
 
   const nonMasterProfiles = familyData.profiles.filter((p) => p.id !== "hyeobi");
+  // 비밀번호가 아직 없는 프로필 — 지금 로그인한 관리자가 설정할 수 있다(서버가 세션을 검증한다).
+  const noPinProfiles = familyData.profiles.filter((p) => !p.pin_hash && p.id !== currentUser);
+  const [pinTarget, setPinTarget] = useState<string | null>(null);
+  const [pinValue, setPinValue] = useState("");
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinErr, setPinErr] = useState<string | null>(null);
+
+  async function handleSetOtherPin(profileId: string) {
+    if (!familyCode) return;
+    if (!/^\d{4}$/.test(pinValue)) { setPinErr("비밀번호는 숫자 4자리여야 합니다."); return; }
+    setPinBusy(true); setPinErr(null);
+    try {
+      const updated = await setFirstPinAsAdmin(familyCode, profileId, pinValue);
+      onFamilyUpdate(updated);
+      setDoneMsg("비밀번호를 설정했습니다.");
+      setPinTarget(null); setPinValue("");
+    } catch (e) {
+      setPinErr((e as Error)?.message || "저장 중 오류가 발생했습니다.");
+    }
+    setPinBusy(false);
+  }
 
   const AVATAR_COLORS = [
     "from-emerald-500 to-teal-500",
@@ -2209,6 +2241,29 @@ function UserManagementTab({ familyData, onFamilyUpdate }: UserManagementTabProp
         {doneMsg && (
           <div className="flex items-center gap-2 text-xs text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 rounded-xl px-3 py-2.5">
             <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />{doneMsg}
+          </div>
+        )}
+
+        {noPinProfiles.length > 0 && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 space-y-2" data-testid="no-pin-profiles">
+            <p className="text-xs font-medium">비밀번호가 아직 없는 프로필</p>
+            {noPinProfiles.map((p) => (
+              <div key={p.id} className="flex flex-wrap items-center gap-2">
+                <span className="text-sm">{p.label}</span>
+                {pinTarget === p.id ? (
+                  <>
+                    <input type="password" inputMode="numeric" maxLength={4} value={pinValue} placeholder="••••"
+                      onChange={(e) => { setPinValue(e.target.value.replace(/\D/g, "")); setPinErr(null); }}
+                      className="h-9 w-24 px-3 rounded-lg border bg-background text-sm tracking-[0.4em]" />
+                    <Button size="sm" disabled={pinBusy || pinValue.length !== 4} onClick={() => handleSetOtherPin(p.id)}>설정</Button>
+                    <Button size="sm" variant="outline" disabled={pinBusy} onClick={() => { setPinTarget(null); setPinValue(""); setPinErr(null); }}>취소</Button>
+                  </>
+                ) : (
+                  <Button size="sm" variant="outline" onClick={() => { setPinTarget(p.id); setPinValue(""); setPinErr(null); }}>비밀번호 설정</Button>
+                )}
+              </div>
+            ))}
+            {pinErr && <p className="text-xs text-rose-500">{pinErr}</p>}
           </div>
         )}
 
