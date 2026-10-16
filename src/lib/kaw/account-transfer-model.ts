@@ -232,3 +232,36 @@ export function checkTransferEvidence(ev: TransferEvidence): TransferEvidenceChe
   if (!ev.postTransferObservation) missing.push("이전 후 새 증권사 잔고 관측");
   return { sufficient: missing.length === 0, missing, createsCashflow: false, principalEffect: "none" };
 }
+
+// ── 이전 전 증권사 보유가 이탈 처리되지 않고 남았는가 (증권사 잔고 조회 없이) ──────────
+
+export interface ResidualTradeInput {
+  ticker: string;
+  side: "buy" | "sell";
+  quantity: number;
+  source: string;
+}
+
+/**
+ * **새 증권사 출처가 아닌** 원장 행만 재생해 남아 있는 보유(ticker → 수량)를 구한다.
+ *
+ * 계좌가 새 증권사로 옮겨 갔다면(레지스트리에 새 증권사 계좌가 활성) 이전 전 증권사의 보유는
+ * 이탈(매도 체결 또는 실물 이전 증거)로 정리돼 있어야 한다. 양수로 남아 있다면 그 이탈
+ * 근거가 원장에 **없다**는 뜻이고, 새 증권사 매수만 더하면 같은 보유가 이중 계산된다.
+ *
+ * 이 함수는 가상의 매도를 만들지 않는다 — 있는 그대로 남은 수량만 알려 준다.
+ * (음수는 데이터 오류라 여기서 판정하지 않고 무시한다.)
+ */
+export function priorBrokerResidual(
+  trades: readonly ResidualTradeInput[],
+  newBrokerSource: string,
+): Record<string, number> {
+  const held: Record<string, number> = {};
+  for (const t of trades) {
+    if (t.source === newBrokerSource) continue;
+    held[t.ticker] = (held[t.ticker] ?? 0) + (t.side === "buy" ? t.quantity : -t.quantity);
+  }
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(held)) if (v > 0) out[k] = v;
+  return out;
+}

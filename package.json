@@ -16,7 +16,8 @@
     "ledger:import": "vite-node scripts/ledger-import.ts",
     "ledger:verify": "vite-node scripts/ledger-verify.ts",
     "profit:verify": "vite-node scripts/verify-profit-analysis.ts",
-    "mock:order": "vite --config vite.mock.config.ts"
+    "mock:order": "vite --config vite.mock.config.ts",
+    "mock:exec": "vite --config vite.mock-exec.config.ts"
   },
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.25.5",
@@ -88,6 +89,7 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^15.15.0",
+    "jsdom": "^25.0.1",
     "prettier": "^3.7.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.56.1",
