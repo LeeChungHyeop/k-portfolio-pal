@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { LayoutDashboard, Building2, PiggyBank, TrendingUp, Briefcase, Settings, Wallet, Sun, X, LogOut, RefreshCw, Users, Cloud, CloudOff, Wifi, WifiOff, Info, ReceiptText } from "lucide-react";
-import { usePortfolioStore, syncNow, getOrDefaultLibrary, formatKRW } from "@/lib/kaw/store";
+import { usePortfolioStore, syncNow, getOrDefaultLibrary, formatKRW, REFRESH_REQUIRED_MESSAGE } from "@/lib/kaw/store";
 import { type FamilyData } from "@/lib/kaw/auth";
 import { useKisPriceContext, type TickerMeta } from "@/lib/kaw/KisPriceContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -363,6 +363,22 @@ export function Sidebar({ active, onNavigate, mobileOpen = false, onMobileClose 
                 </div>
               </div>
             )}
+          </div>
+        )}
+        {/* 서버가 이 앱 버전의 저장을 거부했다(428, 구버전 차단). **저장되지 않았다.** 툴팁에만 있으면 터치
+            기기에서는 읽을 수 없으므로 본문 글자로 띄우고, 새로고침을 바로 누를 수 있게 한다. 입력한 내용은
+            이 기기에 남아 있다(새로고침 전에 다른 곳에 적어 두면 더 안전하다). */}
+        {dbError === REFRESH_REQUIRED_MESSAGE && (
+          <div className="mt-1.5 px-3 py-2 rounded-xl text-xs bg-amber-500/10 border border-amber-500/30 space-y-1.5" role="alert">
+            <p className="text-amber-700 dark:text-amber-300 leading-snug">
+              저장되지 않았습니다. 앱이 최신 버전이 아니라 서버가 저장을 거부했습니다. 새로고침한 뒤 다시 입력해 주세요.
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              className="w-full px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-800 dark:text-amber-200 transition-colors"
+            >
+              새로고침
+            </button>
           </div>
         )}
         {/* 저장 보류(fail-closed) — revision 을 확인하지 못해 **저장을 하지 않은** 상태다.

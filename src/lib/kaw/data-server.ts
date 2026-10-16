@@ -642,6 +642,23 @@ export async function handleDataGet(request: Request, env: DataEnv): Promise<Res
 /** Postgres: 컬럼이 없음(42703). migration 006 미적용 DB 판정에만 쓴다. */
 const isUndefinedColumn = (code: string | undefined): boolean => code === "42703";
 
+/**
+ * 쓰기 경로 **관측 로그**(Workers Logs). 식별자·토큰·가족코드·프로필·데이터 원문을 싣지 않는다 —
+ * 어느 경로로(가드 / 무가드 / 428 차단) 계좌 행이 몇 개 왔는지만 남긴다. KAW_REQUIRE_REVISION 을
+ * 켜기 전에 "무가드 요청이 더 이상 오지 않는다"를 로그로 확인하기 위한 것이다.
+ * 계좌 행이 없는 요청(공용 종목 라이브러리만)은 가드 대상이 아니라 남기지 않는다.
+ */
+export type DataWritePath = "guarded" | "unguarded" | "blocked_428";
+export function dataWriteLogLine(path: DataWritePath, accountRows: number, sharedRows: number): string | null {
+  if (accountRows <= 0) return null;
+  return JSON.stringify({ evt: "kaw_data_write", path, accountRows, sharedRows });
+}
+function logDataWrite(path: DataWritePath, rows: Array<{ profile?: unknown }>): void {
+  const account = rows.filter((r) => r.profile !== "_shared").length;
+  const line = dataWriteLogLine(path, account, rows.length - account);
+  if (line) console.log(line);
+}
+
 export async function handleDataPost(request: Request, env: DataEnv): Promise<Response> {
   const client = serviceClient(env);
   if (!client || !env.SESSION_SECRET) return json({ error: "서버 설정 오류" }, 503);
@@ -687,12 +704,14 @@ export async function handleDataPost(request: Request, env: DataEnv): Promise<Re
     // (같이 온 공용 행도 쓰지 않는다 — 한 번의 저장이 일부만 반영되지 않게). 공용 종목 라이브러리만
     // 보내는 요청은 설계상 가드 밖이라 그대로 둔다(007 대원칙 2).
     if (isRevisionRequired(env) && sanitized.some((r) => r.profile !== "_shared")) {
+      logDataWrite("blocked_428", sanitized);
       return json({
         error: "revision_required",
         message: "앱이 최신 버전이 아니라 저장하지 않았습니다. 새로고침한 뒤 다시 시도하세요.",
         saved: false,
       }, 428);
     }
+    logDataWrite("unguarded", sanitized);
     const { error } = await client.from("kaw_data").upsert(sanitized, { onConflict: "family_code,profile,account_type" });
     if (error) return json({ error: error.message }, 500);
     return json({ ok: true, accepted: sanitized.length, guarded: false });
@@ -705,6 +724,7 @@ export async function handleDataPost(request: Request, env: DataEnv): Promise<Re
   }
   const split = splitGuardRows(sanitized, expected as ExpectedRevisions);
   if (!split.ok) return json({ error: split.error }, 400);
+  logDataWrite("guarded", sanitized);
 
   let revisions: Record<string, number> = {};
   let accepted = 0;

@@ -328,3 +328,154 @@ export function applyConnectionChange(
     ...(closedId ? { closedId } : {}),
   };
 }
+
+// ── 시작일 정정 ─────────────────────────────────────────────────────────────
+
+export type StartCorrectionResult =
+  | {
+      ok: true;
+      registry: BrokerAccountInstance[];
+      /** 실제로 바뀐 것이 있는가 */
+      changed: boolean;
+      /** 바꾸기 전 시작일 */
+      previousStart: string;
+      /**
+       * 종료일이 **함께** 이동한 직전 instance. 닫힘 관계(`prev.activeTo === 이 계좌의 시작일`)가
+       * 있을 때만 있다. 없으면 이 정정은 이 instance 의 시작일 하나만 바꾼다.
+       */
+      movedPredecessor?: { id: string; label: string; previousActiveTo: string; nextActiveTo: string };
+    }
+  | {
+      ok: false;
+      reason:
+        | "not_found"
+        | "invalid_date"
+        | "future_date"
+        | "no_change"
+        | "after_end"
+        | "before_predecessor_start"
+        | "ambiguous_predecessor"
+        | "overlap";
+      message: string;
+    };
+
+/** YYYY-MM-DD 이면서 달력에 실제로 있는 날짜인가. UI(저장 버튼 활성화)와 정정 검증이 같은 함수를 쓴다. */
+export function isRealIsoDate(d: string): boolean {
+  if (!ISO.test(d)) return false;
+  const t = new Date(`${d}T00:00:00Z`);
+  return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d;
+}
+
+/**
+ * 이미 저장된 instance 의 **시작일만** 정정한다. 입력을 변형하지 않는다.
+ *
+ * 바뀌는 것은 두 가지뿐이다:
+ *   1. 이 instance 의 `activeFrom`
+ *   2. 닫힘 관계(직전 instance 의 `activeTo` 가 옛 시작일과 같음)가 있으면 그 `activeTo` 도 **같은 날**로
+ *      — half-open 이므로 두 계좌가 겹치거나 비는 날이 생기지 않는다
+ *
+ * 바뀌지 않는 것: instance id · label · broker · productCode · connectionMode · refFingerprint ·
+ * 이 instance 의 activeTo · 다른 계좌의 모든 값. **plan/observation 은 instance 의 `id` 만 들고
+ * 있으므로**(날짜를 복사하지 않는다) 이미 저장된 완료 기록·관측은 한 글자도 바뀌지 않는다.
+ * 바뀌는 것은 "그 날짜에 어느 계좌였나"를 날짜로 *파생*하는 값(원장 귀속 등)뿐이다.
+ *
+ * 거부: 미래 날짜(조회가 멈춘다 — 시작 예정은 새 계좌 추가 흐름의 일이다), 종료일 이후,
+ * 직전 계좌의 시작일 이전, 다른 계좌와 기간이 겹치는 경우, 직전 계좌가 둘 이상인 경우.
+ */
+export function correctInstanceStart(
+  registry: readonly BrokerAccountInstance[],
+  instanceId: string,
+  newStart: string,
+  opts: { today: string },
+): StartCorrectionResult {
+  const target = registry.find((r) => r.id === instanceId);
+  if (!target) return { ok: false, reason: "not_found", message: "해당 계좌를 찾을 수 없습니다." };
+  if (!isRealIsoDate(newStart)) {
+    return { ok: false, reason: "invalid_date", message: "날짜 형식이 올바르지 않습니다." };
+  }
+  if (newStart > opts.today) {
+    return {
+      ok: false,
+      reason: "future_date",
+      message: "시작일을 미래로 정정할 수 없습니다(그 날까지 조회가 멈춥니다).",
+    };
+  }
+  if (newStart === target.activeFrom) {
+    return { ok: false, reason: "no_change", message: "현재 시작일과 같습니다." };
+  }
+  if (target.activeTo !== undefined && newStart >= target.activeTo) {
+    return { ok: false, reason: "after_end", message: "시작일이 이 계좌의 종료일보다 앞이어야 합니다." };
+  }
+
+  const others = registry.filter(
+    (r) => r.id !== target.id && r.logicalAccountType === target.logicalAccountType,
+  );
+  // 닫힘 관계: 직전 계좌가 정확히 이 계좌의 옛 시작일에 끝났다.
+  const linked = others.filter((r) => r.activeTo === target.activeFrom);
+  if (linked.length > 1) {
+    return {
+      ok: false,
+      reason: "ambiguous_predecessor",
+      message: "같은 날 끝난 이전 계좌가 둘 이상이라 정정할 수 없습니다.",
+    };
+  }
+  const pred = linked[0];
+  if (pred && newStart <= pred.activeFrom) {
+    return {
+      ok: false,
+      reason: "before_predecessor_start",
+      message: "시작일이 이전 계좌의 시작일보다 늦어야 합니다.",
+    };
+  }
+
+  // 정정 뒤 기간이 다른 계좌와 겹치면 거부한다. 직전 계좌는 종료일이 함께 움직이므로 그 기준으로 본다.
+  const end = target.activeTo ?? "9999-12-31";
+  for (const o of others) {
+    const oFrom = o.activeFrom;
+    const oTo = o.id === pred?.id ? newStart : (o.activeTo ?? "9999-12-31");
+    if (newStart < oTo && oFrom < end) {
+      return {
+        ok: false,
+        reason: "overlap",
+        message: `다른 계좌(${o.label})와 사용 기간이 겹칩니다.`,
+      };
+    }
+  }
+
+  // 직전 계좌의 종료일이 늦춰지는 경우(시작일을 뒤로 정정) 그 확장된 기간도 제3의 계좌와 겹치면 안 된다.
+  if (pred) {
+    for (const o of others) {
+      if (o.id === pred.id) continue;
+      const oTo = o.activeTo ?? "9999-12-31";
+      if (pred.activeFrom < oTo && o.activeFrom < newStart) {
+        return {
+          ok: false,
+          reason: "overlap",
+          message: `다른 계좌(${o.label})와 사용 기간이 겹칩니다.`,
+        };
+      }
+    }
+  }
+
+  const next = registry.map((r) => {
+    if (r.id === target.id) return { ...r, activeFrom: newStart };
+    if (pred && r.id === pred.id) return { ...r, activeTo: newStart };
+    return r;
+  });
+  return {
+    ok: true,
+    registry: next,
+    changed: true,
+    previousStart: target.activeFrom,
+    ...(pred
+      ? {
+          movedPredecessor: {
+            id: pred.id,
+            label: pred.label,
+            previousActiveTo: pred.activeTo as string,
+            nextActiveTo: newStart,
+          },
+        }
+      : {}),
+  };
+}

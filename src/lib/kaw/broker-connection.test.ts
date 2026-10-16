@@ -292,9 +292,9 @@ describe("저장 구조·소스 불변식", () => {
   it("설정 UI 가 계좌번호·키 입력을 받지 않는다", () => {
     const src = code("../../components/kaw/BrokerConnectionCard.tsx");
     expect(src).not.toMatch(/cano|appkey|appsecret|계좌번호|password|secret/i);
-    // 입력 요소는 시작일(date) 하나뿐이다
+    // 텍스트 입력은 없다. 날짜(date) 입력만 있다: 새 계좌 시작일 + 저장된 계좌의 시작일 정정(2곳).
     const inputs = [...src.matchAll(/<Input\b[^>]*type="([^"]+)"/g)].map((m) => m[1]);
-    expect(inputs).toEqual(["date"]);
+    expect(inputs).toEqual(["date", "date"]);
   });
 
   it("클라이언트 조회는 자동 호출되지 않는다 (사용자 동작 안에서만)", () => {

@@ -16,7 +16,8 @@ import { createWriteQueue } from "./write-queue";
 import { isRevisionGuardEnabled } from "./rebalance-feature-flags";
 import { parseBrokerAccounts, type BrokerAccountInstance } from "./broker-account";
 import {
-  applyConnectionChange, type ConnectionChange, type ConnectionChangeResult,
+  applyConnectionChange, correctInstanceStart,
+  type ConnectionChange, type ConnectionChangeResult, type StartCorrectionResult,
 } from "./broker-connection";
 import {
   applySavedRevisions, canGuard, conflictPrompt, decideHoldRecovery, revisionsFromRows,
@@ -1499,6 +1500,20 @@ export function usePortfolioStore() {
     },
     [],
   );
+  /**
+   * 이미 저장된 증권사 계좌의 **시작일만** 정정한다(broker-connection.ts correctInstanceStart).
+   * 수량·예수금·거래·완료 기록은 읽지도 쓰지도 않는다. 사용자가 확인한 날짜만 넘긴다.
+   */
+  const correctBrokerStart = useCallback(
+    (instanceId: string, newStart: string): StartCorrectionResult => {
+      const r = correctInstanceStart(getState().brokerAccounts ?? [], instanceId, newStart, {
+        today: kstDateString(),
+      });
+      if (r.ok && r.changed) setState((s) => ({ ...s, brokerAccounts: r.registry }));
+      return r;
+    },
+    [],
+  );
   const updateAssetLibrary   = useCallback((lib: AssetDef[]) =>
     setState((s) => ({ ...s, assetLibrary: lib })), []);
   const updateRowHolding     = useCallback((id: AccountId, rowId: string, value: number) =>
@@ -1676,7 +1691,7 @@ export function usePortfolioStore() {
     updateAccount, updateHolding,
     addHistory, finalizeRebalance, removeHistory, updateHistory, setHistoryBacktest,
     resetAll, importJson,
-    setBrokerConnection,
+    setBrokerConnection, correctBrokerStart,
     setAccountActive, setAccountProfile,
     setAccountAllocation, resetAccountAllocations,
     setAccountEtfName, toggleAccountAsset,
