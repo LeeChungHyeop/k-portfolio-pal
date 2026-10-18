@@ -24,6 +24,23 @@ const locks = new Map<string, Promise<unknown>>();
 let useLock = true;
 const yieldTick = () => new Promise<void>((r) => setTimeout(r, 0));
 
+/**
+ * 모델의 "검사 → 쓰기" 사이의 틈. 기본은 한 틱이다(잠금이 있는 모든 테스트는 잠금이 순서를 정하므로
+ * 이 틈의 길이와 무관하다).
+ *
+ * **잠금이 없는 모델을 보여주는 테스트만** 이것을 장벽으로 바꾼다: 두 요청이 모두 검사를 마칠 때까지
+ * 서로 기다린 뒤 함께 쓴다. 예전에는 틈이 `setTimeout(0)` 하나뿐이라, 두 요청이 서명 검증(crypto.subtle)
+ * 같은 비동기 단계를 지나는 시간이 달라지면 한쪽이 상대의 쓰기 **뒤에** 검사를 해서 409 를 받았다
+ * (실측: 300회 중 약 9% 가 `[200, 200]` 이 아니었다). 장벽은 타이머 경합에 의존하지 않는다.
+ */
+let gap: () => Promise<void> = yieldTick;
+function makeBarrier(parties: number): () => Promise<void> {
+  let arrived = 0;
+  let release!: () => void;
+  const all = new Promise<void>((r) => { release = r; });
+  return () => { if (++arrived >= parties) release(); return all; };
+}
+
 async function withLock<T>(k: string, fn: () => Promise<T>): Promise<T> {
   if (!useLock) return fn();
   const prev = locks.get(k) ?? Promise.resolve();
@@ -100,7 +117,7 @@ async function saveGuardedRpc(p: {
       }
     }
 
-    await yieldTick(); // 검사 → 쓰기 사이의 틈
+    await gap(); // 검사 → 쓰기 사이의 틈
 
     if (conflicts.length) return { data: { outcome: "conflict", conflicts, revisions }, error: null };
 
@@ -234,6 +251,7 @@ beforeEach(() => {
   upserts.length = 0;
   locks.clear();
   useLock = true;
+  gap = yieldTick;
   revisionColumnMissing = false;
   seed();
 });
@@ -632,6 +650,7 @@ describe("경계", () => {
 
   it("**잠금이 없으면 동시 저장이 둘 다 성공한다** — 모델이 `for update` 의 이유를 보여준다", async () => {
     useLock = false;
+    gap = makeBarrier(2); // 두 요청이 모두 검사(revision 7 확인)를 마친 뒤에야 쓴다 — 타이머에 의존하지 않는다
     const [a, b] = await Promise.all([
       post({ rows: [accountRow("isa", isaData({ cashBalance: 111 }))], expectedRevisions: { isa: 7 } }),
       post({ rows: [accountRow("isa", isaData({ cashBalance: 222 }))], expectedRevisions: { isa: 7 } }),
