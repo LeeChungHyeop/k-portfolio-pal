@@ -205,6 +205,58 @@ describe("단계별 차단 — 앞 단계가 막히면 뒤 단계를 실행하�
   });
 });
 
+describe("소유권 · 상품코드 우회 시도 — 차단된다", () => {
+  it("다른 가족의 같은 이름 프로필은 403 이다 (가족 코드까지 같아야 한다)", async () => {
+    const token = await sessionToken("other-family", P);
+    const r = await call(RANGE, fullEnv, { token });
+    expect(r.status).toBe(403);
+    expect(kisFetch).not.toHaveBeenCalled();
+    expect(getToken).not.toHaveBeenCalled();
+    expect(featureDb()).toEqual([]);
+  });
+
+  it("같은 가족의 다른 프로필도 403 이다", async () => {
+    const token = await sessionToken(F, "another-profile");
+    expect((await call(RANGE, fullEnv, { token })).status).toBe(403);
+    expect(kisFetch).not.toHaveBeenCalled();
+  });
+
+  it("요청 본문으로 계좌번호 · 상품코드 · 가족 · 프로필을 지정해도 무시된다 (세션과 서버 설정만 쓴다)", async () => {
+    ledgerRows = [];
+    const r = await call({ ...RANGE, productCode: "29", cano: "99999999", family_code: "other", profile: "other", accountType: "irp" });
+    expect(r.status).toBe(200);
+    expect(kisFetch).toHaveBeenCalledTimes(1);
+    const [url, init] = kisFetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain("ACNT_PRDT_CD=22");
+    expect(url).toContain(`CANO=${CANO}`);
+    expect(url).not.toContain("99999999");
+    expect(r.text).not.toContain("99999999");
+    expect((init.headers as Record<string, string>).tr_id).toBe("TTTC0081R");
+  });
+
+  it("레지스트리의 연금저축 계좌 상품코드가 22 가 아니면 조회하지 않는다", async () => {
+    registryData = [{ ...kisInstance, productCode: "29" }];
+    const r = await call(RANGE);
+    expect(r.json).toEqual({ state: "gate_blocked", reason: "product_mismatch" });
+    expect(kisFetch).not.toHaveBeenCalled();
+    expect(getToken).not.toHaveBeenCalled();
+  });
+
+  it("IRP(29) 계좌만 등록돼 있으면 연금저축 조회는 막힌다", async () => {
+    registryData = [{ ...kisInstance, id: "bai:kis-irp", logicalAccountType: "irp", productCode: "29" }];
+    const r = await call(RANGE);
+    expect(r.json).toEqual({ state: "gate_blocked", reason: "instance_unregistered" });
+    expect(kisFetch).not.toHaveBeenCalled();
+  });
+
+  it("한국투자가 아닌 증권사로 설정된 연금저축은 조회하지 않는다", async () => {
+    registryData = [{ ...kisInstance, broker: "other", productCode: undefined }];
+    const r = await call(RANGE);
+    expect(r.json.state).toBe("gate_blocked");
+    expect(kisFetch).not.toHaveBeenCalled();
+  });
+});
+
 describe("조회 · 조립 — 10-14 실제 사례(모의 응답)", () => {
   beforeEach(() => {
     ledgerRows = [
