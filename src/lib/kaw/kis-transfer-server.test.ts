@@ -21,6 +21,10 @@ let cashflows: unknown[] = [];
 let auditRows: Array<{ new_value: unknown }> = [];
 let obsRows: Record<string, unknown>[] = [];
 let obsInsertError: { code: string } | null = null;
+let auditInsertError: { code: string } | null = null;
+// migration 011 의 부분 유니크 인덱스를 흉내 낸다: (family_code, profile, target_id) where action='transfer_confirm'
+let enforceAuditUnique = false;
+const auditKeys = new Set<string>();
 // 실제 DB 왕복처럼 응답을 한 턴 늦춘다 — 동시 요청이 겹치는 상황을 재현한다 (0 이면 즉시)
 let dbLatencyMs = 0;
 const lag = () => (dbLatencyMs > 0 ? new Promise<void>((r) => setTimeout(r, dbLatencyMs)) : Promise.resolve());
@@ -48,8 +52,19 @@ const fakeClient = {
     chain.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => { calls.push(`read:${table}`); return lag().then(() => ret()).then(res, rej); };
     chain.insert = (row: Record<string, unknown>) => {
       calls.push(`WRITE:insert:${table}`);
-      writes.push({ table, row });
-      return lag().then(() => ({ error: table === "kaw_settlement_observation" ? obsInsertError : null }));
+      return lag().then(() => {
+        if (table === "kaw_ledger_audit") {
+          const key = `${row.family_code}|${row.profile}|${row.target_id}`;
+          if (auditInsertError) return { error: auditInsertError };
+          if (enforceAuditUnique && row.action === "transfer_confirm") {
+            if (auditKeys.has(key)) return { error: { code: "23505" } };
+            auditKeys.add(key);
+          }
+        }
+        if (table === "kaw_settlement_observation" && obsInsertError) return { error: obsInsertError };
+        writes.push({ table, row });
+        return { error: null };
+      });
     };
     for (const m of ["upsert", "update", "delete"]) chain[m] = () => { calls.push(`WRITE:${m}:${table}`); return Promise.resolve({ error: null }); };
     if (table === "kaw_data") {
@@ -163,7 +178,7 @@ const dbWrites = () => calls.filter((c) => c.startsWith("WRITE:"));
 beforeEach(() => {
   calls.length = 0; writes.length = 0;
   ledgerRows = fullLedger(); registryData = [miraeInstance, kisInstance]; cashflows = [{ date: "2025-11-10", amount: 10_500_000 }];
-  auditRows = []; obsRows = []; obsInsertError = null; dbLatencyMs = 0;
+  auditRows = []; obsRows = []; obsInsertError = null; dbLatencyMs = 0; auditInsertError = null; enforceAuditUnique = false; auditKeys.clear();
   readAccount = snapshotRead(); getToken.mockClear();
 });
 
@@ -510,5 +525,74 @@ describe("서버가 독립적으로 검증한다 — approved: true 만으로는
       expect(r.json.code).toBe("evidence_missing");
       expect(dbWrites()).toEqual([]);
     } finally { (fakeClient as { from: unknown }).from = orig; }
+  });
+});
+
+// ── DB 수준 중복 방어 (migration 011) ──────────────────────────────────────────
+describe("DB 중복 충돌(23505) — '이미 확정됨'이지 성공이 아니다", () => {
+  beforeEach(() => { obsRows = [obsRow]; });
+
+  it("23505 는 409 already_confirmed 로 처리하고 확정 성공으로 안내하지 않는다", async () => {
+    auditInsertError = { code: "23505" };
+    const r = await run(handleTransferConfirm as never, await req("/api/kis/transfer/confirm", "POST", confirmBody()));
+    expect(r.status).toBe(409);
+    expect(r.json.state).toBe("rejected");
+    expect(r.json.code).toBe("already_confirmed");
+    expect(r.json.record).toBeUndefined();
+    expect(r.json.duplicateRecords).toBeUndefined();
+    expect(writes).toEqual([]);
+  });
+
+  it("23505 가 아닌 쓰기 오류는 write_failed(500)이며 성공으로 안내하지 않는다", async () => {
+    auditInsertError = { code: "42501" };
+    const r = await run(handleTransferConfirm as never, await req("/api/kis/transfer/confirm", "POST", confirmBody()));
+    expect(r.status).toBe(500);
+    expect(r.json.state).toBe("write_failed");
+    expect(r.json.record).toBeUndefined();
+  });
+
+  it("재시도: 쓰기 직후 읽기가 아직 옛 상태여도(검증 통과) 두 번째 INSERT 는 DB 가 막는다 → 1행만 저장", async () => {
+    enforceAuditUnique = true;
+    const a = await run(handleTransferConfirm as never, await req("/api/kis/transfer/confirm", "POST", confirmBody()));
+    auditRows = []; // 읽기 지연(복제 지연)으로 첫 기록이 아직 안 보이는 상황
+    const b = await run(handleTransferConfirm as never, await req("/api/kis/transfer/confirm", "POST", confirmBody()));
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(409);
+    expect(b.json.code).toBe("already_confirmed");
+    expect(writes.filter((w) => w.table === "kaw_ledger_audit")).toHaveLength(1);
+  });
+
+  it("서로 다른 isolate(서버 인스턴스) 두 곳에서 동시에 확정해도 DB 가 한 건만 허용한다", async () => {
+    enforceAuditUnique = true;
+    dbLatencyMs = 5;
+    vi.resetModules();
+    const second = await import("./kis-transfer-server"); // 메모리 잠금이 따로인 별도 인스턴스
+    const [a, b] = await Promise.all([
+      run(handleTransferConfirm as never, await req("/api/kis/transfer/confirm", "POST", confirmBody())),
+      run(second.handleTransferConfirm as never, await req("/api/kis/transfer/confirm", "POST", confirmBody())),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const loser = a.status === 409 ? a : b;
+    expect(loser.json.code).toBe("already_confirmed");
+    expect(writes.filter((w) => w.table === "kaw_ledger_audit")).toHaveLength(1);
+    expect(auditKeys.size).toBe(1);
+  });
+
+  it("5개 인스턴스가 동시에 보내도 성공은 정확히 1건이다", async () => {
+    enforceAuditUnique = true;
+    dbLatencyMs = 3;
+    const mods = [handleTransferConfirm];
+    for (let i = 0; i < 4; i++) { vi.resetModules(); mods.push((await import("./kis-transfer-server")).handleTransferConfirm); }
+    const rs = await Promise.all(mods.map(async (h) => run(h as never, await req("/api/kis/transfer/confirm", "POST", confirmBody()))));
+    expect(rs.filter((r) => r.status === 200)).toHaveLength(1);
+    expect(rs.filter((r) => r.status === 409)).toHaveLength(4);
+    expect(writes.filter((w) => w.table === "kaw_ledger_audit")).toHaveLength(1);
+  });
+
+  it("다른 action(잔고 관측 · 기존 audit)에는 영향이 없다 — 관측 기록은 그대로 동작한다", async () => {
+    enforceAuditUnique = true;
+    const r = await run(handleBalanceObserve as never, await req("/api/kis/transfer/observe", "POST", { approved: true }));
+    expect(r.json.state).toBe("recorded");
+    expect(dbWrites()).toEqual(["WRITE:insert:kaw_settlement_observation"]);
   });
 });

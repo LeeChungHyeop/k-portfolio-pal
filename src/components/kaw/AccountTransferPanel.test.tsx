@@ -215,6 +215,35 @@ describe("이전 확정 — 추정 매도는 추정으로 보이고 승인 하�
     expect($("transfer-msg")!.textContent).toContain("기록하지 않았습니다 — 이전 증거가 부족합니다.");
   });
 
+  it("DB 가 중복 확정을 막으면(already_confirmed) 성공으로 안내하지 않고, 상태를 다시 읽어 먼저 기록된 확정을 보여 준다", async () => {
+    const loadState = vi.fn()
+      .mockResolvedValueOnce(ok<TransferStateResponse>(okState()))
+      .mockResolvedValue(ok<TransferStateResponse>(okState({ records: [RECORD], canConfirm: false })));
+    const confirm = vi.fn(async () => ({ kind: "rejected", code: "already_confirmed", message: "이 새 계좌의 이전은 이미 확정되어 있습니다." } as TransferOutcome<never>));
+    await mount({ loadState: loadState as never, confirm: confirm as never });
+    await type($("cash-amount") as HTMLInputElement, "10293793");
+    await click($("confirm-approve") as HTMLElement);
+    await click($("confirm-button") as HTMLElement);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    const t = $("transfer-msg")!.textContent!;
+    expect(t).toContain("이미 확정되어 있습니다");
+    expect(t).toContain("아무것도 기록하지 않았습니다");
+    expect(t).not.toContain("이력에 기록했습니다");
+    expect(loadState).toHaveBeenCalledTimes(2);          // 확정 시도 뒤 상태를 다시 읽는다
+    expect($("transfer-record")).toBeTruthy();           // 먼저 기록된 확정이 보인다
+    expect($("confirm-button")).toBeNull();              // 입력 폼은 사라진다
+  });
+
+  it("같은 요청이 처리 중(busy)이면 기록했다고 말하지 않는다", async () => {
+    const confirm = vi.fn(async () => ({ kind: "rejected", code: "busy", message: "같은 요청이 처리 중입니다. 잠시 후 상태를 새로고침해 확인하세요." } as TransferOutcome<never>));
+    await mount({ confirm: confirm as never });
+    await type($("cash-amount") as HTMLInputElement, "10293793");
+    await click($("confirm-approve") as HTMLElement);
+    await click($("confirm-button") as HTMLElement);
+    expect($("transfer-msg")!.textContent).toContain("기록하지 않았습니다 — 같은 요청이 처리 중입니다");
+    expect($("transfer-msg")!.textContent).not.toContain("이력에 기록했습니다");
+  });
+
   it("확정 조건이 안 되면 사유를 보이고 확정 버튼은 눌려도 요청하지 않는다", async () => {
     const { confirm } = await mount({ loadState: vi.fn(async () => ok<TransferStateResponse>(okState({ canConfirm: false, observation: null }))) });
     expect($("confirm-blocked")).toBeTruthy();

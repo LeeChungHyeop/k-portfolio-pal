@@ -139,6 +139,10 @@ export function AccountTransferPanel({ loadState, observe, confirm, kisBuyAmount
     };
     const o = await confirm(payload);
     if (o.kind === "ok") setMsg({ tone: "ok", text: "계좌 이전을 확정해 이력에 기록했습니다. 거래원장·원금·보유수량·예수금 설정은 바꾸지 않았습니다." });
+    else if (o.kind === "rejected" && o.code === "already_confirmed") {
+      // 다른 요청(다른 기기·재시도)이 먼저 기록했다. 이번 요청은 아무것도 쓰지 않았다 — 성공으로 안내하지 않는다.
+      setMsg({ tone: "warn", text: "이미 확정되어 있습니다 — 다른 요청이 먼저 기록했습니다. 이번 요청은 아무것도 기록하지 않았습니다. 아래 확정 기록을 확인하세요." });
+    }
     else if (o.kind === "rejected") setMsg({ tone: "error", text: `기록하지 않았습니다 — ${o.message}` });
     else setMsg({ tone: "error", text: OUTCOME_TEXT[o.kind] ?? "기록하지 못했습니다." });
     setTrfApproved(false);

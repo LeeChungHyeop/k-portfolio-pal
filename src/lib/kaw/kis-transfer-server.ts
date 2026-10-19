@@ -251,7 +251,14 @@ async function confirmLocked(env: KisAccountEnv, deps: TransferDeps, session: Se
     new_value: verdict.record,
     note: verdict.record.approval.note,
   });
-  if (error) return json({ state: "write_failed" }, 500);
+  if (error) {
+    // DB 의 부분 유니크 인덱스(migration 011)가 같은 계좌의 두 번째 확정을 막았다 — 성공이 아니다.
+    // 다른 요청이 먼저 기록했으므로 아무것도 새로 쓰지 않았고, 화면은 상태를 다시 읽어 그 기록을 보여 준다.
+    if ((error as { code?: string }).code === "23505") {
+      return json({ state: "rejected", code: "already_confirmed", message: "이 새 계좌의 이전은 이미 확정되어 있습니다(다른 요청이 먼저 기록했습니다). 기록은 고치지 않습니다." }, 409);
+    }
+    return json({ state: "write_failed" }, 500);
+  }
 
   // 쓰기 뒤 확인: 다른 인스턴스의 경합 요청이 같은 계좌의 이력을 또 썼는지 본다. 이력은 지우지 않는다 —
   // 읽는 쪽이 가장 먼저 승인된 하나만 유효로 해석하고, 응답으로 사용자에게 알린다.
