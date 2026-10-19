@@ -184,7 +184,7 @@ export type CcldRowKind =
   | "partially_filled_open"
   /** 일부 체결 후 잔여가 닫혔다(취소·정정·장마감) — 체결된 만큼은 실제 체결이다 */
   | "partially_filled_closed"
-  /** 체결 0 · 잔여 0 · 취소 아님 — 정정으로 대체된 원주문일 가능성이 높다(확정 아님) */
+  /** 체결 0 · 잔여 0 · 취소로 확인되지 않음 — 정정으로 대체되었거나 취소된 원주문일 수 있다(확정 아님) */
   | "no_fill_closed"
   /** 체결 0 · 잔여 있음 — 아직 체결되지 않은 주문 */
   | "no_fill_open"
@@ -255,13 +255,23 @@ export function readCcldRow(r: Record<string, unknown>): CcldRow {
   };
 }
 
-/** 행의 성격을 가린다. **체결수량이 0 인 행은 어떤 경우에도 hasExecution=false 다.** */
+/**
+ * 행의 성격을 가린다. **체결수량이 0 인 행은 어떤 경우에도 hasExecution=false 다.**
+ *
+ * **취소 여부(`cncl_yn`)는 필수 필드가 아니다.** 실측(2026-10-19): 한국투자는 취소되지 않은 정상 행의
+ * `cncl_yn` 을 "N" 이 아니라 **빈 문자열("")** 로 준다 — 체결 완료 행도 마찬가지다. 그래서 이 값이
+ * "Y"/"N" 이 아니면 `cancelled === null`(**미보고**)이고, 그것만으로 행을 읽을 수 없는 것으로 보지 않는다.
+ *   · 체결수량·평균가·체결금액이 유효하면 체결은 사실이다 → `hasExecution` (취소 여부는 판단에 쓰지 않는다)
+ *   · 체결 0 인 행에서는 "취소 아님"을 **추정하지 않는다** — `cancelled === null` 이면 취소·정정 여부 미확인이다
+ * 그 밖의 필수 필드(주문일·주문번호·종목·방향·주문/체결/잔여 수량) 누락과, 체결이 있는데 평균가·금액을
+ * 못 읽는 경우는 이전처럼 `unreadable` 이다.
+ */
 export function classifyCcldRow(row: CcldRow): ParsedCcldRow {
   const essential =
     row.orderDate !== null && /^\d{8}$/.test(row.orderDate) &&
     row.orderNo !== null && row.ticker !== null && /^[A-Z0-9]{6}$/.test(row.ticker) &&
     (row.sideCode === "01" || row.sideCode === "02") &&
-    row.orderQty !== null && row.filledQty !== null && row.remainingQty !== null && row.cancelled !== null;
+    row.orderQty !== null && row.filledQty !== null && row.remainingQty !== null;
   if (!essential) return { row, kind: "unreadable", hasExecution: false, amountMismatch: null };
 
   const filled = row.filledQty as number;
@@ -279,7 +289,8 @@ export function classifyCcldRow(row: CcldRow): ParsedCcldRow {
     if (row.avgPrice === null || row.filledAmount === null) {
       return { row, kind: "unreadable", hasExecution: false, amountMismatch };
     }
-    const kind: CcldRowKind = filled >= ord ? "filled" : rmn > 0 && row.cancelled === false ? "partially_filled_open" : "partially_filled_closed";
+    // 잔여가 남았고 취소로 확인되지 않았으면 주문이 살아 있을 수 있다(취소 미보고 포함). 닫혔다고 단정하지 않는다.
+    const kind: CcldRowKind = filled >= ord ? "filled" : rmn > 0 && row.cancelled !== true ? "partially_filled_open" : "partially_filled_closed";
     return { row, kind, hasExecution: true, amountMismatch };
   }
   if (rejected) return { row, kind: "rejected", hasExecution: false, amountMismatch: null };

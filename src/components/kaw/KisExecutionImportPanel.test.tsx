@@ -115,6 +115,37 @@ describe("초기 화면 — 자동 조회 없음", () => {
   });
 });
 
+describe("실제 응답(cncl_yn 이 빈 문자열) — 확인 불가와 체결 없음을 분리해서 보여준다", () => {
+  // 2026-10-19 실제 응답: 취소되지 않은 행의 cncl_yn 은 "N" 이 아니라 "" 다.
+  const blank = OUT1.map((r) => ({ ...r, cncl_yn: "" }));
+
+  it("주문 3건 → 체결 2건 · 294주 · 7,974,630원, 확인 불가 구역은 없다 (예전엔 3건 모두 '체결 없는 주문')", async () => {
+    await runOk(async () => resp(okResponse({ body: { output1: blank } })));
+    expect($$("exec-row")).toHaveLength(2);
+    expect($("exec-buy-amount")!.textContent).toBe("7,974,630원");
+    expect($("exec-totals")!.textContent).toContain("294주");
+    expect($("exec-totals")!.textContent).toContain("증권사 요약 합계 7,974,630원 — 일치");
+    expect($$("exec-zero-row")).toHaveLength(1);
+    expect($("exec-unverifiable")).toBeNull();
+    expect($("exec-status-counts")!.textContent).toContain("신규 체결");
+    // 0주 행은 취소 여부 미보고를 '취소 아님'으로 단정하지 않는다
+    expect($("exec-zero-fill")!.textContent).toContain("취소 여부를 알려주지 않았습니다");
+  });
+
+  it("필수 정보를 읽지 못한 행은 '확인 불가' 구역에 따로 나오고 체결 없음 구역·합계에 섞이지 않는다", async () => {
+    const withBad = [...blank, rowRaw({ odno: "0000009900", cncl_yn: "", tot_ccld_qty: "" })];
+    await runOk(async () => resp(okResponse({ body: { output1: withBad } })));
+    expect($$("exec-unverifiable-row")).toHaveLength(1);
+    expect($("exec-unverifiable")!.textContent).toContain("체결이 없다는 뜻이 아닙니다");
+    expect($("exec-unverifiable")!.textContent).toContain("체결수량");           // 읽지 못한 필드 이름
+    expect($$("exec-zero-row")).toHaveLength(1);                                // 확인된 0주 1건만
+    expect($("exec-zero-fill")!.textContent).not.toContain("0000009900".slice(-4));
+    expect($("exec-totals")!.textContent).toContain("체결 0주로 확인된 주문 1건");
+    expect($("exec-totals")!.textContent).toContain("읽지 못한 주문 1건은 체결 여부를 알 수 없어");
+    expect($("exec-buy-amount")!.textContent).toBe("7,974,630원");
+  });
+});
+
 describe("조회 결과 — 실증된 응답 구조", () => {
   it("[조회] 한 번에 요청 1회, 선택한 기간을 그대로 보낸다", async () => {
     const request = vi.fn(async (_r: ExecRange) => resp(okResponse()));
@@ -145,7 +176,7 @@ describe("조회 결과 — 실증된 응답 구조", () => {
     expect($$("exec-row")).toHaveLength(2);
     expect($$("exec-card")).toHaveLength(2);
     expect($("exec-buy-amount")!.textContent).toBe("7,974,630원");           // 0주 행이 더해지지 않는다
-    expect($("exec-totals")!.textContent).toContain("체결 0주 주문 1건은 합계에서 제외");
+    expect($("exec-totals")!.textContent).toContain("체결 0주로 확인된 주문 1건은 합계에서 제외");
     expect($("exec-totals")!.textContent).toContain("증권사 요약 합계 7,974,630원 — 일치");
   });
 

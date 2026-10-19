@@ -89,7 +89,9 @@ function Notes({ e }: { e: ExecEntryView }) {
 
 function Results({ data }: { data: Extract<KisExecutionPreviewResponse, { state: "ok" }> }) {
   const executed = data.entries.filter((e) => e.row.hasExecution);
-  const zero = data.entries.filter((e) => !e.row.hasExecution);
+  // 체결이 없다고 **확인된** 주문과, 읽지 못해 **알 수 없는** 주문은 다른 말이다 — 섞어 보이지 않는다.
+  const zero = data.entries.filter((e) => !e.row.hasExecution && e.status !== "unverifiable");
+  const unknown = data.entries.filter((e) => !e.row.hasExecution && e.status === "unverifiable");
   const t = data.totals;
   const q = data.query;
   const f = data.impact.funding;
@@ -142,7 +144,8 @@ function Results({ data }: { data: Extract<KisExecutionPreviewResponse, { state:
             <p>체결 매도 · {qty(t.executed.sellQty)} · 합계 <b className="tabular-nums">{won(t.executed.sellAmount)}</b></p>
           )}
           <p className="text-xs text-muted-foreground">
-            체결 0주 주문 {t.zeroFillRows}건은 합계에서 제외했습니다.
+            체결 0주로 확인된 주문 {t.zeroFillRows}건은 합계에서 제외했습니다.
+            {t.unreadableRows > 0 && <> 읽지 못한 주문 {t.unreadableRows}건은 체결 여부를 알 수 없어 합계에 넣지 않았습니다.</>}
             {data.apiCrossCheck && (
               <> 증권사 요약 합계 {won(data.apiCrossCheck.apiTotalFilledAmount)} — {data.apiCrossCheck.matches ? "일치" : <b className="text-rose-600">불일치</b>}.</>
             )}
@@ -218,6 +221,23 @@ function Results({ data }: { data: Extract<KisExecutionPreviewResponse, { state:
             <div key={e.row.key} className="text-xs" data-testid="exec-zero-row">
               <span className="font-medium">{e.row.name ?? e.row.ticker}</span>{" "}
               <span className="text-muted-foreground">{e.row.ticker} · {e.row.orderDate} · {sideText(e.row.side)} 주문 {qty(e.row.orderQty)} · 체결 {qty(e.row.filledQty)} · 잔여 {qty(e.row.remainingQty)} · 주문 …{e.row.orderNoTail}</span>{" "}
+              <Badge status={e.status} />
+              <Notes e={e} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 확인 불가 — 체결이 없다는 뜻이 아니다 */}
+      {unknown.length > 0 && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 space-y-1.5" data-testid="exec-unverifiable">
+          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+            확인 불가 {unknown.length}건 — 필수 정보를 읽지 못했습니다. <b>체결이 없다는 뜻이 아닙니다</b>
+          </p>
+          {unknown.map((e) => (
+            <div key={e.row.key} className="text-xs" data-testid="exec-unverifiable-row">
+              <span className="font-medium">{e.row.name ?? e.row.ticker ?? "종목 미확인"}</span>{" "}
+              <span className="text-muted-foreground">{e.row.ticker ?? "-"} · {e.row.orderDate ?? "-"} · 주문 …{e.row.orderNoTail}</span>{" "}
               <Badge status={e.status} />
               <Notes e={e} />
             </div>

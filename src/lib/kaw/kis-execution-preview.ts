@@ -55,6 +55,21 @@ export const PREVIEW_STATUS_LABEL: Readonly<Record<PreviewStatus, string>> = Obj
   unverifiable: "확인 불가",
 });
 
+/** 행을 읽을 수 없다고 판단한 이유(어떤 필수 정보가 비었는가). 값은 싣지 않고 이름만 쓴다 */
+function missingFields(r: ParsedCcldRow["row"]): string[] {
+  const out: string[] = [];
+  if (!r.orderDate || !/^\d{8}$/.test(r.orderDate)) out.push("주문일");
+  if (!r.orderNo) out.push("주문번호");
+  if (!r.ticker || !/^[A-Z0-9]{6}$/.test(r.ticker)) out.push("종목코드");
+  if (r.sideCode !== "01" && r.sideCode !== "02") out.push("매수/매도 구분");
+  if (r.orderQty === null) out.push("주문수량");
+  if (r.filledQty === null) out.push("체결수량");
+  if (r.remainingQty === null) out.push("잔여수량");
+  if (r.filledQty !== null && r.filledQty > 0 && r.avgPrice === null) out.push("평균 체결가");
+  if (r.filledQty !== null && r.filledQty > 0 && r.filledAmount === null) out.push("체결금액");
+  return out.length ? out : ["필수 정보"];
+}
+
 export type PreviewReason =
   | "ok"
   | "same_order_in_ledger"
@@ -202,7 +217,12 @@ export function previewKisExecutions(input: PreviewInput): PreviewEntry[] {
     });
 
     // 1) 읽을 수 없다
-    if (p.kind === "unreadable") { entries.push(mk("unverifiable", "unreadable_fields")); continue; }
+    if (p.kind === "unreadable") {
+      entries.push(mk("unverifiable", "unreadable_fields", {
+        notes: [`읽지 못한 필수 정보: ${missingFields(r).join(", ")}. 체결 여부를 알 수 없어 합계와 원장 후보에서 제외했습니다.`],
+      }));
+      continue;
+    }
     if ((counts.get(key) ?? 0) > 1) { entries.push(mk("unverifiable", "duplicate_order_number_in_response")); continue; }
 
     // 2) 체결이 없다 — 어떤 경우에도 원장 후보가 아니다
@@ -213,7 +233,11 @@ export function previewKisExecutions(input: PreviewInput): PreviewEntry[] {
         : p.kind === "no_fill_open" ? "zero_fill_open"
         : "zero_fill_closed_possible_modification";
       const notes = reason === "zero_fill_closed_possible_modification"
-        ? ["체결 0 · 잔여 0 · 취소 아님: 정정으로 대체된 원주문일 가능성이 있습니다(확정 아님). 같은 종목·수량의 체결 행이 따로 있는지 확인하세요."]
+        ? [
+            r.cancelled === false
+              ? "체결 0 · 잔여 0 · 취소 아님: 정정으로 대체된 원주문일 가능성이 있습니다(확정 아님). 같은 종목·수량의 체결 행이 따로 있는지 확인하세요."
+              : "체결 0 · 잔여 0: 증권사가 취소 여부를 알려주지 않았습니다. 정정으로 대체되었거나 취소된 원주문일 수 있습니다(확정 아님). 같은 종목·수량의 체결 행이 따로 있는지 확인하세요.",
+          ]
         : [];
       entries.push(mk("no_execution", reason, { notes }));
       continue;
@@ -237,7 +261,13 @@ export function previewKisExecutions(input: PreviewInput): PreviewEntry[] {
     const inst = res.instance;
 
     const notes: string[] = [];
-    if (p.kind === "partially_filled_open") notes.push("일부만 체결됐고 잔여 주문이 남아 있습니다. 체결된 수량만 후보입니다.");
+    if (p.kind === "partially_filled_open") {
+      notes.push(
+        r.cancelled === null
+          ? "일부만 체결됐고 잔여 수량이 있습니다. 증권사가 취소 여부를 알려주지 않아 주문이 아직 살아 있는지는 확인되지 않았습니다. 체결된 수량만 후보입니다."
+          : "일부만 체결됐고 잔여 주문이 남아 있습니다. 체결된 수량만 후보입니다.",
+      );
+    }
     if (p.kind === "partially_filled_closed") notes.push("일부만 체결되고 잔여가 닫혔습니다. 체결된 수량만 후보입니다.");
 
     const fp = kisExecutionFingerprint(inst.id, r.orderDate as string, r.orderNo as string);

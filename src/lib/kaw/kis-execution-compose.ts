@@ -122,7 +122,10 @@ export type KisExecutionPreviewResponse =
       totals: {
         byStatus: Record<PreviewStatus, number>;
         executed: ExecutedTotals;
+        /** 체결 0주로 **확인된** 주문 수 — 읽지 못한 행(unreadableRows)은 여기에 들어가지 않는다 */
         zeroFillRows: number;
+        /** 필드를 읽지 못해 체결 여부를 알 수 없는 행 수. 체결 없음이 아니라 **확인 불가**다 */
+        unreadableRows: number;
         /** `신규 체결`만의 매수 합계 */
         newBuyAmount: number;
         newBuyQty: number;
@@ -230,7 +233,8 @@ export function composeExecutionPreview(input: ComposeInput): Extract<KisExecuti
     if (r.sideCode === "02") { executed.buyQty += r.filledQty as number; executed.buyAmount += r.filledAmount as number; }
     if (r.sideCode === "01") { executed.sellQty += r.filledQty as number; executed.sellAmount += r.filledAmount as number; }
   }
-  const zeroFillRows = input.rows.filter((p) => !p.hasExecution).length;
+  const unreadableRows = input.rows.filter((p) => p.kind === "unreadable").length;
+  const zeroFillRows = input.rows.filter((p) => !p.hasExecution && p.kind !== "unreadable").length;
 
   // 조회 요약(output2)과 대조 — 모든 페이지의 요약이 있고 끝까지 읽었을 때만
   let apiCrossCheck: Extract<KisExecutionPreviewResponse, { state: "ok" }>["apiCrossCheck"] = null;
@@ -313,7 +317,7 @@ export function composeExecutionPreview(input: ComposeInput): Extract<KisExecuti
     query: input.query,
     entries,
     totals: {
-      byStatus: t.byStatus, executed, zeroFillRows,
+      byStatus: t.byStatus, executed, zeroFillRows, unreadableRows,
       newBuyAmount: t.newBuyAmount, newBuyQty: t.newBuyQty,
     },
     apiCrossCheck,

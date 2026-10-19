@@ -218,11 +218,14 @@ describe("행 분류 — 부분체결 · 취소 · 거부 · 필드 누락", () 
     expect(r.hasExecution).toBe(false);
   });
   it("필수 필드를 못 읽으면 unreadable — 0 으로 채우지 않는다", () => {
-    for (const over of [{ odno: "" }, { pdno: "12" }, { ord_dt: "2026-10-14" }, { sll_buy_dvsn_cd: "99" }, { tot_ccld_qty: "" }, { cncl_yn: "?" }]) {
+    for (const over of [{ odno: "" }, { pdno: "12" }, { ord_dt: "2026-10-14" }, { sll_buy_dvsn_cd: "99" }, { tot_ccld_qty: "" }]) {
       const r = c(over);
       expect(r.kind).toBe("unreadable");
       expect(r.hasExecution).toBe(false);
     }
+  });
+  it("취소 여부(cncl_yn)가 'Y'/'N' 이 아니어도 unreadable 이 아니다 — 필수 필드에서 빠졌다 (kis-ccld-blank-cancel-flag.test.ts)", () => {
+    for (const v of ["", "?", " "]) expect(c({ cncl_yn: v }).kind).toBe("filled");
   });
   it("체결이 있는데 평균가 · 체결금액을 못 읽으면 unreadable", () => {
     expect(c({ avg_prvs: "", tot_ccld_amt: "" }).kind).toBe("unreadable");
