@@ -49,6 +49,13 @@ export const LEDGER_SOURCE_REGISTRY: Readonly<Record<string, LedgerSourceInfo>> 
     source: "미래에셋 일반 거래내역 export (ISA/연금저축). 결제일이 직접 사실이고 주문일은 추정이다",
     verifiedAt: "2026-10-07",
   },
+  // 한국투자 inquire-daily-ccld(TTTC0081R) 체결 조회를 사용자가 승인해 원장에 반영한 행 (Phase 4-C-2).
+  // 증권사가 API 로 직접 보고한 주문일/체결수량/평균가/체결금액이다. 수수료·세금은 API 가 주지 않아 null 이다.
+  kis_api_daily_ccld: {
+    broker: "kis",
+    source: "한국투자 일별 주문체결 조회 API(inquire-daily-ccld, TTTC0081R). 주문일·체결수량·평균가·체결금액을 증권사가 직접 보고하고 수수료·세금은 주지 않는다",
+    verifiedAt: "2026-10-19",
+  },
   "user_supplied_missing_irp_2025-12-29": {
     // 사용자가 증권사 화면에서 확인해 보완한 행이라 **어느 증권사인지 source 이름이
     // 보장하지 않는다.** 이름에 irp 가 들어 있다는 이유로 broker 를 채우지 않는다 —

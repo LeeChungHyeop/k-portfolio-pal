@@ -23,6 +23,7 @@ let ledgerError = false;
 let registryData: unknown = [];
 let cashflows: unknown[] = [];
 let auditRows: Array<{ new_value: unknown }> = [];
+let obsRows: Record<string, unknown>[] = [];
 
 const fakeClient = {
   rpc: () => { dbCalls.push("rpc"); return Promise.resolve({ data: null, error: null }); },
@@ -39,6 +40,9 @@ const fakeClient = {
     if (table === "kaw_transaction_correction") return mk(() => ({ data: [], error: null }));
     // 계좌 이전 확정 이력(append-only). 읽기만 한다 — WRITE 는 dbCalls 에 남아 테스트가 잡는다
     if (table === "kaw_ledger_audit") return mk(() => ({ data: auditRows, error: null }));
+    // 잔고 관측(읽기만) — 원장 반영 판정이 최근 관측을 읽는다
+    if (table === "kaw_settlement_observation") return mk(() => ({ data: obsRows, error: null }));
+    if (table === "kaw_settlement_observation_void") return mk(() => ({ data: [], error: null }));
     // kaw_data: _meta(레지스트리) / pension(장부) / 세션 검증용 _family 가 한 테이블이다. 요청 순서에 의존하지 않도록 단일 응답을 쓴다.
     return {
       select: () => {
@@ -138,7 +142,7 @@ const featureDb = () => dbCalls.filter((c) => !c.endsWith(":_family"));
 const dbWrites = () => dbCalls.filter((c) => c.startsWith("WRITE") || c === "rpc");
 
 beforeEach(() => {
-  dbCalls.length = 0; ledgerRows = []; ledgerError = false; registryData = [kisInstance]; cashflows = []; auditRows = [];
+  dbCalls.length = 0; ledgerRows = []; ledgerError = false; registryData = [kisInstance]; cashflows = []; auditRows = []; obsRows = [];
   kisFetch = vi.fn(async () => okKis());
   getToken.mockClear();
 });
@@ -224,6 +228,64 @@ describe("단계별 차단 — 앞 단계가 막히면 뒤 단계를 실행하�
     expect(after.json.approval.enabled).toBe(false);
     expect(dbCalls.filter((c) => c.startsWith("WRITE:"))).toEqual([]);
     expect(dbCalls).toContain("read:kaw_ledger_audit");
+  });
+
+  describe("【4-C-2】원장 반영 판정이 응답에 실린다 — 이 핸들러는 판정만 하고 쓰지 않는다", () => {
+    const proxy = { source: "user_attested_liquidation_price_proxy", event_date: "2026-10-13", inferred_trade_date: null, settlement_date: null, fee: null, tax: null, post_quantity: 0, trade_date_evidence: "user-attested-full-liquidation" };
+    function seedFullCase() {
+      registryData = [kisInstance];
+      cashflows = [{ date: "2025-11-10", amount: 10_500_000 }];
+      ledgerRows = [
+        ledgerTx({ id: "b1", ticker: "360750", quantity: 297, price: 25910, amount: 7_695_270 }),
+        ledgerTx({ id: "b2", ticker: "367380", quantity: 81, price: 31660, amount: 2_564_460 }),
+        ledgerTx({ id: "s1", ticker: "360750", side: "sell", quantity: 297, price: 25910, amount: 7_695_270, ...proxy }),
+        ledgerTx({ id: "s2", ticker: "367380", side: "sell", quantity: 81, price: 31660, amount: 2_564_460, ...proxy }),
+      ];
+      auditRows = [{ new_value: {
+        version: 1, kind: "sold_then_cash_transfer", logicalAccountType: "pension", toInstanceId: kisInstance.id, toBroker: "kis", toProductCode: "22",
+        fromInstanceId: null, fromBroker: "miraeasset", fromLabel: "미래에셋", anchorDate: "2026-10-13",
+        cashReceived: { amount: 10_293_793, date: null, basis: "user_confirmed" }, exitEvidence: [], containsEstimates: true,
+        principalEffect: "none", createsCashflow: false, observation: { captureId: "c", stateAsOf: "2026-10-16", observedAt: "x" },
+        approval: { actor: "p", at: "2026-10-16T01:00:00.000Z", note: null },
+      } }];
+      obsRows = [{
+        id: "obs:c:kis_inquire_balance", capture_id: "c", account_type: "pension", broker: "kis", broker_product_code: "22", account_instance_id: kisInstance.id,
+        account_ref_fingerprint: null, observed_at: "2026-10-16T01:00:00+00:00", state_as_of: "2026-10-16", state_as_of_basis: "observation_date",
+        settlement_basis: "settlement", source_type: "kis_inquire_balance", holdings: { "360750": 230, "367380": 64 }, holdings_completeness: "unknown",
+        cash: "2318828", acquisition_cost: null, account_total: null, capture_payload_hash: "c1|x", hash_version: 1, note: null, actor: "p",
+      }];
+    }
+
+    it("서버 플래그가 없으면(기본) 판정은 하되 열리지 않는다 — flag_off · phase_not_enabled, 쓰기·RPC 없음", async () => {
+      seedFullCase();
+      const r = await call(RANGE);
+      expect(r.status).toBe(200);
+      expect(r.json.apply).toMatchObject({ eligible: true, flagEnabled: false, enabled: false, alreadyApplied: false });
+      expect(r.json.apply.blockers.map((b: { code: string }) => b.code)).toEqual(["flag_off"]);
+      expect(r.json.apply.plan.rows).toHaveLength(2);
+      expect(r.json.apply.plan.totalAmount).toBe(7_974_630);
+      expect(r.json.approval.enabled).toBe(false);
+      expect(r.json.approval.blockers.map((b: { code: string }) => b.code)).toContain("phase_not_enabled");
+      expect(dbCalls.filter((c) => c.startsWith("WRITE:") || c === "rpc")).toEqual([]);
+    });
+
+    it("KIS_LEDGER_APPLY_ENABLED=on 이면 조건을 만족할 때 enabled — 그래도 이 핸들러는 쓰지 않는다", async () => {
+      seedFullCase();
+      const r = await call(RANGE, { ...fullEnv, KIS_LEDGER_APPLY_ENABLED: "on" });
+      expect(r.json.apply).toMatchObject({ eligible: true, flagEnabled: true, enabled: true });
+      expect(r.json.approval.enabled).toBe(true);
+      expect(r.json.approval.blockers).toEqual([]);
+      expect(dbCalls.filter((c) => c.startsWith("WRITE:") || c === "rpc")).toEqual([]);
+    });
+
+    it("응답의 계획에는 서버 전용 페이로드(전체 주문번호 · fingerprint · 가족 코드)가 없다", async () => {
+      seedFullCase();
+      const r = await call(RANGE, { ...fullEnv, KIS_LEDGER_APPLY_ENABLED: "on" });
+      expect(r.text).not.toContain("source_fingerprint");
+      expect(r.text).not.toContain("v2|kis_api_daily_ccld");
+      expect(r.text).not.toContain("0000006700");
+      expect(r.text).not.toContain(F);
+    });
   });
 
   it("CANO 만 없어도 503 이다", async () => {

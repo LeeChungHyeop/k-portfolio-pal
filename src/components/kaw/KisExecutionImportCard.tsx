@@ -3,6 +3,7 @@ import { usePortfolioStore } from "@/lib/kaw/store";
 import { kstDateString } from "@/lib/kaw/snapshot";
 import { requestKisExecutionPreview, type ExecRequestOutcome } from "@/lib/kaw/kis-execution-client";
 import { requestBalanceObserve, requestTransferConfirm, requestTransferState } from "@/lib/kaw/kis-transfer-client";
+import { requestKisLedgerApply } from "@/lib/kaw/kis-ledger-apply-client";
 import { KisExecutionImportPanel } from "@/components/kaw/KisExecutionImportPanel";
 import { AccountTransferPanel } from "@/components/kaw/AccountTransferPanel";
 import type { AccountId } from "@/lib/kaw/constants";
@@ -34,6 +35,7 @@ export function KisExecutionImportCard({ accountId }: { accountId: AccountId }) 
         today={kstDateString()}
         request={(range) => requestKisExecutionPreview(range)}
         onResult={onResult}
+        onApply={(req) => requestKisLedgerApply(req)}
       />
       <AccountTransferPanel
         loadState={() => requestTransferState()}

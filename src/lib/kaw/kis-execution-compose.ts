@@ -31,6 +31,9 @@ import {
   type PreviewStatus,
 } from "./kis-execution-preview";
 import type { CcldFailureKind, CcldListState, CcldRowKind, CcldSummary, ParsedCcldRow } from "./kis-ccld-history";
+import { evaluateApplyPlan, type ApplyBlocker, type ApplyEvaluation, type ApplyPlanView } from "./kis-ledger-apply";
+import type { TransferRecord } from "./account-transfer-record";
+import type { BalanceObservationSummary } from "./kis-balance-observation";
 
 // ── 응답 타입 (서버 ↔ 화면 공용) ─────────────────────────────────────────────
 
@@ -114,6 +117,17 @@ export interface ExecImpactView {
   newBrokerRegistered: boolean;
 }
 
+export interface ApplyView {
+  eligible: boolean;
+  /** 서버 플래그(KIS_LEDGER_APPLY_ENABLED)가 켜져 있는가 */
+  flagEnabled: boolean;
+  /** 지금 반영 버튼을 열 수 있다 = eligible && flagEnabled */
+  enabled: boolean;
+  alreadyApplied: boolean;
+  blockers: ApplyBlocker[];
+  plan: ApplyPlanView | null;
+}
+
 export type KisExecutionPreviewResponse =
   | {
       state: "ok";
@@ -133,7 +147,9 @@ export type KisExecutionPreviewResponse =
       /** 조회 요약(output2)과 우리 합계의 대조. 비교할 수 없으면 null */
       apiCrossCheck: { matches: boolean; apiTotalFilledAmount: number; ourTotalFilledAmount: number } | null;
       impact: ExecImpactView;
-      approval: { enabled: false; blockers: ApprovalBlocker[] };
+      approval: { enabled: boolean; blockers: ApprovalBlocker[] };
+      /** 원장 반영 판정 (Phase 4-C-2). 서버 전용 페이로드는 싣지 않는다. 판정 입력이 없으면 생략 */
+      apply?: ApplyView;
     }
   | { state: "gate_blocked"; reason: string }
   | {
@@ -158,6 +174,17 @@ export interface ComposeInput {
    * 그대로 닫혀 있다. 생략하면 아무것도 확정되지 않은 것으로 본다.
    */
   confirmedTransferInstanceIds?: readonly string[];
+  /**
+   * 원장 반영 판정에 필요한 입력 (Phase 4-C-2). 없으면 판정하지 않고 응답의 `apply` 도 없다.
+   * 서버 플래그가 꺼져 있으면(flagEnabled=false) 판정은 하되 `enabled` 는 항상 false 다.
+   */
+  apply?: {
+    flagEnabled: boolean;
+    observation: BalanceObservationSummary | null;
+    transfers: readonly TransferRecord[];
+    /** 이 계좌에 거래 정정(overlay)이 하나라도 있는가 */
+    correctionsPresent: boolean;
+  };
   accountType: AccountId;
   productCode: string;
   /** YYYY-MM-DD (KST) */
@@ -198,7 +225,15 @@ const KIS_ACTIVE = (registry: readonly BrokerAccountInstance[], accountType: Acc
       i.activeFrom <= today && (i.activeTo === undefined || today < i.activeTo),
   );
 
-export function composeExecutionPreview(input: ComposeInput): Extract<KisExecutionPreviewResponse, { state: "ok" }> {
+export type OkPreview = Extract<KisExecutionPreviewResponse, { state: "ok" }>;
+
+/** 응답만. 서버 전용 반영 페이로드는 버린다 */
+export function composeExecutionPreview(input: ComposeInput): OkPreview {
+  return composeExecutionPreviewDetailed(input).response;
+}
+
+/** 응답 + 반영 판정 전체(서버 전용 페이로드 포함). 반영 핸들러만 쓴다 */
+export function composeExecutionPreviewDetailed(input: ComposeInput): { response: OkPreview; apply: ApplyEvaluation | null } {
   const eff = effectiveLedger(input.ledger, input.corrections);
   const preview = previewKisExecutions({
     rows: input.rows, ledger: eff, registry: input.registry, accountType: input.accountType, productCode: input.productCode,
@@ -282,10 +317,32 @@ export function composeExecutionPreview(input: ComposeInput): Extract<KisExecuti
   );
   const hasResidual = newBrokerRegistered && Object.keys(residual).length > 0;
 
-  // ── 승인 차단 사유 (이 단계에서는 항상 닫혀 있다) ───────────────────────────
-  const blockers: ApprovalBlocker[] = [
-    { code: "phase_not_enabled", message: "원장 반영 기능은 아직 열리지 않았습니다(Phase 4-C). 이 화면은 조회·미리보기 전용입니다." },
-  ];
+  // ── 원장 반영 판정 (Phase 4-C-2) ────────────────────────────────────────────
+  // 서버 플래그가 꺼져 있으면(기본) 판정은 하되 열리지 않는다 — phase_not_enabled 가 남는다.
+  const applyEval: ApplyEvaluation | null = input.apply
+    ? evaluateApplyPlan({
+        flagEnabled: input.apply.flagEnabled,
+        entries: preview,
+        query: input.query,
+        apiCrossCheck,
+        registry: input.registry,
+        ledger: eff,
+        correctionsPresent: input.apply.correctionsPresent,
+        transfers: input.apply.transfers,
+        observation: input.apply.observation,
+        flows: input.flows,
+        funding,
+        accountType: "pension",
+        productCode: input.productCode,
+        today: input.today,
+      })
+    : null;
+
+  // ── 승인 차단 사유 ────────────────────────────────────────────────────────────
+  const blockers: ApprovalBlocker[] = [];
+  if (!applyEval || !applyEval.flagEnabled) {
+    blockers.push({ code: "phase_not_enabled", message: "원장 반영 기능은 아직 열리지 않았습니다(Phase 4-C). 이 화면은 조회·미리보기 전용입니다." });
+  }
   if (!input.query.complete) {
     blockers.push({
       code: "query_incomplete",
@@ -320,7 +377,7 @@ export function composeExecutionPreview(input: ComposeInput): Extract<KisExecuti
     });
   }
 
-  return {
+  const response: OkPreview = {
     state: "ok",
     query: input.query,
     entries,
@@ -330,6 +387,10 @@ export function composeExecutionPreview(input: ComposeInput): Extract<KisExecuti
     },
     apiCrossCheck,
     impact: { principal: input.flows.length ? principal : null, funding, priorBrokerResidual: residual, newBrokerRegistered },
-    approval: { enabled: false, blockers },
+    approval: { enabled: applyEval?.enabled ?? false, blockers },
+    ...(applyEval
+      ? { apply: { eligible: applyEval.eligible, flagEnabled: applyEval.flagEnabled, enabled: applyEval.enabled, alreadyApplied: applyEval.alreadyApplied, blockers: applyEval.blockers, plan: applyEval.plan } }
+      : {}),
   };
+  return { response, apply: applyEval };
 }

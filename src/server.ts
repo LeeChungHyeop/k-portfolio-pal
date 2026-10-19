@@ -24,6 +24,7 @@ import { handleHistoryMergePost } from "./lib/kaw/history-server";
 import { handleKisAccountGet } from "./lib/kaw/kis-account-read";
 import { handleKisExecutionsPreview } from "./lib/kaw/kis-execution-server";
 import { handleBalanceObserve, handleTransferConfirm, handleTransferState } from "./lib/kaw/kis-transfer-server";
+import { handleKisLedgerApply } from "./lib/kaw/kis-ledger-apply-server";
 import { handleOrderPrepare, handleOrderStatus, handleOrderResolve, handleOrderSubmit } from "./lib/kaw/order-handlers";
 
 // Cloudflare Workers environment bindings
@@ -40,6 +41,8 @@ export interface Env {
   KIS_ACCOUNT_CANO?: string;
   /** 승인형 주문 기능 flag. 정확히 "on" 일 때만 켜진다. **기본 꺼짐** */
   KIS_ORDER_ENABLED?: string;
+  /** 한국투자 체결 → 거래원장 반영 flag (Phase 4-C-2). 정확히 "on" 일 때만 켜진다. **기본 꺼짐** */
+  KIS_LEDGER_APPLY_ENABLED?: string;
   /** 미접수 정리(dismiss) flag. 22 체결조회 형식이 실측되기 전에는 켜지 않는다. **기본 꺼짐** */
   KIS_ORDER_DISMISS_ENABLED?: string;
   /** `/api/data` 무가드 저장 차단(428). **기본 꺼짐** */
@@ -316,6 +319,8 @@ export default {
     // 한국투자 체결내역 미리보기(읽기 전용). credential 이 없으면 503 not_configured 로 끝난다.
     if (pathname === "/api/kis/executions/preview" && request.method === "POST") return handleKisExecutionsPreview(request, env);
     // 계좌 이전 확정 · 잔고 관측 기록 (Phase 4-C-1). 쓰기는 사용자 승인(approved: true)이 있을 때만, 기존 append-only 테이블에 1행.
+    // 체결 → 거래원장 반영 (Phase 4-C-2). 서버 플래그 KIS_LEDGER_APPLY_ENABLED 가 "on" 이고 사용자 승인(approved:true)이 있을 때만, RPC 1회로.
+    if (pathname === "/api/kis/executions/apply" && request.method === "POST") return handleKisLedgerApply(request, env);
     if (pathname === "/api/kis/transfer/state" && request.method === "GET") return handleTransferState(request, env);
     if (pathname === "/api/kis/transfer/observe" && request.method === "POST") return handleBalanceObserve(request, env);
     if (pathname === "/api/kis/transfer/confirm" && request.method === "POST") return handleTransferConfirm(request, env);

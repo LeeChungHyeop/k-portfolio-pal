@@ -9,6 +9,8 @@ import type { ExecRange, ExecRequestOutcome } from "@/lib/kaw/kis-execution-clie
 import type { ExecEntryView, KisExecutionPreviewResponse } from "@/lib/kaw/kis-execution-compose";
 import { PREVIEW_STATUS_LABEL, type PreviewStatus } from "@/lib/kaw/kis-execution-preview";
 import type { CcldFailureKind } from "@/lib/kaw/kis-ccld-history";
+import type { ApplyOutcome, ApplyRequest } from "@/lib/kaw/kis-ledger-apply-client";
+import { KisLedgerApplySection } from "@/components/kaw/KisLedgerApplySection";
 
 /**
  * 한국투자 체결내역 가져오기 — **조회·미리보기 전용** 화면 (Phase 4-B).
@@ -60,7 +62,7 @@ const sideTone = (s: "buy" | "sell" | "unknown") => (s === "buy" ? "text-rose-60
 type View =
   | { phase: "idle" }
   | { phase: "loading" }
-  | { phase: "done"; outcome: ExecRequestOutcome };
+  | { phase: "done"; outcome: ExecRequestOutcome; range: { start: string; end: string } };
 
 export interface KisExecutionImportPanelProps {
   registry: readonly BrokerAccountInstance[];
@@ -70,6 +72,8 @@ export interface KisExecutionImportPanelProps {
   request: (range: ExecRange) => Promise<ExecRequestOutcome>;
   /** 조회가 끝날 때마다 결과를 알린다(이전 대사 패널이 체결 매수 합계를 쓴다). 저장하지 않는다 */
   onResult?: (outcome: ExecRequestOutcome) => void;
+  /** 체결 → 거래원장 반영 요청 (Phase 4-C-2). 사용자가 승인 체크 후 버튼을 눌렀을 때만 호출된다. 없으면 반영 섹션은 읽기 전용이다 */
+  onApply?: (req: ApplyRequest) => Promise<ApplyOutcome>;
 }
 
 function Badge({ status }: { status: PreviewStatus }) {
@@ -89,7 +93,7 @@ function Notes({ e }: { e: ExecEntryView }) {
   return <div className="mt-1 space-y-0.5">{lines.map((l, i) => <p key={i} className="text-xs text-muted-foreground break-words">{l}</p>)}</div>;
 }
 
-function Results({ data }: { data: Extract<KisExecutionPreviewResponse, { state: "ok" }> }) {
+function Results({ data, range, onApply }: { data: Extract<KisExecutionPreviewResponse, { state: "ok" }>; range: { start: string; end: string }; onApply?: (req: ApplyRequest) => Promise<ApplyOutcome> }) {
   const executed = data.entries.filter((e) => e.row.hasExecution);
   // 체결이 없다고 **확인된** 주문과, 읽지 못해 **알 수 없는** 주문은 다른 말이다 — 섞어 보이지 않는다.
   const zero = data.entries.filter((e) => !e.row.hasExecution && e.status !== "unverifiable");
@@ -282,25 +286,29 @@ function Results({ data }: { data: Extract<KisExecutionPreviewResponse, { state:
         )}
       </div>
 
-      {/* 원장 반영 — 이 단계에서는 열지 않는다 */}
-      <div className="rounded-lg border p-3 space-y-2" data-testid="exec-approval">
-        <Button size="sm" disabled className="w-full sm:w-auto" data-testid="exec-approve-button">
-          원장에 반영 (사용할 수 없음)
-        </Button>
-        <ul className="space-y-0.5">
-          {data.approval.blockers.map((b) => (
-            <li key={b.code} className="text-xs text-muted-foreground" data-testid="exec-blocker">• {b.message}</li>
-          ))}
-        </ul>
-      </div>
+      {/* 원장 반영 (Phase 4-C-2): 서버가 반영 판정을 보냈으면 승인 섹션, 아니면 이전처럼 닫힌 상태 */}
+      {data.apply ? (
+        <KisLedgerApplySection apply={data.apply} range={range} onApply={onApply} />
+      ) : (
+        <div className="rounded-lg border p-3 space-y-2" data-testid="exec-approval">
+          <Button size="sm" disabled className="w-full sm:w-auto" data-testid="exec-approve-button">
+            원장에 반영 (사용할 수 없음)
+          </Button>
+          <ul className="space-y-0.5">
+            {data.approval.blockers.map((b) => (
+              <li key={b.code} className="text-xs text-muted-foreground" data-testid="exec-blocker">• {b.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
 
-function Outcome({ outcome }: { outcome: ExecRequestOutcome }) {
+function Outcome({ outcome, range, onApply }: { outcome: ExecRequestOutcome; range: { start: string; end: string }; onApply?: (req: ApplyRequest) => Promise<ApplyOutcome> }) {
   if (outcome.kind === "response") {
     const d = outcome.data;
-    if (d.state === "ok") return <Results data={d} />;
+    if (d.state === "ok") return <Results data={d} range={range} onApply={onApply} />;
     if (d.state === "gate_blocked") {
       return <p className="text-xs text-amber-700 dark:text-amber-300" role="status" data-testid="exec-gate">{GATE_TEXT[d.reason] ?? "계좌 설정 때문에 조회하지 않았습니다."}</p>;
     }
@@ -328,7 +336,7 @@ function Outcome({ outcome }: { outcome: ExecRequestOutcome }) {
   return <p className="text-xs text-rose-600 dark:text-rose-400" role="alert" data-testid="exec-error">{text}</p>;
 }
 
-export function KisExecutionImportPanel({ registry, today, request, onResult }: KisExecutionImportPanelProps) {
+export function KisExecutionImportPanel({ registry, today, request, onResult, onApply }: KisExecutionImportPanelProps) {
   const gate = useMemo(() => kisApiQueryGate(registry, "pension", today, "22"), [registry, today]);
   const kisStart = useMemo(
     () => registry.find((i) => i.logicalAccountType === "pension" && i.broker === "kis" && i.productCode === "22")?.activeFrom ?? "",
@@ -351,7 +359,7 @@ export function KisExecutionImportPanel({ registry, today, request, onResult }: 
     try {
       // 실패해도 다시 시도하지 않는다 — 결과 종류만 보여준다.
       const outcome = await request({ start, end });
-      setView({ phase: "done", outcome });
+      setView({ phase: "done", outcome, range: { start, end } });
       onResult?.(outcome);
     } finally {
       busy.current = false;
@@ -404,7 +412,7 @@ export function KisExecutionImportPanel({ registry, today, request, onResult }: 
         <p className="text-xs text-muted-foreground" data-testid="exec-idle">기간을 고르고 조회하면 한국투자 연금저축의 체결 내역이 여기에 표시됩니다.</p>
       )}
       {view.phase === "loading" && <p className="text-xs text-muted-foreground" role="status" data-testid="exec-loading">증권사에서 조회하는 중입니다…</p>}
-      {view.phase === "done" && <Outcome outcome={view.outcome} />}
+      {view.phase === "done" && <Outcome outcome={view.outcome} range={view.range} onApply={onApply} />}
     </Card>
   );
 }

@@ -533,6 +533,11 @@ export const INTRA_DAY_ROW_ORDER: Readonly<Record<string, "asc" | "desc">> = {
   // 720개 순열을 전부 돌려 확인한다). 그래서 이 값은 표기일 뿐 판정에 영향이 없다.
   // 이 source 에 **다른 날짜 행을 추가하려면 그 전제가 깨지므로 다시 실측해야 한다.**
   miraeasset_capture_qty_price_reconstructed: "desc",
+  // 한국투자 API 체결(Phase 4-C-2). API 응답에는 파일 행 번호가 없어 sourceRow 가 null 이고,
+  // 비교자는 그 경우 id 로 순서를 고정한다(방향 표기는 의미가 없다). 지금 이 source 로 들어오는 행은
+  // 매수뿐이라 같은 날 어떤 순서로 재생해도 보유수량이 같다 — **매도 체결을 이 source 로 반영하기 전에는
+  // 일중 순서 근거를 다시 실측해야 한다**(kis-ledger-apply.ts 가 매도 반영을 막는다).
+  kis_api_daily_ccld: "asc",
 };
 
 /**

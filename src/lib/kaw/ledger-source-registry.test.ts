@@ -51,6 +51,16 @@ describe("데이터셋과의 정합", () => {
   });
 });
 
+describe("한국투자 API 출처 (Phase 4-C-2)", () => {
+  it("kis_api_daily_ccld 는 증권사 kis 를 선언한다 (이름이 아니라 레지스트리 선언으로)", () => {
+    expect(Object.keys(LEDGER_SOURCE_REGISTRY)).toContain("kis_api_daily_ccld");
+    expect(declaredBrokerOf("kis_api_daily_ccld")).toBe("kis");
+  });
+  it("관측 source(kis_inquire_balance)와 섞이지 않는다", () => {
+    expect(Object.keys(LEDGER_SOURCE_REGISTRY)).not.toContain("kis_inquire_balance");
+  });
+});
+
 describe("fail closed", () => {
   it("미지 source 는 throw 하지 않고 broker 를 선언하지 않는다", () => {
     expect(ledgerSourceInfoOf("kis_inquire_daily_ccld")).toBe(UNKNOWN_LEDGER_SOURCE);

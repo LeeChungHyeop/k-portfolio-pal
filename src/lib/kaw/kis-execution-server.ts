@@ -26,6 +26,8 @@ import { getKisAccessToken, type KVLike } from "./kis-server";
 import { redactKisSecrets, type KisAccountCredentials } from "./kis-account-server";
 import { parseBrokerAccounts, type BrokerAccountInstance } from "./broker-account";
 import { kisApiQueryGate } from "./broker-connection";
+import { latestObservation } from "./kis-request-support";
+import { transferTargetOf } from "./kis-transfer-compose";
 import { kstDateString } from "./snapshot";
 import { TRANSFER_AUDIT_ACTION, parseTransferRecords, type TransferRecord } from "./account-transfer-record";
 import type { AccountId } from "./constants";
@@ -178,6 +180,72 @@ export async function readBundle(client: ServiceClient, code: string, profile: s
 
 // ── 핸들러 ──────────────────────────────────────────────────────────────────
 
+/** 서버 플래그. 정확히 "on" 일 때만 켜진다. **기본 꺼짐** — 배포해도 이 값을 켜기 전에는 원장에 쓰지 않는다 */
+export function isLedgerApplyEnabled(env: { KIS_LEDGER_APPLY_ENABLED?: string }): boolean {
+  return env.KIS_LEDGER_APPLY_ENABLED === "on";
+}
+
+export type KisQueryResult =
+  | { ok: true; rows: ParsedCcldRow[]; summaries: Array<CcldSummary | null>; query: ExecQueryInfo }
+  | { ok: false; status: number; response: KisExecutionPreviewResponse | { error: string } };
+
+/**
+ * 토큰 → 구간별 체결 조회 (재시도 없음). 미리보기와 반영 핸들러가 **같은 함수**를 쓴다 —
+ * 반영 직전의 재검증이 사용자가 본 미리보기와 같은 방식으로 조회한 결과여야 하기 때문이다.
+ * 읽기 전용이다: 이 함수는 DB 를 건드리지 않는다.
+ */
+export async function queryKisExecutions(
+  env: KisAccountEnv, deps: ExecDeps, cred: KisAccountCredentials, start: string, end: string, today: string,
+): Promise<KisQueryResult> {
+  const { appKey, appSecret, cano } = cred;
+  const fetchImpl: FetchLike = deps.fetchImpl ?? ((url, init) => fetch(url, init));
+  let token: string;
+  try {
+    token = await (deps.getToken ?? defaultGetToken)(env, cred);
+  } catch (e) {
+    void redactKisSecrets(e, [appKey, appSecret, cano]);
+    return { ok: false, status: 200, response: { state: "query_failed", failure: { kind: "auth", httpStatus: 0, rtCd: null, msgCd: null, msg1: null } } };
+  }
+
+  const plan = planCcldWindows(toYmd(start), toYmd(end), toYmd(today));
+  if (!plan.ok) return { ok: false, status: 400, response: { error: "조회 기간을 해석할 수 없습니다." } };
+
+  const rows: ParsedCcldRow[] = [];
+  const summaries: Array<CcldSummary | null> = [];
+  let pagesRead = 0;
+  let unreadPages = false;
+  let dupKeys = 0;
+  let sawAbsent = false;
+  const results: CcldFetchResult[] = [];
+  for (const w of plan.windows) {
+    const r = await fetchCcldWindow(cred, { productCode: "22", window: w }, fetchImpl, {
+      token, maxPages: CCLD_DEFAULT_MAX_PAGES,
+    });
+    results.push(r);
+    if (r.failure) return { ok: false, status: 200, response: { state: "query_failed", failure: r.failure } };
+    for (const p of r.pages) {
+      pagesRead++;
+      summaries.push(p.summary);
+      if (p.listState === "list_absent") sawAbsent = true;
+    }
+    rows.push(...r.rows);
+    unreadPages ||= r.unreadPages;
+    dupKeys += r.duplicateOrderKeys.length;
+  }
+
+  const query: ExecQueryInfo = {
+    start, end,
+    windows: plan.windows.length,
+    pagesRead,
+    complete: !unreadPages && results.every((r) => r.complete),
+    unreadPages,
+    listState: sawAbsent ? "list_absent" : rows.length > 0 ? "rows" : "empty",
+    duplicateOrderKeys: dupKeys,
+  };
+  return { ok: true, rows, summaries, query };
+}
+
+
 export async function handleKisExecutionsPreview(
   request: Request,
   env: KisAccountEnv,
@@ -222,63 +290,18 @@ export async function handleKisExecutionsPreview(
   if (!bundle.ok) return json({ state: "ledger_unavailable" } satisfies KisExecutionPreviewResponse);
 
   // 5) 토큰 → 조회. 재시도하지 않는다.
-  const { appKey, appSecret } = app;
-  const cred: KisAccountCredentials = { appKey, appSecret, cano };
-  const fetchImpl: FetchLike = deps.fetchImpl ?? ((url, init) => fetch(url, init));
-  let token: string;
-  try {
-    token = await (deps.getToken ?? defaultGetToken)(env, cred);
-  } catch (e) {
-    void redactKisSecrets(e, [appKey, appSecret, cano]);
-    return json({
-      state: "query_failed",
-      failure: { kind: "auth", httpStatus: 0, rtCd: null, msgCd: null, msg1: null },
-    } satisfies KisExecutionPreviewResponse);
-  }
-
-  const plan = planCcldWindows(toYmd(start), toYmd(end), toYmd(today));
-  if (!plan.ok) return json({ error: "조회 기간을 해석할 수 없습니다." }, 400);
-
-  const rows: ParsedCcldRow[] = [];
-  const summaries: Array<CcldSummary | null> = [];
-  let pagesRead = 0;
-  let unreadPages = false;
-  let dupKeys = 0;
-  let sawAbsent = false;
-  const results: CcldFetchResult[] = [];
-  for (const w of plan.windows) {
-    const r = await fetchCcldWindow(cred, { productCode: "22", window: w }, fetchImpl, {
-      token, maxPages: CCLD_DEFAULT_MAX_PAGES,
-    });
-    results.push(r);
-    if (r.failure) {
-      return json({ state: "query_failed", failure: r.failure } satisfies KisExecutionPreviewResponse);
-    }
-    for (const p of r.pages) {
-      pagesRead++;
-      summaries.push(p.summary);
-      if (p.listState === "list_absent") sawAbsent = true;
-    }
-    rows.push(...r.rows);
-    unreadPages ||= r.unreadPages;
-    dupKeys += r.duplicateOrderKeys.length;
-  }
-
-  const query: ExecQueryInfo = {
-    start, end,
-    windows: plan.windows.length,
-    pagesRead,
-    complete: !unreadPages && results.every((r) => r.complete),
-    unreadPages,
-    listState: sawAbsent ? "list_absent" : rows.length > 0 ? "rows" : "empty",
-    duplicateOrderKeys: dupKeys,
-  };
+  const q = await queryKisExecutions(env, deps, { appKey: app.appKey, appSecret: app.appSecret, cano }, start, end, today);
+  if (!q.ok) return json(q.response, q.status);
+  const { rows, summaries, query } = q;
 
   // 6) 조립. 어디에도 쓰지 않는다.
+  const targetInstance = transferTargetOf(bundle.registry);
+  const observation = targetInstance ? await latestObservation(client, session.code, session.profile, targetInstance.id) : null;
   const composed = composeExecutionPreview({
     rows, summaries, query,
     ledger: bundle.ledger, corrections: bundle.corrections, registry: bundle.registry, flows: bundle.flows,
     confirmedTransferInstanceIds: bundle.transfers.map((t) => t.toInstanceId),
+    apply: { flagEnabled: isLedgerApplyEnabled(env), observation, transfers: bundle.transfers, correctionsPresent: bundle.corrections.size > 0 },
     accountType: EXEC_ACCOUNT_TYPE, productCode: EXEC_PRODUCT_CODE, today,
   });
   return json(composed);

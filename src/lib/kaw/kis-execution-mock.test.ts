@@ -89,9 +89,16 @@ describe("승인 인터페이스 — 설계뿐이고 닫혀 있다", () => {
       expect(f).not.toHaveBeenCalled();
     } finally { globalThis.fetch = orig; }
   });
-  it("서버에 승인 라우트가 없다", () => {
+  it("서버의 체결 라우트는 preview 와 apply 둘뿐이고, apply 는 서버 플래그(기본 꺼짐) 뒤에 있다 (Phase 4-C-2)", () => {
     const server = readFileSync(path.join(SRC, "server.ts"), "utf8");
-    expect(server).not.toMatch(/executions\/approve|executions\/import|kis\/executions\/(?!preview)/);
+    const routes = [...server.matchAll(/\/api\/kis\/executions\/([a-z]+)/g)].map((m) => m[1]);
+    expect([...new Set(routes)].sort()).toEqual(["apply", "preview"]);
+    expect(server).not.toMatch(/executions\/approve|executions\/import/);
+    const apply = readFileSync(path.join(SRC, "lib/kaw/kis-ledger-apply-server.ts"), "utf8");
+    // 플래그 확인이 KIS 호출·DB 읽기보다 앞선다
+    expect(apply.indexOf("isLedgerApplyEnabled(env)")).toBeGreaterThan(-1);
+    expect(apply.indexOf("isLedgerApplyEnabled(env)")).toBeLessThan(apply.indexOf("queryKisExecutions("));
+    expect(apply.indexOf("isLedgerApplyEnabled(env)")).toBeLessThan(apply.indexOf("readBundle("));
   });
   it("화면은 승인 함수를 호출하지 않는다 (버튼은 disabled 고정)", () => {
     const panel = readFileSync(path.join(SRC, "components/kaw/KisExecutionImportPanel.tsx"), "utf8");
