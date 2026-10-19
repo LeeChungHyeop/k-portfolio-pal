@@ -259,8 +259,13 @@ export async function readKisBuyingPower(
 // ── Worker 핸들러 ───────────────────────────────────────────────────────────
 
 export interface KisAccountEnv extends DataEnv {
-  KIS_APP_KEY?: string;
-  KIS_APP_SECRET?: string;
+  /**
+   * **계좌 조회·주문 전용** 앱키/시크릿. 시세용 `KIS_APP_KEY`/`KIS_APP_SECRET` 과 별개의 앱이다.
+   * 시세용 앱은 기본 주식계좌에 묶여 있어 연금저축(22) 계좌를 조회하면 INVALID_CHECK_ACNO 로 실패한다.
+   * 이 값이 없을 때 시세용 키로 **대신 조회하지 않는다** — `resolveKisAccountApp` 참고.
+   */
+  KIS_ACCOUNT_APP_KEY?: string;
+  KIS_ACCOUNT_APP_SECRET?: string;
   /** 종합계좌번호 8자리. 응답·로그에 나가지 않는다 */
   KIS_ACCOUNT_CANO?: string;
   /**
@@ -306,6 +311,21 @@ export function authorizeKisAccess(
     return { ok: false, reason: "profile_not_owner" };
   }
   return { ok: true };
+}
+
+/**
+ * 계좌 조회·주문에 쓸 앱 credential. **`KIS_ACCOUNT_APP_*` 만 본다.**
+ *
+ * 시세용 `KIS_APP_KEY`/`KIS_APP_SECRET` 으로 대체하지 않는다: 그 앱은 다른 계좌(기본 주식계좌)에
+ * 묶여 있어서, 대체하면 의도하지 않은 계좌를 조회하거나 오류로 실패한다. 둘 중 하나라도 비어 있으면
+ * null 이고 호출자는 503(설정 없음)으로 끝낸다 — 토큰 발급도 하지 않는다.
+ */
+export function resolveKisAccountApp(
+  env: Pick<KisAccountEnv, "KIS_ACCOUNT_APP_KEY" | "KIS_ACCOUNT_APP_SECRET">,
+): { appKey: string; appSecret: string } | null {
+  const appKey = env.KIS_ACCOUNT_APP_KEY?.trim();
+  const appSecret = env.KIS_ACCOUNT_APP_SECRET?.trim();
+  return appKey && appSecret ? { appKey, appSecret } : null;
 }
 
 /**
@@ -358,10 +378,12 @@ export async function handleKisAccountGet(request: Request, env: KisAccountEnv):
     registry = parseBrokerAccounts((data?.data as { brokerAccounts?: unknown } | null)?.brokerAccounts);
   }
 
-  const { KIS_APP_KEY: appKey, KIS_APP_SECRET: appSecret, KIS_ACCOUNT_CANO: cano } = env;
-  if (!appKey || !appSecret) {
+  const app = resolveKisAccountApp(env);
+  if (!app) {
     return json({ unavailable: true, error: "KIS credential 이 설정되지 않았습니다." }, 503);
   }
+  const { appKey, appSecret } = app;
+  const cano = env.KIS_ACCOUNT_CANO;
 
   // 3) 계좌 등록 + 운용방식. 허용되지 않으면 토큰도 발급하지 않는다.
   const accountType = KIS_PRODUCTS[product].logicalAccountType;

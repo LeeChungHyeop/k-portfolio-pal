@@ -23,7 +23,7 @@ import { json, requireSession, serviceClient } from "./data-server";
 import { fetchKisPrices, getKisAccessToken, type KVLike } from "./kis-server";
 import { fetchBuyingPower } from "./kis-buying-power";
 import { inquireDailyCcld, placeCashBuyOrder, type FetchLike } from "./kis-order";
-import { authorizeKisAccess, parseBrokerAccounts, type KisAccountEnv } from "./kis-account-read";
+import { authorizeKisAccess, parseBrokerAccounts, resolveKisAccountApp, type KisAccountEnv } from "./kis-account-read";
 import { kisApiQueryGate } from "./broker-connection";
 import { kstDateString } from "./snapshot";
 import { isExecutionConfirmed, newApprovalToken, ORDER_POLICY, ledgerEligibility, type OrderIntent } from "./order-intent";
@@ -110,10 +110,12 @@ async function resolve(
   const auth = authorizeKisAccess(session, env);
   if (!auth.ok) return json({ error: "이 프로필에는 주문 권한이 없습니다." }, 403);
 
-  const { KIS_APP_KEY: appKey, KIS_APP_SECRET: appSecret, KIS_ACCOUNT_CANO: cano } = env;
-  if (!appKey || !appSecret || !cano || !/^\d{8}$/.test(cano)) {
+  const app = resolveKisAccountApp(env);
+  const cano = env.KIS_ACCOUNT_CANO;
+  if (!app || !cano || !/^\d{8}$/.test(cano)) {
     return json({ unavailable: true, error: "증권사 설정이 없습니다." }, 503);
   }
+  const { appKey, appSecret } = app;
   const cred: KisAccountCredentials = { appKey, appSecret, cano };
 
   // 계좌 instance — 서버가 이 프로필의 레지스트리에서 직접 확인한다.
@@ -151,7 +153,7 @@ async function resolve(
     }
     broker = {
       quote: async (ticker) => {
-        const r = await fetchKisPrices([ticker], appKey, appSecret);
+        const r = await fetchKisPrices([ticker], appKey, appSecret, env.RATE_LIMIT as KVLike | undefined);
         const p = r.results[ticker];
         return { price: p && p.price > 0 && Number.isInteger(p.price) ? p.price : null, asOf: r.timestamp };
       },

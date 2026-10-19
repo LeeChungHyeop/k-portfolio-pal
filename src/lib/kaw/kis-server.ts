@@ -7,42 +7,73 @@ export interface TickerResult {
   error?: string;
 }
 
-interface KisToken { access_token: string; expires_at: number; }
-
 export interface KVLike {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void>;
 }
 
-const KIS_TOKEN_KV_KEY = "kis:token";
+// 토큰 캐시는 **앱키별**로 나뉜다. 옛 구현은 고정 키 `kis:token` 하나와 모듈 변수 하나를 모든
+// credential 이 공유해서, 시세용 앱과 계좌용 앱이 서로의 토큰을 돌려받을 수 있었다.
+// 키 이름에 appKey 의 SHA-256 앞 16자리(지문)만 넣는다 — 앱키 원문은 KV 에도 키 이름에도 남지 않는다.
+// 옛 `kis:token` 항목은 **읽지도 쓰지도 않는다**(남아 있어도 TTL 로 사라진다).
+const KIS_TOKEN_KV_PREFIX = "kis:token:v2:";
+const KIS_TOKEN_FAIL_KV_PREFIX = "kis:token-fail:v2:";
+/** KIS 토큰 발급은 앱당 분당 1회 수준으로 제한된다. 거절(403)되면 이 시간 동안 재발급을 시도하지 않는다 */
+export const KIS_TOKEN_COOLDOWN_SEC = 60;
 
-// Worker 격리(isolate) 내 메모리 캐시. 같은 요청이 같은 warm 인스턴스에 다시 걸릴 때 KV 왕복을 줄여줌.
-let _token: KisToken | null = null;
+interface KisToken { access_token: string; expires_at: number; fp?: string; }
+
+/** 앱키 지문. 원문을 복원할 수 없는 16 hex */
+export async function kisAppFingerprint(appKey: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(appKey));
+  return [...new Uint8Array(buf)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export class KisTokenCooldownError extends Error {
+  constructor() { super("KIS token issuance is cooling down after a rejected request"); this.name = "KisTokenCooldownError"; }
+}
+
+// Worker 격리(isolate) 내 메모리 캐시. **지문별**이라 한 isolate 안에서 두 앱을 같이 써도 섞이지 않는다.
+const _tokens = new Map<string, KisToken>();
+// 같은 isolate 에서 같은 앱의 동시 요청은 발급 1회를 같이 기다린다.
+const _inflight = new Map<string, Promise<string>>();
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // KIS는 앱키당 토큰 발급 요청 자체를 분당 1회 정도로 엄격히 제한한다.
-// Cloudflare Workers는 요청마다 다른(콜드) isolate에 배정될 수 있어, 메모리 캐시(_token)만 믿으면
+// Cloudflare Workers는 요청마다 다른(콜드) isolate에 배정될 수 있어, 메모리 캐시만 믿으면
 // isolate마다 각자 새 토큰을 발급받으려다 이 제한에 걸려 "새로고침해도 전부 실패"하는 경우가 생긴다.
 // KV에 토큰을 공유 저장해서 isolate가 바뀌어도 같은 토큰을 재사용하도록 한다.
-// 계좌 조회(server-only PoC)에서도 같은 토큰 로직을 쓰기 위해 export 한다.
-// 주의: 아래 `_token` 메모리 캐시는 credential 별로 분리돼 있지 않다.
-// 한 프로세스/isolate 안에서는 **한 세트의 appKey/appSecret만** 사용해야 한다.
+// 시세와 계좌 조회가 같은 함수를 쓰되, **appKey 가 다르면 캐시도 완전히 따로**다.
 export async function getKisAccessToken(appKey: string, appSecret: string, kv?: KVLike): Promise<string> {
-  const now = Date.now();
-  if (_token && _token.expires_at > now + 60_000) return _token.access_token;
+  const fp = await kisAppFingerprint(appKey);
+  const pending = _inflight.get(fp);
+  if (pending) return pending;
+  const run = issueOrReuseToken(fp, appKey, appSecret, kv).finally(() => _inflight.delete(fp));
+  _inflight.set(fp, run);
+  return run;
+}
 
+async function issueOrReuseToken(fp: string, appKey: string, appSecret: string, kv?: KVLike): Promise<string> {
+  const now = Date.now();
+  const mem = _tokens.get(fp);
+  if (mem && mem.expires_at > now + 60_000) return mem.access_token;
+
+  const kvKey = KIS_TOKEN_KV_PREFIX + fp;
   if (kv) {
-    const cached = await kv.get(KIS_TOKEN_KV_KEY).catch(() => null);
+    const cached = await kv.get(kvKey).catch(() => null);
     if (cached) {
       try {
         const parsed = JSON.parse(cached) as KisToken;
-        if (parsed.expires_at > now + 60_000) {
-          _token = parsed;
+        // 지문이 다르면 다른 앱의 토큰이다 — 키 이름이 같아도 쓰지 않는다.
+        if (parsed.fp === fp && parsed.access_token && parsed.expires_at > now + 60_000) {
+          _tokens.set(fp, parsed);
           return parsed.access_token;
         }
       } catch { /* 손상된 캐시는 무시하고 새로 발급 */ }
     }
+    // 직전에 발급이 거절됐으면 KIS 를 다시 두드리지 않는다(두드릴수록 제한이 길어진다).
+    if (await kv.get(KIS_TOKEN_FAIL_KV_PREFIX + fp).catch(() => null)) throw new KisTokenCooldownError();
   }
 
   const res = await fetch("https://openapi.koreainvestment.com:9443/oauth2/tokenP", {
@@ -52,21 +83,22 @@ export async function getKisAccessToken(appKey: string, appSecret: string, kv?: 
   });
 
   if (!res.ok) {
+    if (res.status === 403 && kv) {
+      await kv.put(KIS_TOKEN_FAIL_KV_PREFIX + fp, "1", { expirationTtl: KIS_TOKEN_COOLDOWN_SEC }).catch(() => {});
+    }
     const body = await res.text().catch(() => "");
-    throw new Error(`KIS token error ${res.status}: ${body}`);
+    throw new Error(`KIS token error ${res.status}: ${body.slice(0, 200)}`);
   }
 
   const json = await res.json() as { access_token: string; expires_in: number };
   const expiresInSec = json.expires_in ?? 86400;
-  _token = {
-    access_token: json.access_token,
-    expires_at: now + expiresInSec * 1000,
-  };
+  const token: KisToken = { access_token: json.access_token, expires_at: now + expiresInSec * 1000, fp };
+  _tokens.set(fp, token);
   if (kv) {
     // 만료 60초 전에 미리 갱신되도록 TTL을 살짝 짧게 잡는다
-    await kv.put(KIS_TOKEN_KV_KEY, JSON.stringify(_token), { expirationTtl: Math.max(60, expiresInSec - 60) }).catch(() => {});
+    await kv.put(kvKey, JSON.stringify(token), { expirationTtl: Math.max(60, expiresInSec - 60) }).catch(() => {});
   }
-  return _token.access_token;
+  return token.access_token;
 }
 
 const MARKET_CODES = ["J", "Q"] as const;

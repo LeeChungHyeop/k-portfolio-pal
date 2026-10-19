@@ -84,7 +84,7 @@ const baseEnv = {
   SESSION_SECRET: SECRET, SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k",
 };
 const fullEnv = {
-  ...baseEnv, KIS_APP_KEY: APPKEY, KIS_APP_SECRET: APPSECRET, KIS_ACCOUNT_CANO: CANO,
+  ...baseEnv, KIS_ACCOUNT_APP_KEY: APPKEY, KIS_ACCOUNT_APP_SECRET: APPSECRET, KIS_ACCOUNT_CANO: CANO,
   KIS_ACCOUNT_OWNER_FAMILY_CODE: F, KIS_ACCOUNT_OWNER_PROFILE: P,
 };
 
@@ -173,13 +173,30 @@ describe("단계별 차단 — 앞 단계가 막히면 뒤 단계를 실행하�
   });
 
   it("【현재 운영 상태】credential 이 없으면 503 not_configured — DB 읽기 · 토큰 · KIS 호출이 전혀 없다", async () => {
-    const { KIS_APP_KEY: _k, KIS_APP_SECRET: _s, KIS_ACCOUNT_CANO: _c, ...noCred } = fullEnv;
+    const { KIS_ACCOUNT_APP_KEY: _k, KIS_ACCOUNT_APP_SECRET: _s, KIS_ACCOUNT_CANO: _c, ...noCred } = fullEnv;
     const r = await call(RANGE, noCred);
     expect(r.status).toBe(503);
     expect(r.json).toMatchObject({ unavailable: true, state: "not_configured" });
     expect(featureDb()).toEqual([]);
     expect(kisFetch).not.toHaveBeenCalled();
     expect(getToken).not.toHaveBeenCalled();
+  });
+
+  it("【앱키 분리】시세용 KIS_APP_KEY 만 있고 계좌용 키가 없으면 503 — 대신 쓰지 않고 호출도 없다", async () => {
+    const { KIS_ACCOUNT_APP_KEY: _k, KIS_ACCOUNT_APP_SECRET: _s, ...rest } = fullEnv;
+    const r = await call(RANGE, { ...rest, KIS_APP_KEY: "market-key-xxxxxxxx", KIS_APP_SECRET: "market-secret-xxxxxxxx" });
+    expect(r.status).toBe(503);
+    expect(r.json).toMatchObject({ unavailable: true, state: "not_configured" });
+    expect(kisFetch).not.toHaveBeenCalled();
+    expect(getToken).not.toHaveBeenCalled();
+  });
+
+  it("【앱키 분리】토큰과 조회에 계좌용 앱키가 쓰이고 시세용 키는 쓰이지 않는다", async () => {
+    await call(RANGE, { ...fullEnv, KIS_APP_KEY: "market-key-zzzzzzzz", KIS_APP_SECRET: "market-secret-zzzzzzzz" });
+    expect(getToken).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ appKey: APPKEY, appSecret: APPSECRET }));
+    const sent = JSON.stringify(kisFetch.mock.calls);
+    expect(sent).not.toContain("market-key-zzzzzzzz");
+    expect(sent).not.toContain("market-secret-zzzzzzzz");
   });
 
   it("CANO 만 없어도 503 이다", async () => {

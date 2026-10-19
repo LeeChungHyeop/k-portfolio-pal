@@ -29,8 +29,12 @@ import { handleOrderPrepare, handleOrderStatus, handleOrderResolve, handleOrderS
 export interface Env {
   TELEGRAM_BOT_TOKEN?: string;
   ANTHROPIC_API_KEY?: string;
+  /** 시세 조회 전용 앱(기본 주식계좌). 계좌 조회·주문에는 쓰지 않는다 */
   KIS_APP_KEY?: string;
   KIS_APP_SECRET?: string;
+  /** 계좌 조회·주문 전용 앱(연금저축 등 신규 계좌). 없으면 계좌 기능은 503 — 시세용 키로 대체하지 않는다 */
+  KIS_ACCOUNT_APP_KEY?: string;
+  KIS_ACCOUNT_APP_SECRET?: string;
   /** 종합계좌번호 8자리. 실잔고 읽기 전용 조회에만 쓰이고 응답·로그에 나가지 않는다 */
   KIS_ACCOUNT_CANO?: string;
   /** 승인형 주문 기능 flag. 정확히 "on" 일 때만 켜진다. **기본 꺼짐** */

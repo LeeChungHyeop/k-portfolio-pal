@@ -211,7 +211,7 @@ describe("POST /api/kis/order/resolve", () => {
   const ENV = {
     SESSION_SECRET: "s", SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k",
     KIS_ACCOUNT_OWNER_FAMILY_CODE: "fam", KIS_ACCOUNT_OWNER_PROFILE: "me",
-    KIS_APP_KEY: "test-app-key-0123456789", KIS_APP_SECRET: "test-app-secret-abcdefghij",
+    KIS_ACCOUNT_APP_KEY: "test-app-key-0123456789", KIS_ACCOUNT_APP_SECRET: "test-app-secret-abcdefghij",
     KIS_ACCOUNT_CANO: "12345678", KIS_ORDER_ENABLED: "on",
   };
   let store: InMemoryOrderStore;
@@ -266,7 +266,7 @@ describe("POST /api/kis/order/resolve", () => {
     expect(r.status).toBe(200);
     const text = await r.text();
     expect(JSON.parse(text)).toMatchObject({ intent: { state: "dismissed" }, resolution: { action: "dismiss_not_found", actor: "me" } });
-    for (const secret of [ENV.KIS_ACCOUNT_CANO, ENV.KIS_APP_KEY, ENV.KIS_APP_SECRET, "approvalTokenHash"]) {
+    for (const secret of [ENV.KIS_ACCOUNT_CANO, ENV.KIS_ACCOUNT_APP_KEY, ENV.KIS_ACCOUNT_APP_SECRET, "approvalTokenHash"]) {
       expect(text).not.toContain(secret);
     }
     expect(calls.place).toBe(0);

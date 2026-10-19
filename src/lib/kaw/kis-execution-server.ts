@@ -15,13 +15,13 @@
 //   · 응답 원문 · 계좌번호 · 키 · 토큰의 저장·로그·응답 포함
 //   · 자동 재시도 — 실패하면 사유를 분류해 돌려주고 끝낸다
 //
-// credential(KIS_APP_KEY / KIS_APP_SECRET / KIS_ACCOUNT_CANO / 소유 가족·프로필)이 없는 환경
+// credential(KIS_ACCOUNT_APP_KEY / KIS_ACCOUNT_APP_SECRET / KIS_ACCOUNT_CANO / 소유 가족·프로필)이 없는 환경
 // (= 지금 운영)에서는 503 `not_configured` 를 돌려줄 뿐 어떤 외부 호출도 하지 않는다. 기존
 // 기능은 이 경로와 무관하게 동작한다.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { json, requireSession, serviceClient } from "./data-server";
-import { authorizeKisAccess, type KisAccountEnv } from "./kis-account-read";
+import { authorizeKisAccess, resolveKisAccountApp, type KisAccountEnv } from "./kis-account-read";
 import { getKisAccessToken, type KVLike } from "./kis-server";
 import { redactKisSecrets, type KisAccountCredentials } from "./kis-account-server";
 import { parseBrokerAccounts, type BrokerAccountInstance } from "./broker-account";
@@ -199,8 +199,9 @@ export async function handleKisExecutionsPreview(
   }
 
   // 3) credential. 없으면 여기서 끝난다 — DB 도 KIS 도 건드리지 않는다.
-  const { KIS_APP_KEY: appKey, KIS_APP_SECRET: appSecret, KIS_ACCOUNT_CANO: cano } = env;
-  if (!appKey || !appSecret || !cano) {
+  const app = resolveKisAccountApp(env);
+  const cano = env.KIS_ACCOUNT_CANO;
+  if (!app || !cano) {
     return json({ unavailable: true, state: "not_configured", error: "한국투자 계좌 조회 설정이 서버에 없습니다." }, 503);
   }
 
@@ -215,6 +216,7 @@ export async function handleKisExecutionsPreview(
   if (!bundle.ok) return json({ state: "ledger_unavailable" } satisfies KisExecutionPreviewResponse);
 
   // 5) 토큰 → 조회. 재시도하지 않는다.
+  const { appKey, appSecret } = app;
   const cred: KisAccountCredentials = { appKey, appSecret, cano };
   const fetchImpl: FetchLike = deps.fetchImpl ?? ((url, init) => fetch(url, init));
   let token: string;

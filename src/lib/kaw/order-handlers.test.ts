@@ -38,7 +38,7 @@ const CALC_ONLY = { ...PENSION, connectionMode: "calc_only" };
 const ENV_ON = {
   SESSION_SECRET: "s", SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k",
   KIS_ACCOUNT_OWNER_FAMILY_CODE: "soye", KIS_ACCOUNT_OWNER_PROFILE: "hyeobi",
-  KIS_APP_KEY: "test-app-key-0123456789", KIS_APP_SECRET: "test-app-secret-abcdefghij",
+  KIS_ACCOUNT_APP_KEY: "test-app-key-0123456789", KIS_ACCOUNT_APP_SECRET: "test-app-secret-abcdefghij",
   KIS_ACCOUNT_CANO: "12345678", KIS_ORDER_ENABLED: "on",
 };
 const OWNER = { code: "soye", profile: "hyeobi" };
@@ -158,8 +158,8 @@ describe("흐름과 응답", () => {
     const text = JSON.stringify(p);
     expect(text).not.toContain("approvalTokenHash");
     expect(text).not.toContain(ENV_ON.KIS_ACCOUNT_CANO);
-    expect(text).not.toContain(ENV_ON.KIS_APP_KEY);
-    expect(text).not.toContain(ENV_ON.KIS_APP_SECRET);
+    expect(text).not.toContain(ENV_ON.KIS_ACCOUNT_APP_KEY);
+    expect(text).not.toContain(ENV_ON.KIS_ACCOUNT_APP_SECRET);
     const row = store.peek({ familyCode: "soye", profile: "hyeobi" }, p.intent.id)!;
     expect(JSON.stringify(publicIntent(row))).not.toContain(row.approvalTokenHash);
   });

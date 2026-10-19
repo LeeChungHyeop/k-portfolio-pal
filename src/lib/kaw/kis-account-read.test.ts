@@ -314,7 +314,7 @@ const { handleKisAccountGet } = await import("./kis-account-read");
 const env = {
   SESSION_SECRET: "s", SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k",
   KIS_ACCOUNT_OWNER_FAMILY_CODE: "soye", KIS_ACCOUNT_OWNER_PROFILE: "hyeobi",
-  KIS_APP_KEY: CRED.appKey, KIS_APP_SECRET: CRED.appSecret, KIS_ACCOUNT_CANO: "12345678",
+  KIS_ACCOUNT_APP_KEY: CRED.appKey, KIS_ACCOUNT_APP_SECRET: CRED.appSecret, KIS_ACCOUNT_CANO: "12345678",
 };
 const req = (qs: string) => new Request(`https://x/api/kis/account${qs}`);
 const OWNER = { code: "soye", profile: "hyeobi" };
@@ -390,8 +390,49 @@ describe("GET /api/kis/account", () => {
   });
 
   it("credential 이 없으면 503 이다", async () => {
-    const res = await handleKisAccountGet(req("?product=22"), { ...env, KIS_APP_KEY: undefined });
+    const res = await handleKisAccountGet(req("?product=22"), { ...env, KIS_ACCOUNT_APP_KEY: undefined });
     expect(res.status).toBe(503);
+  });
+
+  it("【앱키 분리】시세용 키만 있고 계좌용 키가 없으면 503 — 시세용 키로 대신 조회하지 않는다 (토큰·KIS 호출 없음)", async () => {
+    mocks.registry = [{ ...KIS_PENSION }];
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const { KIS_ACCOUNT_APP_KEY: _k, KIS_ACCOUNT_APP_SECRET: _s, ...noAccountApp } = env;
+    const marketOnly = { ...noAccountApp, KIS_APP_KEY: "market-key-xxxxxxxx", KIS_APP_SECRET: "market-secret-xxxxxxxx" };
+    const res = await handleKisAccountGet(req("?product=22"), marketOnly);
+    vi.unstubAllGlobals();
+    expect(res.status).toBe(503);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("【앱키 분리】계좌용 키 한쪽이 비어 있어도 503 이다", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const res = await handleKisAccountGet(req("?product=22"), { ...env, KIS_ACCOUNT_APP_SECRET: "  " });
+    vi.unstubAllGlobals();
+    expect(res.status).toBe(503);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("【앱키 분리】둘 다 있으면 계좌용 앱키로만 토큰을 받고 시세용 키는 어느 요청에도 실리지 않는다", async () => {
+    mocks.registry = [{ ...KIS_PENSION }];
+    const MARKET = { KIS_APP_KEY: "market-key-yyyyyyyy", KIS_APP_SECRET: "market-secret-yyyyyyyy" };
+    const ACCT = { KIS_ACCOUNT_APP_KEY: "acct-key-isolated-0001", KIS_ACCOUNT_APP_SECRET: "acct-secret-isolated-0001" };
+    const calls: Array<{ url: string; text: string }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), text: JSON.stringify([init?.body ?? "", init?.headers ?? {}]) });
+      return new Response(JSON.stringify({ access_token: "tok", expires_in: 86400, rt_cd: "1", msg_cd: "X", msg1: "stub" }), { status: 200 });
+    }));
+    const res = await handleKisAccountGet(req("?product=22"), { ...env, ...MARKET, ...ACCT });
+    vi.unstubAllGlobals();
+    expect(res.status).toBe(200);
+    const tokenCall = calls.find((c) => c.url.includes("/oauth2/tokenP"));
+    expect(tokenCall?.text).toContain(ACCT.KIS_ACCOUNT_APP_KEY);
+    for (const c of calls) {
+      expect(c.text).not.toContain(MARKET.KIS_APP_KEY);
+      expect(c.text).not.toContain(MARKET.KIS_APP_SECRET);
+    }
   });
 
   it("**미등록 계좌는 200 + not_queried 이고 토큰도 발급하지 않는다**", async () => {
