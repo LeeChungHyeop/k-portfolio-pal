@@ -22,6 +22,7 @@ let ledgerRows: Record<string, unknown>[] = [];
 let ledgerError = false;
 let registryData: unknown = [];
 let cashflows: unknown[] = [];
+let auditRows: Array<{ new_value: unknown }> = [];
 
 const fakeClient = {
   rpc: () => { dbCalls.push("rpc"); return Promise.resolve({ data: null, error: null }); },
@@ -36,6 +37,8 @@ const fakeClient = {
     };
     if (table === "kaw_transaction_ledger") return mk(() => (ledgerError ? { data: null, error: { message: "x" } } : { data: ledgerRows, error: null }));
     if (table === "kaw_transaction_correction") return mk(() => ({ data: [], error: null }));
+    // 계좌 이전 확정 이력(append-only). 읽기만 한다 — WRITE 는 dbCalls 에 남아 테스트가 잡는다
+    if (table === "kaw_ledger_audit") return mk(() => ({ data: auditRows, error: null }));
     // kaw_data: _meta(레지스트리) / pension(장부) / 세션 검증용 _family 가 한 테이블이다. 요청 순서에 의존하지 않도록 단일 응답을 쓴다.
     return {
       select: () => {
@@ -135,7 +138,7 @@ const featureDb = () => dbCalls.filter((c) => !c.endsWith(":_family"));
 const dbWrites = () => dbCalls.filter((c) => c.startsWith("WRITE") || c === "rpc");
 
 beforeEach(() => {
-  dbCalls.length = 0; ledgerRows = []; ledgerError = false; registryData = [kisInstance]; cashflows = [];
+  dbCalls.length = 0; ledgerRows = []; ledgerError = false; registryData = [kisInstance]; cashflows = []; auditRows = [];
   kisFetch = vi.fn(async () => okKis());
   getToken.mockClear();
 });
@@ -197,6 +200,30 @@ describe("단계별 차단 — 앞 단계가 막히면 뒤 단계를 실행하�
     const sent = JSON.stringify(kisFetch.mock.calls);
     expect(sent).not.toContain("market-key-zzzzzzzz");
     expect(sent).not.toContain("market-secret-zzzzzzzz");
+  });
+
+  it("【4-C-1】이전 확정 이력(audit)이 읽히면 '이전 방식 미확인' 차단만 풀리고 원장 반영은 계속 닫혀 있다 — 이 핸들러는 여전히 쓰지 않는다", async () => {
+    registryData = [kisInstance];
+    ledgerRows = [ledgerTx({ id: "t1" }), ledgerTx({ id: "t2", side: "sell", source: "user_attested_liquidation_price_proxy", event_date: "2026-10-13" })];
+    cashflows = [{ date: "2025-11-10", amount: 10_500_000 }];
+    const before = await call(RANGE);
+    expect(before.json.approval.blockers.map((b: { code: string }) => b.code)).toContain("transfer_mode_unconfirmed");
+
+    auditRows = [{ new_value: {
+      version: 1, kind: "sold_then_cash_transfer", logicalAccountType: "pension", toInstanceId: kisInstance.id, toBroker: "kis", toProductCode: "22",
+      fromInstanceId: null, fromBroker: "miraeasset", fromLabel: "미래에셋", anchorDate: "2026-10-13",
+      cashReceived: { amount: 10_293_793, date: null, basis: "user_confirmed" }, exitEvidence: [], containsEstimates: true,
+      principalEffect: "none", createsCashflow: false, observation: { captureId: "c", stateAsOf: "2026-10-19", observedAt: "x" },
+      approval: { actor: "p", at: "x", note: null },
+    } }];
+    dbCalls.length = 0;
+    const after = await call(RANGE);
+    const codes = after.json.approval.blockers.map((b: { code: string }) => b.code);
+    expect(codes).not.toContain("transfer_mode_unconfirmed");
+    expect(codes).toContain("phase_not_enabled");
+    expect(after.json.approval.enabled).toBe(false);
+    expect(dbCalls.filter((c) => c.startsWith("WRITE:"))).toEqual([]);
+    expect(dbCalls).toContain("read:kaw_ledger_audit");
   });
 
   it("CANO 만 없어도 503 이다", async () => {

@@ -208,8 +208,11 @@ export interface TransferEvidence {
   mode: TransferMode;
   /** 이전 전 증권사 쪽 이탈 근거가 원장에 있는가 (매도 체결 행 또는 실물 이전 증거) */
   exitEvidenceInLedger: boolean;
-  /** 새 증권사로 자금이 들어온 일자(YYYY-MM-DD)와 금액. 사용자가 확인한 값만 */
-  cashReceived?: { date: string; amount: number; basis: "broker_statement" | "balance_observation" | "user_confirmed" } | null;
+  /**
+   * 새 증권사로 자금이 들어온 일자(YYYY-MM-DD)와 금액. 사용자가 확인한 값만.
+   * **일자를 모르면 null** 이다 — 금액만 확인된 이전을 막지 않되, 일자를 지어내서 채우지 않는다.
+   */
+  cashReceived?: { date: string | null; amount: number; basis: "broker_statement" | "balance_observation" | "user_confirmed" } | null;
   /** 이전 후 새 증권사 잔고 관측이 있는가 */
   postTransferObservation: boolean;
 }
@@ -226,7 +229,7 @@ export function checkTransferEvidence(ev: TransferEvidence): TransferEvidenceChe
   if (ev.mode === "unknown") missing.push("이전 방식(매도 후 현금 이전 / 실물 이전)");
   if (!ev.exitEvidenceInLedger) missing.push("이전 전 증권사의 이탈 근거(매도 체결 또는 실물 이전 증거)");
   if (ev.mode === "sold_then_cash_transfer" && !ev.cashReceived) missing.push("새 증권사 입고 일자·금액");
-  if (ev.cashReceived && (!/^\d{4}-\d{2}-\d{2}$/.test(ev.cashReceived.date) || !(ev.cashReceived.amount >= 0))) {
+  if (ev.cashReceived && ((ev.cashReceived.date !== null && !/^\d{4}-\d{2}-\d{2}$/.test(ev.cashReceived.date)) || !(ev.cashReceived.amount >= 0))) {
     missing.push("입고 일자·금액 형식");
   }
   if (!ev.postTransferObservation) missing.push("이전 후 새 증권사 잔고 관측");

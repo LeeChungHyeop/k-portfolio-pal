@@ -23,6 +23,7 @@ import {
 import { handleHistoryMergePost } from "./lib/kaw/history-server";
 import { handleKisAccountGet } from "./lib/kaw/kis-account-read";
 import { handleKisExecutionsPreview } from "./lib/kaw/kis-execution-server";
+import { handleBalanceObserve, handleTransferConfirm, handleTransferState } from "./lib/kaw/kis-transfer-server";
 import { handleOrderPrepare, handleOrderStatus, handleOrderResolve, handleOrderSubmit } from "./lib/kaw/order-handlers";
 
 // Cloudflare Workers environment bindings
@@ -314,6 +315,10 @@ export default {
     if (pathname === "/api/kis/account" && request.method === "GET") return handleKisAccountGet(request, env);
     // 한국투자 체결내역 미리보기(읽기 전용). credential 이 없으면 503 not_configured 로 끝난다.
     if (pathname === "/api/kis/executions/preview" && request.method === "POST") return handleKisExecutionsPreview(request, env);
+    // 계좌 이전 확정 · 잔고 관측 기록 (Phase 4-C-1). 쓰기는 사용자 승인(approved: true)이 있을 때만, 기존 append-only 테이블에 1행.
+    if (pathname === "/api/kis/transfer/state" && request.method === "GET") return handleTransferState(request, env);
+    if (pathname === "/api/kis/transfer/observe" && request.method === "POST") return handleBalanceObserve(request, env);
+    if (pathname === "/api/kis/transfer/confirm" && request.method === "POST") return handleTransferConfirm(request, env);
 
     // ── 승인형 주문 (기본 OFF, 세션 + 소유 가족/프로필 + 계좌 instance + 1회성 승인) ──
     // prepare 는 의도만 만들고, submit 만 주문을 보낸다. status 는 체결조회로 접수·체결을

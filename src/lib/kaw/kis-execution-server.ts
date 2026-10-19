@@ -27,6 +27,7 @@ import { redactKisSecrets, type KisAccountCredentials } from "./kis-account-serv
 import { parseBrokerAccounts, type BrokerAccountInstance } from "./broker-account";
 import { kisApiQueryGate } from "./broker-connection";
 import { kstDateString } from "./snapshot";
+import { TRANSFER_AUDIT_ACTION, parseTransferRecords, type TransferRecord } from "./account-transfer-record";
 import type { AccountId } from "./constants";
 import type { LedgerTransaction, TransactionCorrection, TradeSide } from "./ledger";
 import type { CashFlowInput } from "./derived-cash";
@@ -126,16 +127,18 @@ export function correctionRowToOverlay(r: Record<string, unknown>): TransactionC
 
 // ── DB 읽기 (읽기 전용) ─────────────────────────────────────────────────────
 
-interface LedgerBundle {
+export interface LedgerBundle {
   ok: boolean;
   ledger: LedgerTransaction[];
   corrections: Map<string, TransactionCorrection>;
   flows: CashFlowInput[];
   registry: BrokerAccountInstance[];
+  /** 사용자가 확정한 계좌 이전 기록(kaw_ledger_audit, append-only). 없으면 빈 배열 */
+  transfers: TransferRecord[];
 }
 
-async function readBundle(client: ServiceClient, code: string, profile: string): Promise<LedgerBundle> {
-  const [tx, corr, meta, acct] = await Promise.all([
+export async function readBundle(client: ServiceClient, code: string, profile: string): Promise<LedgerBundle> {
+  const [tx, corr, meta, acct, audit] = await Promise.all([
     client.from("kaw_transaction_ledger").select("*")
       .eq("family_code", code).eq("profile", profile).eq("account_type", EXEC_ACCOUNT_TYPE)
       .order("event_date", { ascending: true }).limit(LEDGER_ROW_LIMIT),
@@ -145,6 +148,8 @@ async function readBundle(client: ServiceClient, code: string, profile: string):
       .eq("family_code", code).eq("profile", profile).eq("account_type", "_meta").maybeSingle(),
     client.from("kaw_data").select("data")
       .eq("family_code", code).eq("profile", profile).eq("account_type", EXEC_ACCOUNT_TYPE).maybeSingle(),
+    client.from("kaw_ledger_audit").select("new_value")
+      .eq("family_code", code).eq("profile", profile).eq("action", TRANSFER_AUDIT_ACTION).limit(50),
   ]);
   const ledger = ((tx.data ?? []) as Record<string, unknown>[]).map(ledgerRowToTransaction);
   const corrections = new Map<string, TransactionCorrection>();
@@ -167,6 +172,7 @@ async function readBundle(client: ServiceClient, code: string, profile: string):
     corrections,
     flows,
     registry: parseBrokerAccounts((meta.data?.data as { brokerAccounts?: unknown } | null)?.brokerAccounts),
+    transfers: parseTransferRecords((audit.data ?? []) as Array<{ new_value?: unknown }>),
   };
 }
 
@@ -272,6 +278,7 @@ export async function handleKisExecutionsPreview(
   const composed = composeExecutionPreview({
     rows, summaries, query,
     ledger: bundle.ledger, corrections: bundle.corrections, registry: bundle.registry, flows: bundle.flows,
+    confirmedTransferInstanceIds: bundle.transfers.map((t) => t.toInstanceId),
     accountType: EXEC_ACCOUNT_TYPE, productCode: EXEC_PRODUCT_CODE, today,
   });
   return json(composed);

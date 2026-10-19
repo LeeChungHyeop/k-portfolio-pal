@@ -153,6 +153,12 @@ describe("이전 증거 점검 — 임의로 채우지 않는다", () => {
     expect(checkTransferEvidence({ ...full, cashReceived: null }).missing).toContain("새 증권사 입고 일자·금액");
     expect(checkTransferEvidence({ ...full, mode: "in_kind_transfer", cashReceived: null }).sufficient).toBe(true);
   });
+  it("입고 일자를 모르면(null) 막지 않는다 — 금액만 확인된 이전. 일자를 지어내지 않는다", () => {
+    const r = checkTransferEvidence({ ...full, cashReceived: { date: null, amount: 10_293_793, basis: "user_confirmed" } });
+    expect(r.sufficient).toBe(true);
+    expect(r.missing).toEqual([]);
+    expect(checkTransferEvidence({ ...full, cashReceived: { date: null, amount: -1, basis: "user_confirmed" } }).missing).toContain("입고 일자·금액 형식");
+  });
   it("입고 일자 형식이 틀리면 거부한다", () => {
     expect(checkTransferEvidence({ ...full, cashReceived: { date: "14/10/2026", amount: 1, basis: "user_confirmed" } }).missing)
       .toContain("입고 일자·금액 형식");

@@ -152,6 +152,12 @@ export interface ComposeInput {
   corrections: ReadonlyMap<string, TransactionCorrection>;
   registry: readonly BrokerAccountInstance[];
   flows: readonly CashFlowInput[];
+  /**
+   * 사용자가 '매도 후 현금 이전'을 확정한 새 증권사 계좌 instance id 들 (Phase 4-C-1).
+   * 확정이 있으면 `transfer_mode_unconfirmed` 차단 사유만 해제한다. 원장 반영 기능(phase_not_enabled)은
+   * 그대로 닫혀 있다. 생략하면 아무것도 확정되지 않은 것으로 본다.
+   */
+  confirmedTransferInstanceIds?: readonly string[];
   accountType: AccountId;
   productCode: string;
   /** YYYY-MM-DD (KST) */
@@ -175,7 +181,7 @@ export function effectiveLedger(
   return out;
 }
 
-function weekdaysBetween(from: string, to: string): string[] {
+export function weekdaysBetween(from: string, to: string): string[] {
   const out: string[] = [];
   const end = Date.parse(`${to}T00:00:00Z`);
   for (let t = Date.parse(`${from}T00:00:00Z`); t <= end; t += 86_400_000) {
@@ -304,8 +310,10 @@ export function composeExecutionPreview(input: ComposeInput): Extract<KisExecuti
       message: "이전 증권사 출처의 원장 보유가 이탈 처리되지 않고 남아 있습니다. 이 체결만 반영하면 같은 보유가 이중 계산됩니다.",
     });
   }
-  // 이전 방식은 사용자가 확인하기 전까지 가정하지 않는다. 이 단계에는 확인 수단이 없다.
-  if (newBrokerRegistered) {
+  // 이전 방식은 사용자가 확인하기 전까지 가정하지 않는다. 사용자가 확정한 기록(4-C-1)이 있을 때만 해제한다.
+  const transferConfirmed = (input.confirmedTransferInstanceIds ?? []).some((id) =>
+    input.registry.some((i) => i.id === id && i.broker === "kis" && i.productCode === input.productCode && i.logicalAccountType === input.accountType));
+  if (newBrokerRegistered && !transferConfirmed) {
     blockers.push({
       code: "transfer_mode_unconfirmed",
       message: "이전 방식(매도 후 현금 이전 / 실물 이전)이 확인되지 않았습니다. 확인 전에는 어떤 방식도 가정하지 않습니다.",

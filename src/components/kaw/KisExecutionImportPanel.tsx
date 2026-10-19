@@ -68,6 +68,8 @@ export interface KisExecutionImportPanelProps {
   today: string;
   /** 조회 함수 주입 — 화면 테스트·mock 화면은 가짜를 넣는다. 기본 구현은 Card 가 연결한다 */
   request: (range: ExecRange) => Promise<ExecRequestOutcome>;
+  /** 조회가 끝날 때마다 결과를 알린다(이전 대사 패널이 체결 매수 합계를 쓴다). 저장하지 않는다 */
+  onResult?: (outcome: ExecRequestOutcome) => void;
 }
 
 function Badge({ status }: { status: PreviewStatus }) {
@@ -326,7 +328,7 @@ function Outcome({ outcome }: { outcome: ExecRequestOutcome }) {
   return <p className="text-xs text-rose-600 dark:text-rose-400" role="alert" data-testid="exec-error">{text}</p>;
 }
 
-export function KisExecutionImportPanel({ registry, today, request }: KisExecutionImportPanelProps) {
+export function KisExecutionImportPanel({ registry, today, request, onResult }: KisExecutionImportPanelProps) {
   const gate = useMemo(() => kisApiQueryGate(registry, "pension", today, "22"), [registry, today]);
   const kisStart = useMemo(
     () => registry.find((i) => i.logicalAccountType === "pension" && i.broker === "kis" && i.productCode === "22")?.activeFrom ?? "",
@@ -348,7 +350,9 @@ export function KisExecutionImportPanel({ registry, today, request }: KisExecuti
     setView({ phase: "loading" });
     try {
       // 실패해도 다시 시도하지 않는다 — 결과 종류만 보여준다.
-      setView({ phase: "done", outcome: await request({ start, end }) });
+      const outcome = await request({ start, end });
+      setView({ phase: "done", outcome });
+      onResult?.(outcome);
     } finally {
       busy.current = false;
     }
