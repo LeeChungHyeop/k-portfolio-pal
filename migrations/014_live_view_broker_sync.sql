@@ -13,12 +13,23 @@
 --       날짜가 같으면 동기화가 이긴다(동기화는 그 날짜 이후의 원장으로 검증된 값이다).
 --       동기화의 날짜는 holdingsEffectiveFrom(보유수량 효력일)이다 — 예수금 관측일이 아니다.
 --
--- 호환: 기존 컬럼은 이름 · 순서 · 의미가 그대로다. 맨 뒤에 `holdings_basis_kind`('rebalance' | 'broker_sync') 와
---       `cash_state_as_of`(예수금 관측 기준일, 없으면 NULL) 두 개만 덧붙인다. 동기화가 기준이면 rebalance_date 는 보유수량 효력일, rebalance_id 는 동기화 기록 id 이고,
---       시세가 없을 때 쓰는 snapshot_market_value 는 **원장 취득금액**이다(평가액이 아님 — price_source 가 'snapshot').
+-- 객체 보존: DROP 이 아니라 CREATE OR REPLACE VIEW 를 쓴다. 기존 컬럼의 이름 · 타입 · 순서가 그대로이고 새 컬럼만 맨 뒤에 붙으므로
+--       Postgres 가 허용한다(어긋나면 이 스크립트가 통째로 실패하고 아무것도 바뀌지 않는다). view 의 소유자/의존 객체가 유지된다.
+--       권한은 **명시적으로 최소화**한다(아래). 운영 view 에 service_role 의 UPDATE/DELETE 등이 남아 있어도 SELECT 만 남는다.
+--
+-- 미평가 처리: 동기화의 rowHoldingsSnap 은 평가금액이 아니라 원장 **취득금액**이다. 시세가 없는 동기화 종목은 그 금액으로
+--       평가하지 않는다 — 행은 market_value = NULL · price_source = 'unpriced', 그 계좌의 portfolio_market_value ·
+--       total_asset_value · rebalance_base_amount · current_weight_pct · target_value · rebalance_diff 는 전부 NULL(평가 보류),
+--       valuation_complete = false. NULL 을 0원으로 보거나 일부 종목만 합산해 전체 평가액으로 내지 않는다.
+--       일반 리밸런싱 기준 계좌의 폴백(저장된 평가금액, price_source = 'snapshot')은 002 와 똑같다.
+--
+-- 호환: 기존 컬럼은 이름 · 순서 · 타입이 그대로다. 맨 뒤에 `holdings_basis_kind`('rebalance' | 'broker_sync') ·
+--       `cash_state_as_of`(예수금 관측 기준일, 없으면 NULL) ·
+--       `valuation_complete`(평가 가능 여부) 세 개(`holdings_basis_kind` · `cash_state_as_of` · `valuation_complete`)만 덧붙인다. 동기화가 기준이면 rebalance_date 는 보유수량 효력일, rebalance_id 는 동기화 기록 id 이고,
+--       동기화 기준 행의 snapshot_market_value 는 NULL 이다(취득금액을 평가금액처럼 노출하지 않는다).
 --       동기화 기록이 없는 계좌의 결과는 002 와 한 행도 다르지 않다.
 --
--- 보안: 002 와 동일하다. security_invoker = true, anon/authenticated 회수, service_role 만 select.
+-- 보안: security_invoker = true. PUBLIC · anon · authenticated · service_role 의 모든 권한을 회수한 뒤 service_role 에 SELECT 만 부여한다.
 --
 -- 실행: 사용자가 별도로 승인한 뒤 SQL Editor 에서 이 파일 전체를 실행한다. 멱등하다.
 -- 되돌리기: 014_live_view_broker_sync_rollback.sql (002 정의로 되돌린다)
@@ -35,9 +46,7 @@ begin
   end if;
 end $$;
 
-drop view if exists public.kaw_portfolio_live_view;
-
-create view public.kaw_portfolio_live_view
+create or replace view public.kaw_portfolio_live_view
 with (security_invoker = true) as
 with accounts as (
   select distinct on (d.family_code, d.profile, d.account_type)
@@ -123,7 +132,8 @@ holdings as (
     coalesce(r.entry -> 'rowEtfSnap' ->> q.key, q.key)             as etf_name,
     coalesce(r.entry -> 'rowLabelSnap' ->> q.key,
              r.entry -> 'rowEtfSnap' ->> q.key, q.key)             as asset_label,
-    coalesce((r.entry -> 'rowHoldingsSnap' ->> q.key)::numeric, 0) as snapshot_market_value,
+    case when r.kind = 'broker_sync' then null   -- 동기화의 rowHoldingsSnap 은 취득금액이다 — 평가금액처럼 노출하지 않는다
+         else coalesce((r.entry -> 'rowHoldingsSnap' ->> q.key)::numeric, 0) end as snapshot_market_value,
     coalesce((r.data -> 'profileAllocations'
                      -> coalesce(r.data ->> 'profile', 'growth')
                      ->> q.key)::numeric, 0)                       as target_weight_pct,
@@ -166,11 +176,24 @@ priced as (
 valued as (
   select
     p.*,
+    -- 동기화 기준인데 시세가 없다 → 미평가 (취득금액으로 대신 평가하지 않는다)
+    (p.holdings_basis_kind = 'broker_sync' and not coalesce(p.cached_price > 0, false)) as is_unpriced,
     case when p.cached_price > 0 then round(p.quantity * p.cached_price)
+         when p.holdings_basis_kind = 'broker_sync' then null
          else p.snapshot_market_value end                          as market_value,
     case when p.cached_price > 0 then p.cached_source
+         when p.holdings_basis_kind = 'broker_sync' then 'unpriced'
          else 'snapshot' end                                       as price_source
   from priced p
+),
+totals as (
+  -- 계좌 단위 합계. 미평가 종목이 하나라도 있으면 합계를 만들지 않는다(NULL) — 일부만 합산한 값을 전체로 내지 않는다.
+  select
+    v.*,
+    bool_or(v.is_unpriced) over w as acct_unpriced,
+    sum(v.market_value) over w    as acct_market_value
+  from valued v
+  window w as (partition by v.family_code, v.profile, v.account_type)
 )
 select
   v.family_code,
@@ -184,38 +207,42 @@ select
   v.etf_name,
   v.ticker,
   v.quantity,
-  case when v.price_source = 'snapshot' then null else v.cached_price end       as price,
+  case when v.price_source in ('snapshot', 'unpriced') then null else v.cached_price end       as price,
   v.price_source,
-  case when v.price_source = 'snapshot' then null else v.cached_fetched_at end  as price_fetched_at,
-  case when v.price_source = 'snapshot' then null
+  case when v.price_source in ('snapshot', 'unpriced') then null else v.cached_fetched_at end  as price_fetched_at,
+  case when v.price_source in ('snapshot', 'unpriced') then null
        else floor(extract(epoch from (now() - v.cached_fetched_at)))::bigint
   end                                                                           as price_age_seconds,
-  case when v.price_source = 'snapshot' then true
+  case when v.price_source in ('snapshot', 'unpriced') then true
        else (now() - v.cached_fetched_at)
             > make_interval(secs => public.kaw_price_stale_seconds())
   end                                                                           as price_is_stale,
   v.market_value,
   v.snapshot_market_value,
-  sum(v.market_value) over w                                                    as portfolio_market_value,
+  case when v.acct_unpriced then null else v.acct_market_value end              as portfolio_market_value,
   v.cash_balance,
-  sum(v.market_value) over w + v.cash_balance                                   as total_asset_value,
+  case when v.acct_unpriced then null else v.acct_market_value + v.cash_balance end as total_asset_value,
   v.deposit,
-  sum(v.market_value) over w + v.cash_balance                                   as rebalance_base_amount,
-  round(v.market_value / nullif(sum(v.market_value) over w, 0) * 100, 4)        as current_weight_pct,
+  case when v.acct_unpriced then null else v.acct_market_value + v.cash_balance end as rebalance_base_amount,
+  case when v.acct_unpriced then null
+       else round(v.market_value / nullif(v.acct_market_value, 0) * 100, 4) end as current_weight_pct,
   v.target_weight_pct,
-  round((sum(v.market_value) over w + v.cash_balance) * v.target_weight_pct / 100) as target_value,
-  round((sum(v.market_value) over w + v.cash_balance) * v.target_weight_pct / 100)
-    - v.market_value                                                            as rebalance_diff,
+  case when v.acct_unpriced then null
+       else round((v.acct_market_value + v.cash_balance) * v.target_weight_pct / 100) end as target_value,
+  case when v.acct_unpriced then null
+       else round((v.acct_market_value + v.cash_balance) * v.target_weight_pct / 100) - v.market_value end as rebalance_diff,
   v.in_target_profile,
   v.data_updated_at,
   v.holdings_basis_kind,
-  v.cash_state_as_of
-from valued v
-window w as (partition by v.family_code, v.profile, v.account_type)
-order by v.family_code, v.profile, v.account_type, v.market_value desc;
+  v.cash_state_as_of,
+  not v.acct_unpriced                                                           as valuation_complete
+from totals v
+order by v.family_code, v.profile, v.account_type, v.market_value desc nulls last;
 
 comment on view public.kaw_portfolio_live_view is
-  '보유 기준(마지막 확정 리밸런싱 또는 더 늦은 계좌 동기화 broker_sync) x 캐시된 현재가 = 보유종목 단위 read-only 포트폴리오 현황. holdings_basis_kind 가 broker_sync 이면 rebalance_date 는 보유수량 효력일이고 snapshot_market_value 는 원장 취득금액이다. 총자산 = ETF 평가액(portfolio_market_value) + 실제 예수금(cash_balance) = total_asset_value. deposit 은 월 납입액 메타데이터일 뿐 기준금액에 포함되지 않는다. rebalance_base_amount 는 001 호환용 별칭. 조회 시 family_code/profile 필터 필수.';
+  '보유 기준(마지막 확정 리밸런싱 또는 더 늦은 계좌 동기화 broker_sync) x 캐시된 현재가 = 보유종목 단위 read-only 포트폴리오 현황. holdings_basis_kind 가 broker_sync 이면 rebalance_date 는 보유수량 효력일이고 snapshot_market_value 는 NULL(취득금액을 평가금액으로 쓰지 않는다)이며 시세가 없으면 price_source = unpriced 로 계좌 합계를 NULL(평가 보류, valuation_complete = false)로 둔다. 총자산 = ETF 평가액(portfolio_market_value) + 실제 예수금(cash_balance) = total_asset_value. deposit 은 월 납입액 메타데이터일 뿐 기준금액에 포함되지 않는다. rebalance_base_amount 는 001 호환용 별칭. 조회 시 family_code/profile 필터 필수.';
 
-revoke all on public.kaw_portfolio_live_view from anon, authenticated;
+-- 최소 권한: 기존 grant(운영에서 service_role 에 UPDATE/DELETE 등이 남아 있음이 확인됨)를 모두 회수하고 SELECT 만 다시 부여한다.
+-- 이 view 는 읽기 전용 분석 경로다 — 앱 코드는 읽지 않고, 점검 스크립트와 외부 분석(ChatGPT)이 PostgREST GET(SELECT)으로만 읽는다.
+revoke all on public.kaw_portfolio_live_view from public, anon, authenticated, service_role;
 grant select on public.kaw_portfolio_live_view to service_role;

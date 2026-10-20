@@ -2,7 +2,7 @@
  * migration 013(동기화 원자 적용 RPC) · 014(live view 보유 기준) — 파일 수준 보증
  *
  * 실제 Postgres 엔진(PGlite)에서 004 → 011 → 007 → 013 / 001 → 002 → 014 를 순서대로 적용하고 service_role 권한으로 실행한
- * 97건의 검증(013: 72건 — 복구·재승인 포함, 014: 25건 — 다른 계좌·부분 적용 포함)(정상 반영 · 멱등 · 사전 조건 · 문서 diff 위반 14종 · 입력 위반 · 감사 INSERT 실패 시 문서 롤백 · anon/authenticated 불가 · 백업→검사→복구 ·
+ * 122건의 검증(013: 86건 — 기록 정합성·복구·재승인 포함, 014: 36건 — 권한·미평가·다른 계좌·부분 적용 포함)과 실데이터 페이로드 e2e 1건(정상 반영 · 멱등 · 사전 조건 · 문서 diff 위반 14종 · 입력 위반 · 감사 INSERT 실패 시 문서 롤백 · anon/authenticated 불가 · 백업→검사→복구 ·
  * 롤백 · view 의 보유 기준 선택 · 002 와 결과 동일)은 별도 스크립트로 수행했다.
  * 이 테스트는 저장소의 파일이 그 계약과 TypeScript 쪽 상수에서 어긋나지 않는지 고정한다.
  */
@@ -110,9 +110,26 @@ describe("013 원자성과 검증 순서", () => {
     expect(UP13).toContain("'sync:' || v_record || '@r' || v_cur_rev");
   });
 
+  it("새 기록 내부 값이 계획·저장값·승인자와 일치하는지 DB 가 다시 확인한다 — 문서 저장보다 먼저", () => {
+    const at = UP13.indexOf("KAW_SYNC:record_mismatch");
+    expect(at).toBeGreaterThan(UP13.indexOf("KAW_SYNC:doc_mismatch"));
+    expect(at).toBeLessThan(UP13.indexOf("v_res := public.kaw_data_save_guarded("));
+    for (const c of [
+      "v_rec -> 'quantities' is distinct from (p_expect -> 'live_quantities')",
+      "v_rec -> 'quantities' is distinct from (p_new_data -> 'liveQuantities')",
+      "v_rec -> 'holdingsByTicker' is distinct from (p_expect -> 'holdings_by_ticker')",
+      "v_rec #> '{cash,amount}' is distinct from (p_expect -> 'cash_amount')",
+      "v_rec #> '{cash,amount}' is distinct from (p_new_data -> 'cashBalance')",
+      "v_rec #> '{cash,stateAsOf}' is distinct from (p_new_data #> '{cashBalanceObservation,stateAsOf}')",
+      "(p_new_data #> '{cashBalanceObservation,syncId}') is distinct from to_jsonb(v_record)",
+      "coalesce(v_rec ->> 'approvedBy', '') is distinct from v_actor",
+      "(p_audit -> 'new_value' ->> 'id') is distinct from v_record",
+    ]) expect(UP13, c).toContain(c);
+  });
+
   it("서버가 해석하는 오류 코드가 SQL 이 던지는 코드와 같다", () => {
     const server = read("./kis-sync-server.ts");
-    for (const c of ["revision_conflict", "holdings_mismatch", "doc_changed_outside_allowed", "doc_mismatch", "transfer_unconfirmed", "corrections_present", "invalid_input", "doc_missing", "save_conflict", "forbidden"]) {
+    for (const c of ["revision_conflict", "holdings_mismatch", "doc_changed_outside_allowed", "doc_mismatch", "transfer_unconfirmed", "corrections_present", "invalid_input", "doc_missing", "save_conflict", "forbidden", "record_mismatch"]) {
       expect(UP13, c).toContain(`KAW_SYNC:${c}`);
       expect(server, c).toContain(c);
     }
@@ -129,14 +146,14 @@ describe("013 롤백", () => {
 });
 
 describe("014 live view", () => {
-  it("002 와 같은 보안: security_invoker, anon/authenticated 회수, service_role 만 SELECT", () => {
+  it("보안: security_invoker 유지, 모든 역할 권한을 회수한 뒤 service_role 에 SELECT 만 부여", () => {
     expect(UP14).toContain("with (security_invoker = true)");
-    expect(UP14).toMatch(/revoke all on public\.kaw_portfolio_live_view from anon, authenticated;/);
+    expect(UP14).toMatch(/revoke all on public\.kaw_portfolio_live_view from public, anon, authenticated, service_role;/);
     expect(UP14).toMatch(/grant select on public\.kaw_portfolio_live_view to service_role;/);
   });
-  it("기존 컬럼은 그대로이고 맨 뒤에 holdings_basis_kind · cash_state_as_of 두 개만 덧붙인다", () => {
+  it("기존 컬럼은 그대로이고 맨 뒤에 holdings_basis_kind · cash_state_as_of · valuation_complete 세 개만 덧붙인다", () => {
     const tail = UP14.slice(UP14.indexOf("v.data_updated_at"));
-    expect(tail).toMatch(/v\.data_updated_at,\s*v\.holdings_basis_kind,\s*v\.cash_state_as_of\s*from valued v/);
+    expect(tail).toMatch(/v\.data_updated_at,\s*v\.holdings_basis_kind,\s*v\.cash_state_as_of,\s*not v\.acct_unpriced\s+as valuation_complete\s*from totals v/);
     for (const col of ["rebalance_date", "rebalance_id", "total_asset_value", "rebalance_base_amount", "target_value", "rebalance_diff", "in_target_profile"]) expect(UP14).toContain(col);
   });
   it("보유 기준 선택 규칙: 날짜 내림차순 → 같은 날짜면 동기화(kind_rank 1) 우선 → 배열 뒤쪽 우선", () => {
@@ -150,6 +167,28 @@ describe("014 live view", () => {
     expect(DOWN14.trim()).toBe("drop view if exists public.kaw_portfolio_live_view;");
     expect(read("../../../migrations/014_live_view_broker_sync_rollback.sql")).toContain("002_cash_balance.sql");
   });
+  it("DROP + CREATE 가 아니라 CREATE OR REPLACE VIEW — 기존 객체를 보존하고 권한은 명시적으로 최소화한다", () => {
+    expect(UP14).toMatch(/create or replace view public\.kaw_portfolio_live_view\s+with \(security_invoker = true\) as/);
+    expect(UP14).not.toMatch(/drop view/i);
+    const rv = UP14.indexOf("revoke all on public.kaw_portfolio_live_view from public, anon, authenticated, service_role;");
+    const gr = UP14.indexOf("grant select on public.kaw_portfolio_live_view to service_role;");
+    expect(rv).toBeGreaterThan(UP14.indexOf("create or replace view"));
+    expect(gr).toBeGreaterThan(rv);
+    expect(UP14).not.toMatch(/grant (all|insert|update|delete|truncate)/i);
+  });
+
+  it("동기화 기준 + 시세 없음은 미평가(NULL) — 취득금액 폴백 없음, 부분 합산 없음, 리밸런싱 기준 폴백은 그대로", () => {
+    expect(UP14).toContain("(p.holdings_basis_kind = 'broker_sync' and not coalesce(p.cached_price > 0, false)) as is_unpriced");
+    expect(UP14).toContain("when p.holdings_basis_kind = 'broker_sync' then null");
+    expect(UP14).toContain("when p.holdings_basis_kind = 'broker_sync' then 'unpriced'");
+    expect(UP14).toContain("else p.snapshot_market_value end");
+    expect(UP14).toContain("bool_or(v.is_unpriced) over w as acct_unpriced");
+    for (const col of ["portfolio_market_value", "total_asset_value", "rebalance_base_amount", "current_weight_pct", "target_value", "rebalance_diff"]) {
+      expect(UP14, col).toMatch(new RegExp(`case when v\\.acct_unpriced then null[\\s\\S]*?as ${col}`));
+    }
+    expect(UP14).toMatch(/case when r\.kind = 'broker_sync' then null[\s\S]*?as snapshot_market_value/);
+  });
+
   it("데이터를 쓰지 않는다 — view 정의뿐", () => {
     expect(UP14).not.toMatch(/\b(insert\s+into|update\s+public|delete\s+from|truncate)\b/i);
   });

@@ -13,6 +13,7 @@ const { buildDailySnapshotRows } = await import("./snapshot");
 const { buildLivePoint } = await import("@/components/kaw/PortfolioBenchmarkChart");
 const { BACKTEST_SCHEMA_VERSION } = await import("./backtest");
 const { BUILTIN_TICKERS } = await import("./store");
+const DashboardMod = await import("@/components/kaw/Dashboard");
 
 const P_KR = 26_000, P_US = 31_000;
 const HIST = [{
@@ -70,5 +71,32 @@ describe("동기화는 이력도 수익률도 만들지 않는다", () => {
     const b = buildLivePoint(HIST as never, LIB, prices, false, CASH, undefined, "k", [SYNC]);
     expect(b?.growthValue).toBe(a?.growthValue); // 성장형 비교선은 리밸런싱 유닛만 본다
     expect(b?.kospiValue).toBe(a?.kospiValue);
+  });
+});
+
+describe("시세 미확보 — 동기화의 저장 금액은 취득금액이라 평가액으로 쓰지 않는다 (앱 쪽)", () => {
+  const { getEtfPositions, hasUnpricedSyncRows } = DashboardMod;
+  const libraryOf = LIB as never;
+  const acct = (extra: Record<string, unknown>) => ({ history: HIST, ...extra }) as never;
+
+  it("동기화 기준 + 시세 없음: 취득금액(5,976,550원 등)이 평가액으로 나오지 않고 '미평가'로 표시된다", () => {
+    const a = acct({ brokerSyncs: [SYNC] });
+    expect(getEtfPositions(a, libraryOf, {})).toEqual([]);
+    expect(hasUnpricedSyncRows(a, libraryOf, {})).toBe(true);
+    // 한 종목만 시세가 있으면 그 종목만 평가되고 계좌는 여전히 '미평가'다(부분 합산을 전체로 내지 않도록 호출부가 합계를 보류한다)
+    const partial = getEtfPositions(a, libraryOf, { "360750": P_KR });
+    expect(partial.map((p) => [p.etfName, p.value])).toEqual([["TIGER 미국S&P500", 230 * P_KR]]);
+    expect(hasUnpricedSyncRows(a, libraryOf, { "360750": P_KR })).toBe(true);
+  });
+  it("동기화 기준 + 시세 모두 있음: 정상 평가, 미평가 아님", () => {
+    const a = acct({ brokerSyncs: [SYNC] });
+    expect(hasUnpricedSyncRows(a, libraryOf, { "360750": P_KR, "367380": P_US })).toBe(false);
+    expect(getEtfPositions(a, libraryOf, { "360750": P_KR, "367380": P_US }).reduce((s, p) => s + p.value, 0)).toBe(expectedEtf);
+  });
+  it("일반 리밸런싱 기준 계좌의 폴백은 그대로 — 저장된 평가금액을 쓰고 미평가가 아니다", () => {
+    const h = [{ ...HIST[0], rowHoldingsSnap: { kr: 7_000_000, us: 2_500_000 } }];
+    const a = { history: h } as never;
+    expect(hasUnpricedSyncRows(a, libraryOf, {})).toBe(false);
+    expect(getEtfPositions(a, libraryOf, {}).reduce((s, p) => s + p.value, 0)).toBe(9_500_000);
   });
 });

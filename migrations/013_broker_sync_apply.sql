@@ -23,6 +23,9 @@
 --      cashBalanceObservation · brokerSyncs) 말고는 **한 글자도** 바뀌지 않았다 —
 --      history · cashflows · baseAmount · deposit · 그 밖의 모든 키가 현재 문서와 같아야 한다.
 --      brokerSyncs 는 기존 항목이 그대로이고 새 항목 1건만 뒤에 붙었다
+--   5-b. **새 기록 내부 값 정합성**: quantities ↔ liveQuantities ↔ p_expect.live_quantities, holdingsByTicker ↔ p_expect.holdings_by_ticker,
+--      cash.amount ↔ cashBalance ↔ p_expect.cash_amount, cash.stateAsOf ↔ cashBalanceObservation.stateAsOf, cashBalanceObservation.syncId ↔ 새 기록 id,
+--      cash/cashBalanceObservation 의 effectiveFrom = null, approvedBy = 감사 actor, 감사 new_value.id = 기록 id (어긋나면 record_mismatch 로 전부 취소)
 --   6. `kaw_data_save_guarded` 로 저장(revision CAS). 'saved' 가 아니면 예외 → 전부 취소
 --   7. 승인 감사 1행을 INSERT 한다 (action = 'broker_sync_apply', target = 'sync:<기록 id>@r<반영 직전 revision>').
 --      같은 기록을 같은 revision 에서 두 번 승인하는 것은 부분 유니크 인덱스가 막는다. 백업 복구로 revision 이 바뀐 뒤에는
@@ -99,6 +102,7 @@ declare
   v_replay   jsonb;
   v_key      text;
   v_res      jsonb;
+  v_rec      jsonb;
 begin
   -- 0-a. 호출자 역할 확인
   if not pg_catalog.pg_has_role(current_user, 'service_role', 'member') then
@@ -186,6 +190,27 @@ begin
      or (v_new_syncs->(v_n_old))->'createsTrade' is distinct from 'false'::jsonb
      or (v_new_syncs->(v_n_old))->'notRebalance' is distinct from 'true'::jsonb then
     raise exception 'KAW_SYNC:doc_mismatch' using errcode = 'P0001', detail = 'brokerSyncs must keep existing entries and append exactly one broker_sync record';
+  end if;
+
+  -- 5-b. **새 기록 내부의 값이 검증된 계획 · 저장할 현재값과 일치**하는지 (기록이 다른 곳과 어긋난 채 저장되지 않게)
+  v_rec := v_new_syncs -> v_n_old;
+  if v_rec -> 'quantities' is distinct from (p_expect -> 'live_quantities')
+     or v_rec -> 'quantities' is distinct from (p_new_data -> 'liveQuantities')
+     or v_rec -> 'holdingsByTicker' is distinct from (p_expect -> 'holdings_by_ticker')
+     or v_rec -> 'accountType' is distinct from '"pension"'::jsonb
+     or v_rec #> '{cash,amount}' is distinct from (p_expect -> 'cash_amount')
+     or v_rec #> '{cash,amount}' is distinct from (p_new_data -> 'cashBalance')
+     or jsonb_typeof(v_rec #> '{cash,stateAsOf}') is distinct from 'string'
+     or v_rec #> '{cash,stateAsOf}' is distinct from (p_new_data #> '{cashBalanceObservation,stateAsOf}')
+     or v_rec #> '{cash,effectiveFrom}' is distinct from 'null'::jsonb
+     or (p_new_data #> '{cashBalanceObservation,syncId}') is distinct from to_jsonb(v_record)
+     or (p_new_data #> '{cashBalanceObservation,effectiveFrom}') is distinct from 'null'::jsonb
+     or (v_rec ->> 'holdingsEffectiveFrom') !~ '^\d{4}-\d{2}-\d{2}$'
+     or coalesce(v_rec ->> 'approvedBy', '') is distinct from v_actor
+     or coalesce(v_rec ->> 'approvedAt', '') = ''
+     or (p_audit -> 'new_value' ->> 'id') is distinct from v_record then
+    raise exception 'KAW_SYNC:record_mismatch' using errcode = 'P0001',
+      detail = 'broker_sync record must match the verified plan, the stored current values and the approver';
   end if;
 
   -- 6. 문서 저장 — 기존 revision CAS 저장을 그대로 쓴다

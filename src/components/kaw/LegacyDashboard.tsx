@@ -63,6 +63,8 @@ function getAccountEtfValues(
     const etfName = last.rowEtfSnap?.[rowId] ?? rowId;
     const ticker = library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker ?? "";
     const livePrice = isLiveActive && ticker ? (livePrices[ticker] ?? 0) : 0;
+    // 동기화 기준의 저장 금액은 취득금액이다 — 시세가 없으면 평가를 보류한다(일부만 합산해 전체처럼 보이지 않게 빈 결과).
+    if (livePrice <= 0 && last.source === "broker_sync") return new Map<string, number>();
     const value = livePrice > 0 ? qty * livePrice : (last.rowHoldingsSnap?.[rowId] ?? 0);
     if (value <= 0) continue;
     result.set(etfName, (result.get(etfName) ?? 0) + value);

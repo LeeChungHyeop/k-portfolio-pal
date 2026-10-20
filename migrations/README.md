@@ -267,7 +267,7 @@ calculatePerformance(snapshots, cashflows, scope, period)
 | 파일 | 하는 일 | 되돌리기 |
 |---|---|---|
 | `013_broker_sync_apply.sql` | RPC `kaw_broker_sync_apply` + 감사 부분 유니크 인덱스. 계좌 문서(`kaw_data`, revision CAS)와 승인 감사를 **한 트랜잭션**으로 쓴다 | `013_broker_sync_apply_rollback.sql` (함수·인덱스만. 반영된 문서·감사는 그대로) |
-| `014_live_view_broker_sync.sql` | `kaw_portfolio_live_view` 의 보유 기준을 "마지막 이력 vs 마지막 동기화 중 효력일이 더 늦은 쪽"으로. 맨 뒤에 `holdings_basis_kind` · `cash_state_as_of`(예수금 관측 기준일) 두 컬럼 추가 | `014_..._rollback.sql` 로 view 삭제 후 **`002_cash_balance.sql` 재실행** |
+| `014_live_view_broker_sync.sql` | `kaw_portfolio_live_view` 를 **CREATE OR REPLACE**(객체 보존)로 갱신: 보유 기준을 "마지막 이력 vs 마지막 동기화 중 효력일이 더 늦은 쪽"으로, 맨 뒤에 `holdings_basis_kind` · `cash_state_as_of` · `valuation_complete` 추가. 동기화 기준 종목에 시세가 없으면 취득금액으로 평가하지 않고 미평가(NULL, 계좌 합계 보류). 권한은 전부 회수 후 service_role 에 SELECT 만 |
 
 - 선행: 013 은 004 · 007 · 011, 014 는 001 · 002. 두 파일은 서로 독립이다. 둘 다 멱등하다.
 - 013 은 문서가 허용된 5개 키(`liveQuantities` `rowHoldings` `cashBalance` `cashBalanceObservation` `brokerSyncs`) 말고는
@@ -289,3 +289,7 @@ calculatePerformance(snapshots, cashflows, scope, period)
 **문서 복구** (`scripts/broker-sync-ops.mjs`): `backup`(반영 전) → `verify <백업>`(반영 후) → 문제가 있으면 `restore-sql <백업>` 이 출력하는 SQL 을 SQL Editor 에서 실행.
 복구는 `kaw_data_save_guarded`(revision CAS, `allow_key_loss`)로 백업 시점 문서를 되돌린다. **감사 행은 지우지 않는다(append-only).**
 감사 target 은 `sync:<기록 id>@r<반영 직전 revision>` 이라, 복구로 revision 이 바뀐 뒤에는 같은 상태도 다시 승인할 수 있고 이력에는 승인 → 복구 → 재승인이 모두 남는다.
+
+**014 권한/미평가 메모.** 운영 view 에는 service_role 의 UPDATE/DELETE 등 SELECT 이상의 권한이 남아 있을 수 있어, 014 는 PUBLIC · anon · authenticated · service_role 의 권한을 전부 회수한 뒤 service_role 에 SELECT 만 부여한다(이 view 는 PostgREST GET 으로만 읽힌다).
+동기화 기준 종목의 `rowHoldingsSnap` 은 평가금액이 아니라 원장 취득금액이므로 시세가 없으면 `market_value = NULL` · `price_source = 'unpriced'` 이고 그 계좌의 `portfolio_market_value` · `total_asset_value` · `rebalance_base_amount` · 비중 · 목표 · 차액이 모두 NULL(`valuation_complete = false`)이다. 일부 종목만 합산하거나 NULL 을 0원으로 보지 않는다. 리밸런싱 기준 계좌의 폴백(저장된 평가금액)은 002 와 같다.
+013 은 새 `brokerSyncs` 항목의 `quantities` · `holdingsByTicker` · `cash.amount` · `cash.stateAsOf` · `cashBalanceObservation.syncId/stateAsOf` · 승인자(`approvedBy` = 감사 actor)가 검증된 계획·저장할 현재값과 일치하는지도 DB 에서 확인한다(`KAW_SYNC:record_mismatch`).

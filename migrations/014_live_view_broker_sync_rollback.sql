@@ -9,3 +9,8 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 
 drop view if exists public.kaw_portfolio_live_view;
+
+-- 이어서 002_cash_balance.sql 전체를 실행한다. 002 는 view 를 새로 만들므로 Supabase 기본 권한(service_role 의 UPDATE/DELETE 등)이
+-- 다시 붙을 수 있다. 002 실행 직후 아래 두 문장을 실행해 읽기 전용 권한을 유지할 것:
+--   revoke all on public.kaw_portfolio_live_view from public, anon, authenticated, service_role;
+--   grant select on public.kaw_portfolio_live_view to service_role;

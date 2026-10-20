@@ -71,10 +71,25 @@ interface EtfPosition {
   live: boolean;
 }
 
+/**
+ * 계좌 동기화(broker_sync)가 보유 기준인데 시세를 못 구한 행이 있는가.
+ * 동기화의 rowHoldingsSnap 은 평가금액이 아니라 원장 **취득금액**이라 시세 대신 쓸 수 없다 — 이 경우 그 계좌의 평가액은 '미평가'다.
+ */
+export function hasUnpricedSyncRows(account: AccountState, library: AssetDef[], livePrices: Record<string, number>): boolean {
+  const last = holdingsBasisOf(account);
+  if (last?.source !== "broker_sync" || !last.rowQuantitiesSnap) return false;
+  return Object.entries(last.rowQuantitiesSnap).some(([rowId, qty]) => {
+    if (qty <= 0) return false;
+    const etfName = last.rowEtfSnap?.[rowId] ?? rowId;
+    const ticker = library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker ?? "";
+    return !(ticker && (livePrices[ticker] ?? 0) > 0);
+  });
+}
+
 // 확정 보유내역 = 마지막 확정 history 의 rowQuantitiesSnap × 현재 KIS 가격.
 // 아직 매매하지 않은 liveQuantities / 편집 중인 profileRows 는 쓰지 않는다 (대시보드(구)와 같은 원칙).
 // 가격이 없으면 그 행의 저장된 평가금액(rowHoldingsSnap)으로 폴백한다.
-function getEtfPositions(
+export function getEtfPositions(
   account: AccountState,
   library: AssetDef[],
   livePrices: Record<string, number>,
@@ -91,7 +106,8 @@ function getEtfPositions(
     const ticker = library.find((d) => d.defaultEtf === etfName && d.ticker)?.ticker ?? "";
     const price = ticker ? (livePrices[ticker] ?? 0) : 0;
     const live = price > 0;
-    const value = live ? qty * price : (last.rowHoldingsSnap?.[rowId] ?? 0);
+    // 동기화 기준의 폴백 금액은 취득금액이다 — 평가액으로 쓰지 않는다(미평가는 hasUnpricedSyncRows 로 따로 알린다).
+    const value = live ? qty * price : (last.source === "broker_sync" ? 0 : (last.rowHoldingsSnap?.[rowId] ?? 0));
     if (value <= 0) continue;
     const prev = byEtf.get(etfName);
     if (prev) { prev.value += value; prev.live = prev.live && live; }
@@ -247,6 +263,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       ...totals,
       last: lastConfirmed(acc),
       staleValue: positions.some((p) => !p.live),
+      /** 동기화 기준인데 시세 미확보 종목이 있어 평가액을 확정할 수 없다 */
+      unvalued: hasUnpricedSyncRows(acc, library, livePrices),
     };
   }), [state.accounts, library, livePrices]);
 
@@ -259,10 +277,12 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
     const totalAsset = etfValue + cash;
     const principal = list.reduce((s, a) => s + cumulativePrincipal(a.account.cashflows), 0);
     const gain = totalAsset - principal;
+    // 미평가 종목이 있는 계좌가 범위에 있으면 총자산·손익·수익률을 만들지 않는다(일부만 합산한 값을 전체로 보이지 않게).
+    const unvalued = list.some((a) => a.unvalued);
     return {
       label: kpiScope === "all" ? "전체" : ACCOUNT_LABELS_SHORT[kpiScope],
-      etfValue, cash, cashEntered, totalAsset, principal, gain,
-      returnPct: principal > 0 ? (gain / principal) * 100 : null,
+      etfValue, cash, cashEntered, totalAsset, principal, gain, unvalued,
+      returnPct: principal > 0 && !unvalued ? (gain / principal) * 100 : null,
     };
   }, [kpiScope, accounts]);
 
@@ -365,6 +385,16 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
       }
     }
 
+    for (const a of accounts) {
+      if (!a.unvalued) continue;
+      out.push({
+        key: `unvalued-${a.id}`, tone: "warn",
+        title: `${a.label} 평가액 보류 (시세 미확보)`,
+        detail: "계좌 동기화 기준 종목의 현재 시세를 구하지 못했습니다. 동기화의 저장 금액은 취득금액이라 평가액으로 쓰지 않습니다.",
+        page: a.id as Page,
+      });
+    }
+
     const stale = accounts.filter((a) => a.staleValue);
     if (stale.length > 0) {
       out.push({
@@ -437,7 +467,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
             onClick={kpiScope !== "all" && onNavigate ? () => onNavigate(kpiScope as Page) : undefined}
           >
             <p className="text-xs text-muted-foreground">총자산</p>
-            <p className="text-xl md:text-2xl font-bold tabular-nums leading-tight">{formatKRW(kpi.totalAsset)}</p>
+            <p className="text-xl md:text-2xl font-bold tabular-nums leading-tight">{kpi.unvalued ? "미평가" : formatKRW(kpi.totalAsset)}</p>
+            {kpi.unvalued && <p className="text-[11px] text-amber-600 dark:text-amber-400" data-testid="kpi-unvalued">동기화된 종목의 시세를 구하지 못해 평가액을 보류했습니다</p>}
             {/* 모바일에서 금액만 다음 줄로 밀리지 않도록 항목별로 한 줄씩 둔다 */}
             <div className="pt-1.5 border-t space-y-0.5">
               <div className="flex items-baseline justify-between gap-2">
@@ -461,8 +492,8 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
 
           <Card className="p-4 space-y-1">
             <p className="text-xs text-muted-foreground">누적 손익</p>
-            <p className={`text-xl md:text-2xl font-bold tabular-nums leading-tight ${kpi.principal > 0 ? signClass(kpi.gain) : ""}`}>
-              {kpi.principal > 0 ? signed(kpi.gain) : "—"}
+            <p className={`text-xl md:text-2xl font-bold tabular-nums leading-tight ${kpi.principal > 0 && !kpi.unvalued ? signClass(kpi.gain) : ""}`}>
+              {kpi.principal > 0 && !kpi.unvalued ? signed(kpi.gain) : "—"}
             </p>
             <p className="text-[11px] text-muted-foreground">총자산 − 납입원금</p>
           </Card>

@@ -297,6 +297,7 @@ const RPC_MESSAGE: Record<string, string> = {
   save_conflict: "계좌 문서 저장이 충돌해 전부 취소했습니다(아무것도 기록하지 않았습니다).",
   doc_changed_outside_allowed: "허용되지 않은 항목이 바뀌는 문서여서 전부 취소했습니다.",
   doc_mismatch: "검증된 계획과 다른 문서여서 전부 취소했습니다.",
+  record_mismatch: "동기화 기록이 검증된 계획·현재값·승인자와 달라 전부 취소했습니다.",
   doc_missing: "계좌 문서를 찾지 못했습니다.",
   invalid_input: "요청 형식이 올바르지 않아 동기화하지 않았습니다.",
   forbidden: "DB 권한이 없어 동기화하지 않았습니다.",
