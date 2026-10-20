@@ -258,3 +258,34 @@ calculatePerformance(snapshots, cashflows, scope, period)
 검증: `npx vite-node scripts/verify-cashflow-principal.ts` — production 데이터로
 `totalAsset == ETF + cash`, `gain == totalAsset - principal`, 장부 복원 무손실,
 예수금 이중계산 없음을 계좌별로 대조한다(SELECT 만 한다).
+
+## 013 · 014 — 계좌 상태 동기화 (Phase 4-D) · **작성만 했고 적용 전**
+
+증권사 이전 뒤 앱의 현재 보유수량·예수금을 증권사 확인값으로 맞추는 기능(`broker_sync`)의 DB 부분이다.
+리밸런싱이 아니다 — 거래·입금·수익률 이벤트를 만들지 않고 이력(history)·cashflow·기준금액·기존 일별 스냅샷은 바뀌지 않는다.
+
+| 파일 | 하는 일 | 되돌리기 |
+|---|---|---|
+| `013_broker_sync_apply.sql` | RPC `kaw_broker_sync_apply` + 감사 부분 유니크 인덱스. 계좌 문서(`kaw_data`, revision CAS)와 승인 감사를 **한 트랜잭션**으로 쓴다 | `013_broker_sync_apply_rollback.sql` (함수·인덱스만. 반영된 문서·감사는 그대로) |
+| `014_live_view_broker_sync.sql` | `kaw_portfolio_live_view` 의 보유 기준을 "마지막 이력 vs 마지막 동기화 중 효력일이 더 늦은 쪽"으로. 맨 뒤에 `holdings_basis_kind` · `cash_state_as_of`(예수금 관측 기준일) 두 컬럼 추가 | `014_..._rollback.sql` 로 view 삭제 후 **`002_cash_balance.sql` 재실행** |
+
+- 선행: 013 은 004 · 007 · 011, 014 는 001 · 002. 두 파일은 서로 독립이다. 둘 다 멱등하다.
+- 013 은 문서가 허용된 5개 키(`liveQuantities` `rowHoldings` `cashBalance` `cashBalanceObservation` `brokerSyncs`) 말고는
+  한 글자도 바뀌지 않았는지, 원장 재생 보유가 증권사 보유와 정확히 같은지를 **DB 에서 다시** 확인한다. 하나라도 어긋나면 전부 취소.
+- 서버 기능 플래그 `KIS_ACCOUNT_SYNC_ENABLED` 는 정확히 `on` 일 때만 켜진다(기본 꺼짐). 013 이 없으면 서버는 503 `apply_unavailable`.
+- 014 를 적용하지 않고 동기화하면 이 view 만 옛 수량 + 새 예수금으로 과대 계산된다 — 013 반영 전후로 함께 적용할 것.
+- 적용 후 검증 쿼리는 각 SQL 파일 맨 아래 주석에 있다.
+
+### 013 · 014 부분 적용 위험과 복구 (PGlite 로 확인한 동작)
+
+| 상태 | 결과 | 조치 |
+|---|---|---|
+| 013 만 적용, 동기화 반영 전 | 서버 플래그를 켜지 않으면 아무 일도 없다 | 014 를 이어서 적용 |
+| 013 만 적용 + **동기화 반영 후** | 앱·cron 은 정상, 그러나 002 view 는 동기화를 몰라 **옛 수량 + 새 예수금**으로 총자산을 과대 계산(예: 12.55M vs 정상 10.05M) | 014 를 적용하면 같은 데이터가 즉시 올바른 값. 그 전에는 view 값을 쓰지 말 것 → **014 를 013 보다 먼저, 또는 플래그를 켜기 전에 적용** |
+| 014 만 적용 | 동기화 기록이 없으므로 002 와 값이 같다(새 컬럼만 추가). 무해 | 013 을 이어서 적용 |
+| 013 롤백 | 함수·인덱스만 사라진다. 반영된 문서·감사는 그대로, 서버는 503 `apply_unavailable` | 필요하면 백업으로 문서 복구(아래) |
+| 014 롤백 | view 삭제 → **002 를 다시 실행**해야 view 가 복구된다 | 동기화가 반영된 상태에서 롤백하면 view 가 다시 과대 계산 |
+
+**문서 복구** (`scripts/broker-sync-ops.mjs`): `backup`(반영 전) → `verify <백업>`(반영 후) → 문제가 있으면 `restore-sql <백업>` 이 출력하는 SQL 을 SQL Editor 에서 실행.
+복구는 `kaw_data_save_guarded`(revision CAS, `allow_key_loss`)로 백업 시점 문서를 되돌린다. **감사 행은 지우지 않는다(append-only).**
+감사 target 은 `sync:<기록 id>@r<반영 직전 revision>` 이라, 복구로 revision 이 바뀐 뒤에는 같은 상태도 다시 승인할 수 있고 이력에는 승인 → 복구 → 재승인이 모두 남는다.

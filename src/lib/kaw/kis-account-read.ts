@@ -281,6 +281,8 @@ export interface KisAccountEnv extends DataEnv {
   KIS_ACCOUNT_OWNER_PROFILE?: string;
   /** 체결 → 거래원장 반영 flag. 정확히 "on" 일 때만 켜진다(Phase 4-C-2). 기본 꺼짐 */
   KIS_LEDGER_APPLY_ENABLED?: string;
+  /** 계좌 상태 동기화(보유수량·예수금) flag. 정확히 "on" 일 때만 켜진다(Phase 4-D). 기본 꺼짐 */
+  KIS_ACCOUNT_SYNC_ENABLED?: string;
 }
 
 export type KisAuthorization =

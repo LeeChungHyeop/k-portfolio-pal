@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { holdingsBasisOf } from "@/lib/kaw/broker-sync-basis";
 import { ACCOUNT_IDS, ACCOUNT_LABELS_SHORT, ASSET_ORDER, type AccountId } from "@/lib/kaw/constants";
 import { usePortfolioStore, getOrDefaultLibrary, BUILTIN_TICKERS, type HistoryEntry } from "@/lib/kaw/store";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
@@ -200,6 +201,8 @@ export function buildLivePoint(
   cashBalance: number | undefined,
   cashflows: readonly CashflowEntry[] | undefined,
   cashflowKey: string,
+  /** 계좌 동기화(broker_sync) 기록. '실제' 평가의 보유수량 근거로만 쓴다 — 벤치마크 유닛과 백테스트는 리밸런싱 이력만 본다 */
+  brokerSyncs?: unknown,
 ): BenchmarkPoint | null {
   if (!history.length) return null;
   const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
@@ -208,8 +211,11 @@ export function buildLivePoint(
   const lastBt = currentBacktestOf(last.backtestGrowth, cashflowKey);
   if (!lastBt) return null;
 
-  const qtySnap = last.rowQuantitiesSnap;
-  const etfSnap = last.rowEtfSnap;
+  // '실제' 평가의 보유수량: 마지막 리밸런싱 이력 또는 (더 늦은) 계좌 동기화. 예수금(cashBalance)은 현재값이므로
+  // 보유수량도 같은 시점의 근거여야 한다 — 이력만 쓰면 이전 후 예수금과 이전 전 수량이 섞여 총자산이 틀어진다.
+  const basis = holdingsBasisOf({ history, brokerSyncs });
+  const qtySnap = basis?.rowQuantitiesSnap ?? last.rowQuantitiesSnap;
+  const etfSnap = basis?.rowEtfSnap ?? last.rowEtfSnap;
   const etf실제 = qtySnap && etfSnap
     ? Object.entries(qtySnap).reduce((sum, [rowId, qty]) => {
         const etfName = etfSnap[rowId];
@@ -416,7 +422,7 @@ export function PortfolioBenchmarkChart({
       const livePoint = configured
         ? buildLivePoint(
             account.history, library, livePrices, accountUsesSafeAssetMix(id),
-            account.cashBalance, account.cashflows, cashflowKey,
+            account.cashBalance, account.cashflows, cashflowKey, account.brokerSyncs,
           )
         : null;
       // 실제 기록 → carry-forward gap-fill → 현재. 같은 달이 겹치면 **실제 기록이 이긴다**

@@ -12,6 +12,7 @@ import {
   type PerformanceCashflow, type ScopeSelector,
 } from "@/lib/kaw/performance";
 import { useDailySnapshots } from "@/lib/kaw/useDailySnapshots";
+import { asBrokerSyncs, holdingsBasisOf } from "@/lib/kaw/broker-sync-basis";
 import {
   buildPerformanceTimeline, reconstructionPlan, timelineHasReconstructed,
   type ReconstructionAccountInput,
@@ -78,7 +79,9 @@ function getEtfPositions(
   library: AssetDef[],
   livePrices: Record<string, number>,
 ): EtfPosition[] {
-  const last = lastConfirmed(account);
+  // 보유수량 근거 = 마지막 리밸런싱 이력 또는 (더 늦은) 계좌 동기화(broker_sync). 동기화는 리밸런싱이 아니다 —
+  // 수익률·이벤트에는 쓰지 않고 평가금액의 수량으로만 쓴다. 가격이 없을 때의 폴백 금액(rowHoldingsSnap)은 취득금액이다.
+  const last = holdingsBasisOf(account);
   if (!last?.rowQuantitiesSnap) return [];
   const byEtf = new Map<string, EtfPosition>();
   for (const [rowId, qty] of Object.entries(last.rowQuantitiesSnap)) {
@@ -368,6 +371,20 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
         key: "stale-value", tone: "info",
         title: "일부 종목은 저장된 평가금액 기준",
         detail: `${stale.map((a) => a.label).join(", ")} — 종목코드가 없거나 가격 조회가 안 된 종목이 있습니다.`,
+      });
+    }
+
+    // 계좌 동기화(Phase 4-D) 이후: 효력일 이후에 이미 저장된 일별 스냅샷은 옛 증권사 수량·예수금으로 계산돼 있을 수 있다.
+    // 고치지 않고 보존하되, 그 날짜들의 값을 정확한 값으로 오해하지 않게 알린다.
+    for (const a of accounts) {
+      const affected = asBrokerSyncs(a.account.brokerSyncs).flatMap((x) => x.affectedSnapshots?.dates ?? []);
+      if (affected.length === 0) continue;
+      const dates = [...new Set(affected)].sort();
+      out.push({
+        key: `sync-snap-${a.id}`, tone: "warn",
+        title: `${a.label} 일별 스냅샷 ${dates.length}건은 정확하지 않을 수 있음`,
+        detail: `${dates.join(", ")} — 계좌 동기화 전 증권사 수량·예수금으로 계산된 값입니다. 고치지 않고 보존했으며, 이 날짜의 성과를 정확한 값으로 쓰지 마세요.`,
+        page: a.id as Page,
       });
     }
 

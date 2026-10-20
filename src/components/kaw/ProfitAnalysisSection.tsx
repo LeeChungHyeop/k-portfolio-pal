@@ -21,6 +21,7 @@
 // iOS 는 hover 가 없어서 선택된 막대 정보를 차트 **아래 고정 영역**에 띄운다.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { holdingsAnchorsOf } from "@/lib/kaw/broker-sync-basis";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BarChart,
@@ -296,7 +297,7 @@ export function ProfitAnalysisSection() {
     if (!txs.length) return null;
     const tickers = new Set<string>(txs.map((t) => t.ticker));
     for (const id of ACCOUNT_IDS) {
-      for (const h of state.accounts[id].history ?? []) {
+      for (const h of holdingsAnchorsOf(state.accounts[id])) {
         for (const name of Object.values(h.rowEtfSnap ?? {})) {
           const hit = library.find((a) => a.defaultEtf === name && a.ticker);
           if (hit?.ticker) tickers.add(hit.ticker);
@@ -342,7 +343,8 @@ export function ProfitAnalysisSection() {
         accountId: id,
         ledgerDates: txs.filter((t) => t.accountId === id).map((t) => t.eventDate),
         cashflowDates: (state.accounts[id].cashflows ?? []).map((f) => f.date),
-        history: state.accounts[id].history ?? [],
+        // 보유수량 anchor = 리밸런싱 이력 + 계좌 동기화(broker_sync). 동기화는 수익률·매매 이벤트가 아니다.
+        history: holdingsAnchorsOf(state.accounts[id]),
       })),
     );
 
@@ -381,7 +383,7 @@ export function ProfitAnalysisSection() {
         accountId: cv.accountId,
         coverage: cv,
         ledgerDays: dailyByAccount[cv.accountId] ?? [],
-        history: acc.history ?? [],
+        history: holdingsAnchorsOf(acc),
       };
       const days = buildAccountTimeline(timeline, library, tradingDates);
       const cash = buildCashSeries(

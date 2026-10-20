@@ -12,6 +12,7 @@ import {
   type RecurringContributionSchedule, type ContributionAmountVersion,
 } from "./contribution";
 import type { RebalanceSessionMirror } from "./rebalance-journal";
+import type { BrokerSyncRecord, CashBalanceObservation } from "./broker-sync-basis";
 import { createWriteQueue } from "./write-queue";
 import { isRevisionGuardEnabled } from "./rebalance-feature-flags";
 import { parseBrokerAccounts, type BrokerAccountInstance } from "./broker-account";
@@ -123,6 +124,12 @@ export interface AccountState {
   rowHoldings?: Record<string, number>;  // row instance ID → current market value
   rowMemos?: Record<string, string>;     // key: `${profileKey}:${rowId}`
   liveQuantities?: Record<string, number>; // rowId → 보유수량 (실시간 계산용, 영속화)
+  // 계좌 상태 동기화 기록 (Phase 4-D). 증권사 이전처럼 **리밸런싱이 아닌** 사유로 보유수량·예수금을 정정한 이력이다.
+  // history 에 넣지 않는다 — history 는 리밸런싱 기록으로 읽히므로 가짜 손익이 생긴다(broker-sync.ts 주석).
+  // '보유수량 근거'를 읽는 곳만 holdingsBasisOf() 로 이 기록을 함께 본다. 서버 승인 경로(RPC)로만 추가된다.
+  brokerSyncs?: BrokerSyncRecord[];
+  // 현재 cashBalance 가 어느 관측에서 왔는지(기준일 · 출처). 유효시점이 아니라 **관측 기준일**이다.
+  cashBalanceObservation?: CashBalanceObservation;
   // 진행 중 리밸런싱 세션의 **mirror**. 정본은 StoreState 밖 dedicated journal 이다
   // (rebalance-journal.ts) — 이 필드는 기기 간 동기화·화면 상태용이고, 원격 폴링이
   // memState 를 통째로 교체할 때 지워질 수 있다. PRE 를 이 값만 믿고 쓰지 않는다.

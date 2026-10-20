@@ -37,11 +37,17 @@ export interface SnapshotHistoryLike {
   rowEtfSnap?: Record<string, string>;
 }
 
+// 계좌 동기화(broker_sync, Phase 4-D)도 '확정 보유수량의 근거'가 될 수 있다 — 리밸런싱이 아니라 증권사 이전에 따른
+// 상태 정정이라 history 가 아니라 별도 필드에 있다. 효력일이 마지막 리밸런싱 이력보다 늦을 때만 쓰인다.
+import { holdingsBasisOf } from "./broker-sync-basis";
+
 export interface SnapshotAccountInput {
   familyCode: string;
   profile: string;
   accountType: string;
   history: readonly SnapshotHistoryLike[];
+  /** 계좌 동기화 기록 (있으면 보유수량 근거 후보). 모양이 틀린 항목은 무시한다 */
+  brokerSyncs?: unknown;
   cashBalance?: number;
 }
 
@@ -126,7 +132,9 @@ export function buildDailySnapshotRows(
     // _shared / _meta 같은 예약 프로필은 계좌가 아니다.
     if (acc.profile.startsWith("_")) continue;
 
-    const last = lastConfirmed(acc.history);
+    // 확정 보유수량 근거: 마지막 리밸런싱 이력 또는 (더 늦은) 계좌 동기화. 동기화는 holdingsEffectiveFrom 이 효력일이다.
+    const last = holdingsBasisOf({ history: acc.history.map((h) => ({ ...h, id: String((h as { id?: unknown }).id ?? h.date) })), brokerSyncs: acc.brokerSyncs })
+      ?? lastConfirmed(acc.history);
     if (!last) { skipped.push({ label, reason: "history 없음" }); continue; }
     const qtySnap = last.rowQuantitiesSnap;
     if (!qtySnap || Object.keys(qtySnap).length === 0) {

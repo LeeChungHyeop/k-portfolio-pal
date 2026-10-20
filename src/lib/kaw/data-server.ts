@@ -945,12 +945,13 @@ export async function writeDailySnapshots(
   // 스냅샷에는 평가액만 담는다. cashflow 는 읽지도 쓰지도 않는다 —
   // source of truth 는 앱의 장부이고, 기간 성과는 계산 시점에 그 장부와 결합된다.
   const accounts: SnapshotAccountInput[] = (accountsRes.data ?? []).map((row) => {
-    const data = row.data as { history?: unknown; cashBalance?: unknown } | null;
+    const data = row.data as { history?: unknown; cashBalance?: unknown; brokerSyncs?: unknown } | null;
     return {
       familyCode: String(row.family_code),
       profile: String(row.profile ?? ""),
       accountType: String(row.account_type),
       history: Array.isArray(data?.history) ? (data!.history as SnapshotAccountInput["history"]) : [],
+      brokerSyncs: data?.brokerSyncs,
       cashBalance: typeof data?.cashBalance === "number" ? data.cashBalance : undefined,
     };
   });

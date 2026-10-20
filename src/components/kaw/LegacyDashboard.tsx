@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { holdingsBasisOf } from "@/lib/kaw/broker-sync-basis";
 import { ACCOUNT_IDS, ACCOUNT_LABELS_SHORT, type AccountId } from "@/lib/kaw/constants";
 import { usePortfolioStore, formatKRW, formatPct, getOrDefaultLibrary, type AccountState, type AssetDef } from "@/lib/kaw/store";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
@@ -55,8 +56,7 @@ function getAccountEtfValues(
   isLiveActive: boolean,
 ): Map<string, number> {
   const result = new Map<string, number>();
-  const sorted = [...account.history].sort((a, b) => a.date.localeCompare(b.date));
-  const last = sorted[sorted.length - 1];
+  const last = holdingsBasisOf(account);   // 마지막 리밸런싱 이력 또는 (더 늦은) 계좌 동기화
   if (!last?.rowQuantitiesSnap) return result;
   for (const [rowId, qty] of Object.entries(last.rowQuantitiesSnap)) {
     if (qty <= 0) continue;
@@ -234,8 +234,7 @@ export function LegacyDashboard({ onNavigate }: { onNavigate?: (p: Page) => void
     const result: Record<string, number> = {};
     for (const id of ACCOUNT_IDS) {
       const account = state.accounts[id];
-      const sorted = [...account.history].sort((a, b) => a.date.localeCompare(b.date));
-      const last = sorted[sorted.length - 1];
+      const last = holdingsBasisOf(account);   // 마지막 리밸런싱 이력 또는 (더 늦은) 계좌 동기화
       const qtySnap = last?.rowQuantitiesSnap;
       const etfSnap = last?.rowEtfSnap;
       if (!qtySnap || !etfSnap) { result[id] = 0; continue; }
