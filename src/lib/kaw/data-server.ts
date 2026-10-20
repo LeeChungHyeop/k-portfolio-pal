@@ -988,7 +988,7 @@ export async function handleSnapshotsGet(request: Request, env: DataEnv): Promis
   const from = new URL(request.url).searchParams.get("from");
   let q = client
     .from("kaw_daily_portfolio_snapshots")
-    .select("snapshot_date, account_type, market_value, cash_balance, total_asset_value")
+    .select("snapshot_date, account_type, market_value, cash_balance, total_asset_value, updated_at")
     .eq("family_code", session.code)
     .eq("profile", session.profile)
     .order("snapshot_date", { ascending: true })

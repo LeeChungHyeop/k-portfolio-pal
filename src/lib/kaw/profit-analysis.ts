@@ -62,6 +62,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { PriceBarsByTicker } from "./useHistoricalPrices";
+import type { EstimateReason, EstimatedDay } from "./estimate-provenance";
 import type { AccountCoverage, CashQuality, SpanKind } from "./ledger-coverage";
 import { worstCashQuality } from "./ledger-coverage";
 import type { HoldingsDay, Holdings } from "./holdings-timeline";
@@ -507,8 +508,52 @@ export interface PeriodResult {
   holdingsSources: readonly HoldingsDay["source"][];
   cashQuality: CashQuality;
   span: SpanKind;
-  /** 모든 날이 ledger + derived 인가 */
+  /**
+   * 모든 날이 ledger + derived 이고, **추정 거래가 하나도 없는가.**
+   * 원장 source 가 ledger 라는 이유만으로 true 가 되지 않는다 — 가격 대용 추정 매도가
+   * 구간 안에 있으면 false 다 (`estimated`).
+   */
   exact: boolean;
+  /**
+   * 구간 안(시작일~끝일)에 추정 거래(사용자 승인 가격 대용 청산)가 있는가.
+   * true 면 이 구간의 손익·수익률은 **확정값이 아니라 계산 참고값**이다. 숫자는 고치지 않는다.
+   * 다른 날짜·다른 계좌의 구간은 영향받지 않는다.
+   */
+  estimated: boolean;
+  /**
+   * 손익은 확정인데 **수익률 분모만** 추정에 기대는가.
+   *
+   * 구간 시작 전에 있었던 추정 청산(가격 대용)의 대금이 구간 시작 예수금에 섞여 있다.
+   * 손익(`V_close − V_open − F`)에서는 예수금의 상수 오차가 소거되므로 **손익은 영향받지 않는다.**
+   * 영향받는 것은 분모(시작 총자산)뿐이고, 그 오차는 수익률 자신의 크기에 비례해 작다.
+   * 그래서 이 경우 막대는 그대로 그리고 `exact` 만 false 로 둔다. `estimated` 와 배타적이다.
+   * (예수금은 관측값으로 재정렬되지 않으므로 추정 청산 이후 모든 구간에 해당한다.)
+   */
+  denominatorEstimated: boolean;
+  /** 추정 사유 (estimated 일 때만 비어 있지 않다) */
+  estimateReasons: readonly EstimateReason[];
+  /** 구간 안의 추정 거래 날짜 (오름차순) */
+  estimatedDates: readonly string[];
+}
+
+/** 막대 Y축 범위. null(생략된 막대)은 범위에 영향을 주지 않고, 0 은 기준선으로 항상 포함한다. */
+export function barYDomain(values: readonly (number | null)[]): [number, number] {
+  const vals = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (!vals.length) return [0, 1];
+  const lo = Math.min(0, ...vals);
+  const hi = Math.max(0, ...vals);
+  const pad = (hi - lo) * 0.08 || 1;
+  return [lo - pad, hi + pad];
+}
+
+/**
+ * 막대·요약에 쓸 **확정 값**. 계산 불가(null)와 추정 포함(참고값)은 0 이 아니라 `null` 이다.
+ * 실제 계산 결과 0 은 0 으로 남는다.
+ */
+export function confirmedBarValue(r: PeriodResult, metric: "pct" | "amount"): number | null {
+  if (r.estimated) return null;
+  const v = metric === "pct" ? r.returnPctLow : r.knownProfit;
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
 const DAY_MS = 86_400_000;
@@ -547,6 +592,8 @@ export function segmentProfit(
    */
   income: { recognized: number; headroom: number | null },
   span: SpanKind,
+  /** 이 구간에 걸린 추정 거래. 없으면 생략 */
+  estimates: readonly EstimatedDay[] = [],
 ): PeriodResult {
   const byDate = new Map(scopeDays.map((d) => [d.date, d]));
   const openDay = byDate.get(seg.openDate)!;
@@ -571,7 +618,29 @@ export function segmentProfit(
   const cashQuality = worstCashQuality(
     seg.dates.map((d) => byDate.get(d)?.cashQuality ?? "unknown"),
   );
-  const exact = sources.every((s) => s === "ledger") && cashQuality === "derived";
+  // 구간이 추정의 영향을 받는 경우:
+  //   · 추정 날짜가 구간 안에 있다 → 가격·날짜 모두 (체결가 대용이 손익에 직접 들어간다)
+  //   · 실제 매도일이 불확실한 창 (windowFrom, date] 과 구간이 겹친다 → 그 사이 보유 노출이 불확실하다
+  const hit = estimates
+    .map((e) => {
+      const inside = e.date >= seg.openDate && e.date <= seg.closeDate;
+      const dateOpen = e.reasons.includes("exit_date_unconfirmed");
+      const inWindow =
+        dateOpen &&
+        seg.openDate <= e.date &&
+        (e.windowFrom === null || seg.closeDate > e.windowFrom);
+      return { e, inside, hit: inside || inWindow };
+    })
+    .filter((x) => x.hit);
+  const estimated = hit.length > 0;
+  const estimateReasons = [
+    ...new Set(hit.flatMap((x) => (x.inside ? x.e.reasons : (["exit_date_unconfirmed"] as const)))),
+  ];
+  const estimatedDates = [...new Set(hit.map((x) => x.e.date))].sort();
+  // 손익은 확정인데 시작 예수금에 추정 청산 대금이 들어 있는 구간 (분모만 추정)
+  const denominatorEstimated = !estimated && estimates.some((e) => e.date < seg.openDate);
+  const exact =
+    sources.every((s) => s === "ledger") && cashQuality === "derived" && !estimated && !denominatorEstimated;
 
   const pct = (profit: number) => (averageCapital > 0 ? (profit / averageCapital) * 100 : null);
 
@@ -595,6 +664,10 @@ export function segmentProfit(
     cashQuality,
     span,
     exact,
+    estimated,
+    denominatorEstimated,
+    estimateReasons,
+    estimatedDates,
   };
 }
 
@@ -619,6 +692,11 @@ export interface ComputeInput {
     /** 상한 R. cutoff 정렬 checkpoint 가 없으면 null */
     cap: number | null;
   }[];
+  /**
+   * 추정 거래(가격 대용 청산)가 있는 (계좌, 날짜). scope 안 계좌의 것만 구간에 반영된다.
+   * 생략하면 기존 동작과 같다.
+   */
+  estimatedDays?: readonly EstimatedDay[];
 }
 
 /**
@@ -662,6 +740,7 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
   const inScope = new Set(input.scopeAccountIds);
   const sources = input.incomeSources.filter((s) => inScope.has(s.accountId));
   const joins = accountJoinFlows(input.valuations, input.coverages, input.scopeAccountIds);
+  const estimates = (input.estimatedDays ?? []).filter((e) => inScope.has(e.accountId));
 
   return segments.map((seg) => {
     let recognized = 0;
@@ -680,6 +759,7 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
       segFlows,
       { recognized, headroom: anyCapMissing ? null : capSum },
       spanOfSegment(seg, input.period, first, last),
+      estimates,
     );
   });
 }

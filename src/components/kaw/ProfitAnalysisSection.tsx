@@ -22,6 +22,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { holdingsAnchorsOf } from "@/lib/kaw/broker-sync-basis";
+import { ESTIMATE_REASON_LABEL, estimatedExitDays } from "@/lib/kaw/estimate-provenance";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BarChart,
@@ -30,6 +31,7 @@ import {
   YAxis,
   CartesianGrid,
   ReferenceLine,
+  Rectangle,
   Cell,
   Tooltip,
   ResponsiveContainer,
@@ -63,6 +65,8 @@ import {
   buildCashSeries,
   valuateAccountDays,
   computeProfitAnalysis,
+  barYDomain,
+  confirmedBarValue,
   type AccountDayValuation,
   type PeriodId,
   type PeriodResult,
@@ -165,8 +169,20 @@ function Badge({
   );
 }
 
+/**
+ * 막대 모양. 값이 null(계산 불가·추정 포함)이면 **아무것도 그리지 않고**, 실제 0 이면 높이가 0 이어도
+ * 얇은 선으로 그린다 — "0% 로 계산됨"과 "확정 수익률 없음"이 차트에서도 다르게 보인다.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function BarShape(props: any) {
+  const { x, y, width, height, fill, payload } = props;
+  if (payload?.bar === null || payload?.bar === undefined) return <g />;
+  if (!height) return <rect x={x} y={y - 1} width={width} height={2} fill={fill} />;
+  return <Rectangle {...props} />;
+}
+
 /** 선택된 구간 상세 — 모바일에서 손가락이 툴팁을 가리는 문제를 피해 차트 아래 고정 표시 */
-function PeriodDetail({ r }: { r: PeriodResult | null }) {
+export function PeriodDetail({ r }: { r: PeriodResult | null }) {
   if (!r) {
     return (
       <p className="text-[11px] text-muted-foreground/70 flex items-center gap-1">
@@ -184,7 +200,21 @@ function PeriodDetail({ r }: { r: PeriodResult | null }) {
         <span className="text-[11px] text-muted-foreground">
           {r.openDate} 시가 → {r.closeDate} 종가
         </span>
-        {r.exact ? (
+        {r.estimated ? (
+          <Badge
+            tone="amber"
+            title="사용자가 승인한 추정 청산가가 이 구간에 들어 있습니다. 아래 수치는 확정값이 아니라 계산 참고값입니다."
+          >
+            추정 포함 · 미확정
+          </Badge>
+        ) : r.denominatorEstimated ? (
+          <Badge
+            tone="amber"
+            title="수익금은 확정이지만, 수익률 분모(시작 총자산)의 예수금에 추정 청산 대금이 섞여 있습니다."
+          >
+            수익금 확정 · 분모 추정
+          </Badge>
+        ) : r.exact ? (
           <Badge tone="violet" title="원장 거래와 유도 예수금만으로 계산된 구간입니다">
             원장 기준
           </Badge>
@@ -204,7 +234,34 @@ function PeriodDetail({ r }: { r: PeriodResult | null }) {
           </Badge>
         )}
       </div>
-      <div className="space-y-0.5 tabular-nums border-t pt-1.5">
+      {r.estimated && (
+        <div
+          className="rounded-lg border border-amber-300/60 dark:border-amber-800/60 bg-amber-500/10 p-2 text-[11px] text-amber-800 dark:text-amber-200 space-y-0.5"
+          data-testid="estimate-notice"
+        >
+          <p className="font-medium">
+            추정 거래가 포함된 구간입니다 ({r.estimatedDates.join(", ")}) — 아래 손익·수익률은 확정값이 아닌 계산 참고값입니다.
+          </p>
+          <ul className="list-disc pl-4">
+            {r.estimateReasons.map((reason) => (
+              <li key={reason}>{ESTIMATE_REASON_LABEL[reason]}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {r.denominatorEstimated && (
+        <div
+          className="rounded-lg border border-amber-300/60 dark:border-amber-800/60 bg-amber-500/10 p-2 text-[11px] text-amber-800 dark:text-amber-200"
+          data-testid="denominator-notice"
+        >
+          기간 손익은 확정입니다(예수금의 상수 오차는 손익에서 상쇄됩니다). 다만 수익률 분모인 시작
+          총자산의 예수금에 계좌 이전 때의 추정 청산 대금이 섞여 있어, 수익률은 근사값입니다.
+        </div>
+      )}
+      <div
+        className={`space-y-0.5 tabular-nums border-t pt-1.5 ${r.estimated ? "text-muted-foreground" : ""}`}
+        data-testid={r.estimated ? "reference-values" : undefined}
+      >
         <Row label="기초 총자산 (장 시작)" value={formatKRW(r.beginningTotal)} />
         <Row label="기말 총자산 (장 마감)" value={formatKRW(r.endingTotal)} />
         <Row
@@ -212,10 +269,11 @@ function PeriodDetail({ r }: { r: PeriodResult | null }) {
           value={`${r.netCashflow >= 0 ? "+" : "-"}${formatKRW(Math.abs(r.netCashflow))}`}
         />
         <Row
-          label="기간 손익"
+          label={r.estimated ? "기간 손익 (계산 참고값 · 미확정)" : "기간 손익"}
           value={`${r.knownProfit >= 0 ? "+" : "-"}${formatKRW(Math.abs(r.knownProfit))}`}
-          strong
-          tone={r.knownProfit >= 0 ? "up" : "down"}
+          strong={!r.estimated}
+          muted={r.estimated}
+          tone={r.estimated ? undefined : r.knownProfit >= 0 ? "up" : "down"}
         />
         {/* 아래 두 줄은 위 손익의 **내역**이다 — 더하는 값이 아니다.
             기간 손익에는 보수 모델이 인정한 미관측 수입이 이미 들어 있다. */}
@@ -234,9 +292,23 @@ function PeriodDetail({ r }: { r: PeriodResult | null }) {
           muted
         />
         <div className="border-t pt-1 flex justify-between gap-3 font-semibold">
-          <span>기간 수익률</span>
-          <span className={(rangeLow ?? 0) >= 0 ? "text-emerald-500" : "text-rose-500"}>
-            {rangeLow === null ? "—" : `${rangeLow >= 0 ? "+" : ""}${rangeLow.toFixed(2)}%`}
+          <span>
+            {r.estimated
+              ? "기간 수익률 (참고값 · 미확정)"
+              : r.denominatorEstimated
+                ? "기간 수익률 (분모 추정)"
+                : "기간 수익률"}
+          </span>
+          <span
+            className={
+              rangeLow === null || r.estimated
+                ? "text-muted-foreground"
+                : rangeLow >= 0
+                  ? "text-emerald-500"
+                  : "text-rose-500"
+            }
+          >
+            {rangeLow === null ? "계산 불가" : `${rangeLow >= 0 ? "+" : ""}${rangeLow.toFixed(2)}%`}
             {hasRange && ` ~ ${rangeHigh! >= 0 ? "+" : ""}${rangeHigh!.toFixed(2)}%`}
             {/* 숫자 뒤에 "이상"을 붙이지 않는다 — 정확도는 badge·tooltip·아래 설명으로만
                 표현한다(상한 미정이면 "더 있을 수 있는 미관측 수입" 행이 그것을 말해준다). */}
@@ -429,6 +501,16 @@ export function ProfitAnalysisSection() {
     [scope],
   );
 
+  // 추정 거래(가격 대용 청산)가 있는 날짜 — 숫자는 고치지 않고 구간의 확정 여부에만 쓴다.
+  const estimatedDays = useMemo(
+    () =>
+      estimatedExitDays(
+        ledger.data?.transactions ?? [],
+        new Map((ledger.data?.corrections ?? []).map((c) => [c.transactionId, c])),
+      ),
+    [ledger.data],
+  );
+
   const results = useMemo(
     () =>
       computeProfitAnalysis({
@@ -440,13 +522,15 @@ export function ProfitAnalysisSection() {
           .filter((f) => scopeIds.includes(f.accountId))
           .map((f) => ({ date: f.date, amount: f.amount })),
         incomeSources: model.incomeSources,
+        estimatedDays,
       }),
-    [model, scopeIds, period],
+    [model, scopeIds, period, estimatedDays],
   );
 
+  // 막대 값: 계산 불가(null)·추정 포함 구간은 0 이 아니라 null 이다 — 막대를 그리지 않는다.
+  // 진짜 0 은 0 으로 남고, BarShape 가 높이 0 이어도 얇은 선으로 그려 null(생략)과 구별한다.
   const chartData = useMemo(
-    () =>
-      results.map((r) => ({ ...r, bar: metric === "pct" ? (r.returnPctLow ?? 0) : r.knownProfit })),
+    () => results.map((r) => ({ ...r, bar: confirmedBarValue(r, metric) })),
     [results, metric],
   );
 
@@ -464,20 +548,15 @@ export function ProfitAnalysisSection() {
   // 품질 요약 배지
   const summary = useMemo(() => {
     const nonExact = results.filter((r) => !r.exact).length;
+    const estimated = results.filter((r) => r.estimated).length;
+    const denominatorEstimated = results.filter((r) => r.denominatorEstimated).length;
     const anchorUsed = results.some((r) => r.holdingsSources.includes("anchor"));
     const pending = results.some((r) => r.cashQuality === "cashflow-pending");
     const unknown = results.some((r) => r.cashQuality === "unknown");
-    return { nonExact, anchorUsed, pending, unknown, total: results.length };
+    return { nonExact, estimated, denominatorEstimated, anchorUsed, pending, unknown, total: results.length };
   }, [results]);
 
-  const yDomain = useMemo((): [number, number] => {
-    if (!chartData.length) return [0, 1];
-    const vals = chartData.map((d) => d.bar);
-    const lo = Math.min(0, ...vals),
-      hi = Math.max(0, ...vals);
-    const pad = (hi - lo) * 0.08 || 1;
-    return [lo - pad, hi + pad];
-  }, [chartData]);
+  const yDomain = useMemo(() => barYDomain(chartData.map((d) => d.bar)), [chartData]);
 
   // ── 일간 가로 스크롤 ────────────────────────────────────────────────────────
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -522,6 +601,22 @@ export function ProfitAnalysisSection() {
               title="원장이 끝난 뒤 구간은 리밸런싱 기록의 보유수량을 씁니다. 그 구간은 체결가를 모르므로 당일 매매 손익을 0 으로 둡니다."
             >
               리밸런싱 기록 구간 포함
+            </Badge>
+          )}
+          {summary.estimated > 0 && (
+            <Badge
+              tone="amber"
+              title="계좌 이전 때 사용자가 승인한 추정 청산가가 들어 있는 구간입니다. 확정 수익률로 표시하지 않고 막대를 생략합니다. 구간을 누르면 계산 참고값과 사유를 볼 수 있습니다."
+            >
+              추정 포함 {summary.estimated}개 구간 · 막대 생략
+            </Badge>
+          )}
+          {summary.denominatorEstimated > 0 && (
+            <Badge
+              tone="slate"
+              title="수익금은 확정이고 막대도 그립니다. 수익률 분모의 예수금에 추정 청산 대금이 섞여 있어 수익률만 근사값입니다."
+            >
+              분모 추정 {summary.denominatorEstimated}개 구간
             </Badge>
           )}
           {summary.pending && (
@@ -649,11 +744,11 @@ export function ProfitAnalysisSection() {
                     <YAxis domain={yDomain} hide />
                     <ReferenceLine y={0} stroke="currentColor" opacity={0.35} />
                     <Tooltip content={() => null} cursor={{ fillOpacity: 0.08 }} />
-                    <Bar dataKey="bar" radius={[2, 2, 0, 0]} isAnimationActive={false}>
+                    <Bar dataKey="bar" radius={[2, 2, 0, 0]} shape={BarShape} isAnimationActive={false}>
                       {chartData.map((d) => (
                         <Cell
                           key={d.key}
-                          fill={d.bar >= 0 ? up : down}
+                          fill={d.bar !== null && d.bar < 0 ? down : up}
                           opacity={selectedKey && selectedKey !== d.key ? 0.45 : 1}
                         />
                       ))}
@@ -682,11 +777,11 @@ export function ProfitAnalysisSection() {
                   />
                   <ReferenceLine y={0} stroke="currentColor" opacity={0.35} />
                   <Tooltip content={() => null} cursor={{ fillOpacity: 0.08 }} />
-                  <Bar dataKey="bar" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+                  <Bar dataKey="bar" radius={[3, 3, 0, 0]} shape={BarShape} isAnimationActive={false}>
                     {chartData.map((d) => (
                       <Cell
                         key={d.key}
-                        fill={d.bar >= 0 ? up : down}
+                        fill={d.bar !== null && d.bar < 0 ? down : up}
                         opacity={selectedKey && selectedKey !== d.key ? 0.45 : 1}
                       />
                     ))}
@@ -705,7 +800,9 @@ export function ProfitAnalysisSection() {
             변동을 포함하지 않지만 월간·연간은 기간 안의 밤 사이 변동을 모두 포함하기 때문에, 일간을
             더한 값과 다릅니다.
             {summary.nonExact > 0 &&
-              ` 전체 ${summary.total}개 구간 중 ${summary.nonExact}개는 예수금이나 보유수량을 원장만으로 확정하지 못해 '원장 기준'이 아닙니다.`}
+              ` 전체 ${summary.total}개 구간 중 ${summary.nonExact}개는 예수금이나 보유수량을 원장만으로 확정하지 못했거나 추정 거래를 포함해 '원장 기준'이 아닙니다.`}
+            {summary.estimated > 0 &&
+              ` 추정 거래가 포함된 ${summary.estimated}개 구간은 확정 수익률이 아니어서 막대를 그리지 않습니다(0% 가 아닙니다).`}
           </p>
         </>
       )}

@@ -15,6 +15,8 @@ interface ServerRow {
   market_value: number | string;
   cash_balance: number | string;
   total_asset_value: number | string;
+  /** 행을 마지막으로 쓴 시각 — 스냅샷 품질 교차 검증용(snapshot-quality.ts) */
+  updated_at?: string | null;
 }
 
 /** 스냅샷 테이블이 아직 없을 때(= migration 003 미적용) 구분하기 위한 상태 */
@@ -46,6 +48,7 @@ async function fetchSnapshots(): Promise<DailySnapshotsResult> {
     marketValue: num(r.market_value),
     cashBalance: num(r.cash_balance),
     totalAssetValue: num(r.total_asset_value),
+    updatedAt: r.updated_at ?? null,
   }));
   return { rows, unavailable: false };
 }

@@ -57,6 +57,16 @@
 // (스냅샷이 없는 날은 "시세를 못 구해 건너뛴 날"이고, 그건 그대로 두는 것이 옳다).
 // 혹시 같은 날짜가 양쪽에 다 있으면 실제 스냅샷이 무조건 이긴다.
 //
+// ## 데이터 품질로 제외된 실제 스냅샷 (Phase 4-E-B)
+//
+// 계좌 이전 전 수량·예수금으로 계산된 실제 스냅샷은 `snapshot-quality.ts` 가 제외 대상으로 판정한다.
+// 제외는 **timeline 에서 빼는 것**이지 복원으로 다시 채우는 것이 아니다:
+//   · 복원 상한(첫 실제 스냅샷 날짜)은 **원본 실제 스냅샷** 기준으로 계산한다 — 제외한 뒤의 배열로
+//     계산하면 상한이 뒤로 밀려 제외 날짜가 복원 대상이 될 수 있다
+//   · 제외된 (계좌, 날짜)는 복원 행도 만들지 않고, merge 결과에도 넣지 않는다
+//   · 계좌 동기화(broker_sync) 기록이 보유수량 anchor 인 날짜는 복원하지 않는다 — 동기화는 예수금의
+//     유효시점이 없는 **관측값**뿐이라, 복원이 쓰는 `cashBalance: 0` 이 확정 총자산처럼 보이게 된다
+//
 // ## 거래일
 //
 // 가격 데이터가 **실제로 존재하는 날짜만** 거래일로 본다. 주말·휴장일을 만들어내지 않는다.
@@ -219,8 +229,11 @@ export interface BuildReconstructedOptions {
   accounts: readonly ReconstructionAccountInput[];
   library: readonly AssetLibraryEntry[];
   /** 실제 스냅샷 — 계좌별 복원 상한을 정하는 데만 쓴다 */
+  /** 실제 스냅샷 **원본**. 제외 대상도 지우지 않고 그대로 넘긴다(상한 계산에 쓴다) */
   actualSnapshots: readonly DailySnapshotRow[];
   priceSeries: PriceSeriesByTicker;
+  /** 데이터 품질로 제외할 (계좌, 날짜). 이 날짜는 복원 행도 만들지 않고 timeline 에서도 뺀다 */
+  excluded?: readonly { accountId: string; date: string }[];
 }
 
 /**
@@ -234,6 +247,7 @@ export function buildReconstructedRows(
   const tradingDates = tradingDatesOf(o.priceSeries);
   if (!tradingDates.length) return [];
   const firstActual = firstActualSnapshotDates(o.actualSnapshots);
+  const excluded = new Set((o.excluded ?? []).map((e) => `${e.accountId}|${e.date}`));
 
   const out: PerformanceTimelineRow[] = [];
   for (const acc of o.accounts) {
@@ -246,9 +260,12 @@ export function buildReconstructedRows(
     for (const date of tradingDates) {
       if (date < start) continue;
       if (limit && date >= limit) continue;
+      if (excluded.has(`${acc.accountId}|${date}`)) continue;
 
       const anchor = anchorAsOf(anchors, date);
       if (!anchor) continue;
+      // 계좌 동기화 anchor: 예수금을 모른다. 0원으로 두고 확정 총자산을 만들지 않는다.
+      if ((anchor as { source?: string }).source === "broker_sync") continue;
 
       const qty = anchor.rowQuantitiesSnap ?? {};
       const etf = anchor.rowEtfSnap ?? {};
@@ -296,11 +313,19 @@ export function buildReconstructedRows(
 export function mergeTimeline(
   actualSnapshots: readonly DailySnapshotRow[],
   reconstructed: readonly PerformanceTimelineRow[],
+  /** 제외 대상 (계좌, 날짜). 실제 행은 timeline 에서 빼고, 같은 키의 복원 행도 넣지 않는다 */
+  excluded: readonly { accountId: string; date: string }[] = [],
 ): PerformanceTimelineRow[] {
+  const bad = new Set(excluded.map((e) => `${e.accountId}|${e.date}`));
   const actualKeys = new Set(actualSnapshots.map((r) => `${r.accountId}|${r.snapshotDate}`));
   const rows: PerformanceTimelineRow[] = [
-    ...actualSnapshots.map((r) => ({ ...r, source: "snapshot" as const })),
-    ...reconstructed.filter((r) => !actualKeys.has(`${r.accountId}|${r.snapshotDate}`)),
+    ...actualSnapshots
+      .filter((r) => !bad.has(`${r.accountId}|${r.snapshotDate}`))
+      .map((r) => ({ ...r, source: "snapshot" as const })),
+    ...reconstructed.filter((r) => {
+      const k = `${r.accountId}|${r.snapshotDate}`;
+      return !actualKeys.has(k) && !bad.has(k);
+    }),
   ];
   return rows.sort(
     (a, b) =>
@@ -317,7 +342,7 @@ export function mergeTimeline(
 export function buildPerformanceTimeline(
   o: BuildReconstructedOptions,
 ): PerformanceTimelineRow[] {
-  return mergeTimeline(o.actualSnapshots, buildReconstructedRows(o));
+  return mergeTimeline(o.actualSnapshots, buildReconstructedRows(o), o.excluded);
 }
 
 /**

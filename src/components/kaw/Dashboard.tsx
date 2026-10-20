@@ -5,20 +5,8 @@ import {
   type AccountState, type AssetDef, type HistoryEntry,
 } from "@/lib/kaw/store";
 import { computeAccountTotals, cumulativePrincipal } from "@/lib/kaw/cashflow";
-import {
-  aggregateByDate,
-  calculatePerformance,
-  type PeriodId, type MetricId, type PeriodPerformance,
-  type PerformanceCashflow, type ScopeSelector,
-} from "@/lib/kaw/performance";
-import { useDailySnapshots } from "@/lib/kaw/useDailySnapshots";
+import type { PeriodId, MetricId, PeriodPerformance, ScopeSelector } from "@/lib/kaw/performance";
 import { asBrokerSyncs, holdingsBasisOf } from "@/lib/kaw/broker-sync-basis";
-import {
-  buildPerformanceTimeline, reconstructionPlan, timelineHasReconstructed,
-  type ReconstructionAccountInput,
-} from "@/lib/kaw/historical-performance";
-import { useHistoricalPriceSeries } from "@/lib/kaw/useHistoricalPrices";
-import { kstDateString } from "@/lib/kaw/snapshot";
 import { checkSafeAssetValueLimit, requiresSafeAssetMinimum } from "@/lib/kaw/safeAsset";
 import { useKisPriceContext } from "@/lib/kaw/KisPriceContext";
 import { Card } from "@/components/ui/card";
@@ -234,7 +222,7 @@ function ScopeTabs({ value, onChange, strong }: { value: ScopeId; onChange: (v: 
 }
 
 export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
-  const { state, currentUser } = usePortfolioStore();
+  const { state } = usePortfolioStore();
   const library = useMemo(() => getOrDefaultLibrary(state), [state.assetLibrary]);
   const { prices: livePrices, meta, configured, isLoading: priceLoading, successCount, totalCount } = useKisPriceContext();
   const isDark = useIsDarkMode();
@@ -245,8 +233,6 @@ export function Dashboard({ onNavigate }: { onNavigate?: (p: Page) => void }) {
   const [period, setPeriod] = useState<PeriodId>("monthly");
   const [perfScope, setPerfScope] = useState<ScopeId>("all");
   const [metric, setMetric] = useState<MetricId>("pct");
-
-  const snapshots = useDailySnapshots(!!currentUser);
 
   // ── 계좌별 집계 ─────────────────────────────────────────────────────────
   // ETF 평가액 = 확정수량 × 현재가, 총자산 = ETF 평가액 + 실제 예수금(cashBalance).

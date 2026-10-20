@@ -74,6 +74,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { ContributionTiming } from "./cashflow";
+import type { SnapshotFlag } from "./snapshot-quality";
 
 export type PeriodId = "daily" | "monthly" | "yearly";
 export type MetricId = "pct" | "amount";
@@ -86,6 +87,8 @@ export interface DailySnapshotRow {
   marketValue: number;
   cashBalance: number;
   totalAssetValue: number;
+  /** 서버가 행을 마지막으로 쓴 시각. 스냅샷 품질 교차 검증(snapshot-quality.ts)에만 쓴다 */
+  updatedAt?: string | null;
 }
 
 /**
@@ -126,6 +129,12 @@ export interface PeriodPerformance {
   averageCapital: number;
   /** 구간 앞 스냅샷이 없어 구간 내부 첫 스냅샷을 V0 로 쓴 구간 */
   partial: boolean;
+  /**
+   * 데이터 품질 때문에 확정 수익률을 내지 않은 사유 (계좌 이전 등).
+   * 있으면 `returnPct` 는 0 이 아니라 **null** 이다. `profit` 은 끝점 총자산 차이의 **참고값**일 뿐
+   * 확정 손익이 아니다 — 소비하는 쪽은 이 필드가 있으면 확정값처럼 쓰면 안 된다.
+   */
+  unconfirmedReason?: string;
 }
 
 /** 날짜별 평가액 point. 외부흐름은 여기 담지 않는다 — 장부에서 따로 읽는다. */
@@ -279,6 +288,11 @@ export function computePeriodPerformance(
   points: readonly DatePoint[],
   period: PeriodId,
   flows: readonly FlowPoint[] = [],
+  /**
+   * 데이터 품질 flag. flag 날짜를 [기초일, 기말일] 안에 포함하는 구간은 확정 수익률을 내지 않는다
+   * (제외된 날짜 앞뒤를 정상 구간처럼 이어붙이지 않는다). 생략하면 기존 동작과 같다.
+   */
+  qualityFlags: readonly Pick<SnapshotFlag, "date" | "kind" | "reasons">[] = [],
 ): PeriodPerformance[] {
   if (points.length < 2) return [];
 
@@ -305,6 +319,16 @@ export function computePeriodPerformance(
 
     const seg = computeSegment(open, close, flows);
 
+    const crossed = qualityFlags.filter((f) => f.date >= open.date && f.date <= close.date);
+    const unconfirmed = crossed.length
+      ? {
+          returnPct: null,
+          unconfirmedReason: `계좌 이전 구간 포함 — ${[...new Set(crossed.map((f) => f.date))].sort().join(", ")} (${
+            crossed.some((f) => f.kind === "excluded") ? "옛 증권사 기준으로 계산된 스냅샷 제외" : "이전 기준일 경계 불확실"
+          })`,
+        }
+      : {};
+
     out.push({
       key,
       label: bucketLabel(key, period),
@@ -314,6 +338,7 @@ export function computePeriodPerformance(
       endingTotal: close.total,
       partial: !hasPrior,
       ...seg,
+      ...unconfirmed,
     });
   }
   return out;
@@ -330,8 +355,15 @@ export function calculatePerformance(
   cashflows: readonly PerformanceCashflow[],
   scope: ScopeSelector,
   period: PeriodId,
+  /** 스냅샷 품질 flag (snapshot-quality.ts). 생략하면 모든 행을 정상으로 본다(기존 동작) */
+  qualityFlags: readonly SnapshotFlag[] = [],
 ): PeriodPerformance[] {
-  const points = aggregateByDate(snapshots, scope);
+  const include = scope.accountIds ? new Set(scope.accountIds) : null;
+  const flags = qualityFlags.filter((f) => !include || include.has(f.accountId));
+  // 제외 flag 행은 평가 입력에서 뺀다. 원본 배열은 그대로 두고 새 배열만 만든다.
+  const bad = new Set(flags.filter((f) => f.kind === "excluded").map((f) => `${f.accountId}|${f.date}`));
+  const used = bad.size ? snapshots.filter((r) => !bad.has(`${r.accountId}|${r.snapshotDate}`)) : snapshots;
+  const points = aggregateByDate(used, scope);
   const flows = aggregateCashflows(cashflows, scope);
-  return computePeriodPerformance(points, period, flows);
+  return computePeriodPerformance(points, period, flows, flags);
 }
