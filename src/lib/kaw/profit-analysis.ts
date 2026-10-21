@@ -521,19 +521,68 @@ export interface PeriodResult {
    */
   estimated: boolean;
   /**
-   * 손익은 확정인데 **수익률 분모만** 추정에 기대는가.
+   * 추정 청산대금의 오차가 이 구간 손익에서 **상쇄된다고 입증됐고**, 수익률 분모(시작 총자산)에만 남는가.
    *
-   * 구간 시작 전에 있었던 추정 청산(가격 대용)의 대금이 구간 시작 예수금에 섞여 있다.
-   * 손익(`V_close − V_open − F`)에서는 예수금의 상수 오차가 소거되므로 **손익은 영향받지 않는다.**
-   * 영향받는 것은 분모(시작 총자산)뿐이고, 그 오차는 수익률 자신의 크기에 비례해 작다.
-   * 그래서 이 경우 막대는 그대로 그리고 `exact` 만 false 로 둔다. `estimated` 와 배타적이다.
-   * (예수금은 관측값으로 재정렬되지 않으므로 추정 청산 이후 모든 구간에 해당한다.)
+   * 입증 조건은 `cashErrorCancels` 에 있다(구간이 원장 cutoff 뒤이거나, 구간 안에서 파생 예수금이
+   * 청산 이후 새 최저점을 만들지 않는다). 입증하지 못하면 이 값이 아니라 `estimated`
+   * (`cash_error_not_cancelled`)가 켜지고 손익도 참고값이다. `estimated` 와 배타적이다.
+   *
+   * **손익이 "확정"이라는 뜻이 아니다.** 이 값은 추정 청산대금에 대한 판정일 뿐이고, 현금 품질
+   * (`cashQuality`)·보유수량 출처(`holdingsSources`)·미관측 현금수입(L3)은 각자 독립으로 판정된다.
    */
   denominatorEstimated: boolean;
   /** 추정 사유 (estimated 일 때만 비어 있지 않다) */
   estimateReasons: readonly EstimateReason[];
   /** 구간 안의 추정 거래 날짜 (오름차순) */
   estimatedDates: readonly string[];
+}
+
+/**
+ * 추정 청산대금의 오차가 이 구간의 시작·종료 현금에서 **동일하게 상쇄되는가** — 입증할 수 있을 때만 true.
+ *
+ * ## 왜 "상수 오차는 상쇄된다"만으로는 안 되는가
+ *
+ * 청산대금이 ε 만큼 틀리면 그 날 이후 파생 예수금 `derived(s)` 가 모두 ε 만큼 이동한다. 그런데 현금 모델은
+ * `cash = derived + incomeLB`, `incomeLB(t) = max(0, −min_{s≤t} derived(s))` (running-min)라서
+ * 구간 손익 `V_close − V_open − F` 안에 `ΔincomeLB` 가 들어 있다. ΔincomeLB 는 ε 에 따라 달라질 수 있다
+ * (예: 이전 현금 100, 대금 100 → 다음 날 250 매수는 파생 −50 → incomeLB 50 → 손익 +50,
+ *  대금 200 이면 파생 +50 → incomeLB 0 → 손익 0). 현재 모델에서 ΔincomeLB 가 0 이라는 사실은
+ * 다른 대금 가정에서도 0 이라는 증거가 아니다.
+ *
+ * ## 입증 가능한 두 경우 (ε 의 부호·크기를 모른 채로도 성립한다)
+ *
+ *  (a) 구간 시작이 원장 cutoff **뒤**다. cutoff 뒤의 현금은 `c = c_prev + f − spend` 로만 움직이고
+ *      running-min 항이 없다 → 시작·종료 현금의 차가 ε 와 무관하다.
+ *  (b) 구간(의 원장 부분 [open, min(close, cutoff)]) 안의 모든 이벤트 날짜에서 파생 예수금이
+ *      `M = min{ derived(s) : 마지막 추정일 ≤ s < open }` 이상이다. 그러면 어떤 ε 에서도
+ *      구간 안에서 새 running-min 이 생기지 않아 ΔincomeLB = 0 이다.
+ *      (추정이 여러 번이면 각 대금의 오차는 서로 독립이고, 마지막 추정일 이후의 이동량은 구간 안에서 상수다.)
+ *
+ * 둘 다 아니면 입증 불가 → false (손익도 참고값). `derived` 가 없으면 입증할 수 없다.
+ */
+export function cashErrorCancels(
+  derived: DerivedCashSeries | null | undefined,
+  ledgerCutoff: string | null,
+  lastEstimateDate: string,
+  openDate: string,
+  closeDate: string,
+): boolean {
+  if (!derived) return false;
+  if (ledgerCutoff !== null && openDate > ledgerCutoff) return true; // (a)
+  const effClose = ledgerCutoff !== null && closeDate > ledgerCutoff ? ledgerCutoff : closeDate;
+  const dates = derived.dates;
+  if (!dates.includes(lastEstimateDate)) return false; // 이 현금 경로에서 추정 대금의 위치를 모른다
+  let prevMin = Number.POSITIVE_INFINITY;
+  let segMin = Number.POSITIVE_INFINITY;
+  for (const d of dates) {
+    const v = derived.byDate.get(d)?.derived;
+    if (typeof v !== "number") return false;
+    if (d >= lastEstimateDate && d < openDate) prevMin = Math.min(prevMin, v);
+    else if (d >= openDate && d <= effClose) segMin = Math.min(segMin, v);
+  }
+  if (segMin === Number.POSITIVE_INFINITY) return true; // 구간 안에 현금 이벤트가 없다 — 현금이 그대로다
+  if (prevMin === Number.POSITIVE_INFINITY) return false; // 시작 전 기준점이 없다
+  return segMin >= prevMin; // (b)
 }
 
 /** 막대 Y축 범위. null(생략된 막대)은 범위에 영향을 주지 않고, 0 은 기준선으로 항상 포함한다. */
@@ -594,6 +643,11 @@ export function segmentProfit(
   span: SpanKind,
   /** 이 구간에 걸린 추정 거래. 없으면 생략 */
   estimates: readonly EstimatedDay[] = [],
+  /**
+   * 구간 시작 전의 추정 청산대금 오차가 이 구간 손익에서 상쇄된다고 **입증**할 수 있는가.
+   * 기본은 입증 불가(false) — 근거 없이 손익을 확정으로 취급하지 않는다.
+   */
+  cancels: (accountId: string, lastEstimateDate: string, seg: Segment) => boolean = () => false,
 ): PeriodResult {
   const byDate = new Map(scopeDays.map((d) => [d.date, d]));
   const openDay = byDate.get(seg.openDate)!;
@@ -618,27 +672,45 @@ export function segmentProfit(
   const cashQuality = worstCashQuality(
     seg.dates.map((d) => byDate.get(d)?.cashQuality ?? "unknown"),
   );
-  // 구간이 추정의 영향을 받는 경우:
-  //   · 추정 날짜가 구간 안에 있다 → 가격·날짜 모두 (체결가 대용이 손익에 직접 들어간다)
-  //   · 실제 매도일이 불확실한 창 (windowFrom, date] 과 구간이 겹친다 → 그 사이 보유 노출이 불확실하다
-  const hit = estimates
-    .map((e) => {
-      const inside = e.date >= seg.openDate && e.date <= seg.closeDate;
-      const dateOpen = e.reasons.includes("exit_date_unconfirmed");
-      const inWindow =
-        dateOpen &&
-        seg.openDate <= e.date &&
-        (e.windowFrom === null || seg.closeDate > e.windowFrom);
-      return { e, inside, hit: inside || inWindow };
-    })
-    .filter((x) => x.hit);
-  const estimated = hit.length > 0;
-  const estimateReasons = [
-    ...new Set(hit.flatMap((x) => (x.inside ? x.e.reasons : (["exit_date_unconfirmed"] as const)))),
-  ];
-  const estimatedDates = [...new Set(hit.map((x) => x.e.date))].sort();
-  // 손익은 확정인데 시작 예수금에 추정 청산 대금이 들어 있는 구간 (분모만 추정)
-  const denominatorEstimated = !estimated && estimates.some((e) => e.date < seg.openDate);
+  // 구간이 추정의 영향을 받는 경우 (서로 독립적으로 판정한다):
+  //   · 추정 날짜가 구간 안에 있다 → 체결가 대용이 손익에 직접 들어간다
+  //   · 실제 매도일이 불확실한 창 [windowStart, date] 과 구간이 겹친다 → 그 사이 보유 노출이 불확실하다
+  //   · 추정 날짜가 구간 시작 전이다 → 시작 예수금에 추정 청산대금이 섞여 있다.
+  //       그 오차가 구간 손익에서 **상쇄된다는 근거가 있을 때만** 분모만 추정(denominatorEstimated),
+  //       근거가 없으면 손익도 참고값이다 (cash_error_not_cancelled)
+  const reasons = new Set<EstimateReason>();
+  const dates = new Set<string>();
+  const priorByAccount = new Map<string, string>(); // 계좌 → 구간 시작 전 마지막 추정 날짜
+  for (const e of estimates) {
+    const inside = e.date >= seg.openDate && e.date <= seg.closeDate;
+    const dateOpen = e.reasons.includes("exit_date_unconfirmed");
+    const inWindow =
+      dateOpen &&
+      seg.openDate <= e.date &&
+      (e.windowStart === null || seg.closeDate >= e.windowStart);
+    if (inside || inWindow) {
+      (inside ? e.reasons : (["exit_date_unconfirmed"] as const)).forEach((r) => reasons.add(r));
+      dates.add(e.date);
+    } else if (e.date < seg.openDate) {
+      const prev = priorByAccount.get(e.accountId);
+      if (!prev || e.date > prev) priorByAccount.set(e.accountId, e.date);
+    }
+  }
+  let denominatorEstimated = false;
+  if (reasons.size === 0) {
+    for (const [accountId, lastDate] of priorByAccount) {
+      if (cancels(accountId, lastDate, seg)) {
+        denominatorEstimated = true;
+      } else {
+        reasons.add("cash_error_not_cancelled");
+        dates.add(lastDate);
+      }
+    }
+    if (reasons.size > 0) denominatorEstimated = false; // 한 계좌라도 입증 못 하면 손익이 참고값이다
+  }
+  const estimated = reasons.size > 0;
+  const estimateReasons = [...reasons];
+  const estimatedDates = [...dates].sort();
   const exact =
     sources.every((s) => s === "ledger") && cashQuality === "derived" && !estimated && !denominatorEstimated;
 
@@ -741,6 +813,17 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
   const sources = input.incomeSources.filter((s) => inScope.has(s.accountId));
   const joins = accountJoinFlows(input.valuations, input.coverages, input.scopeAccountIds);
   const estimates = (input.estimatedDays ?? []).filter((e) => inScope.has(e.accountId));
+  const derivedByAccount = new Map(input.incomeSources.map((s) => [s.accountId, s.derived]));
+  const cutoffByAccount = new Map(input.coverages.map((c) => [c.accountId as string, c.ledgerCutoff]));
+  // 추정 청산대금 오차의 상쇄 입증 — 입증하지 못하면(derived 없음 포함) false
+  const cancels = (accountId: string, lastEstimateDate: string, seg: Segment): boolean =>
+    cashErrorCancels(
+      derivedByAccount.get(accountId),
+      cutoffByAccount.get(accountId) ?? null,
+      lastEstimateDate,
+      seg.openDate,
+      seg.closeDate,
+    );
 
   return segments.map((seg) => {
     let recognized = 0;
@@ -760,6 +843,7 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
       { recognized, headroom: anyCapMissing ? null : capSum },
       spanOfSegment(seg, input.period, first, last),
       estimates,
+      cancels,
     );
   });
 }

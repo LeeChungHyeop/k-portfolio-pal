@@ -181,6 +181,17 @@ export function BarShape(props: any) {
   return <Rectangle {...props} />;
 }
 
+/**
+ * "손익이 원장 기준으로 확정"이라는 문구를 써도 되는가 — 조건을 한 곳에 못박는다.
+ *
+ * 추정(estimated)이 없고, 현금 품질이 `derived` 이며, 보유수량 출처가 전부 `ledger` 일 때만 true.
+ * `denominatorEstimated` 는 추정 청산대금에 대한 판정일 뿐이라 이 조건을 대신하지 못한다 —
+ * anchor-implied · cashflow-pending · unknown · anchor 보유수량이 하나라도 있으면 false 다.
+ */
+export function profitConfirmedStatement(r: PeriodResult): boolean {
+  return !r.estimated && r.cashQuality === "derived" && r.holdingsSources.every((s) => s === "ledger");
+}
+
 /** 선택된 구간 상세 — 모바일에서 손가락이 툴팁을 가리는 문제를 피해 차트 아래 고정 표시 */
 export function PeriodDetail({ r }: { r: PeriodResult | null }) {
   if (!r) {
@@ -200,27 +211,39 @@ export function PeriodDetail({ r }: { r: PeriodResult | null }) {
         <span className="text-[11px] text-muted-foreground">
           {r.openDate} 시가 → {r.closeDate} 종가
         </span>
-        {r.estimated ? (
+        {/* 경고는 서로 독립이다 — 하나가 켜졌다고 다른 것을 가리지 않는다. 여러 개가 동시에 보일 수 있다. */}
+        {r.exact && (
+          <Badge tone="violet" title="원장 거래와 유도 예수금만으로 계산되고 추정이 없는 구간입니다">
+            원장 기준
+          </Badge>
+        )}
+        {r.estimated && (
           <Badge
             tone="amber"
-            title="사용자가 승인한 추정 청산가가 이 구간에 들어 있습니다. 아래 수치는 확정값이 아니라 계산 참고값입니다."
+            title="추정 청산 거래가 이 구간 손익에 영향을 줄 수 있습니다. 아래 수치는 확정값이 아니라 계산 참고값입니다."
           >
             추정 포함 · 미확정
           </Badge>
-        ) : r.denominatorEstimated ? (
+        )}
+        {r.denominatorEstimated && (
           <Badge
             tone="amber"
-            title="수익금은 확정이지만, 수익률 분모(시작 총자산)의 예수금에 추정 청산 대금이 섞여 있습니다."
+            title="추정 청산대금의 오차는 이 구간 손익에서 상쇄된다고 입증됐지만, 수익률 분모(시작 총자산)에는 추정 대금이 섞여 있습니다."
           >
-            수익금 확정 · 분모 추정
+            분모 추정
           </Badge>
-        ) : r.exact ? (
-          <Badge tone="violet" title="원장 거래와 유도 예수금만으로 계산된 구간입니다">
-            원장 기준
-          </Badge>
-        ) : (
+        )}
+        {r.cashQuality !== "derived" && (
           <Badge tone="amber" title={`예수금 품질: ${CASH_QUALITY_LABEL[r.cashQuality]}`}>
             {CASH_QUALITY_LABEL[r.cashQuality]}
+          </Badge>
+        )}
+        {r.holdingsSources.includes("anchor") && (
+          <Badge
+            tone="amber"
+            title="이 구간 일부는 리밸런싱 기록의 보유수량을 씁니다. 체결가를 모르므로 당일 매매 손익을 0 으로 둡니다."
+          >
+            리밸런싱 기록 보유수량
           </Badge>
         )}
         {r.span === "account-inception" && (
@@ -251,12 +274,33 @@ export function PeriodDetail({ r }: { r: PeriodResult | null }) {
       )}
       {r.denominatorEstimated && (
         <div
-          className="rounded-lg border border-amber-300/60 dark:border-amber-800/60 bg-amber-500/10 p-2 text-[11px] text-amber-800 dark:text-amber-200"
+          className="rounded-lg border border-amber-300/60 dark:border-amber-800/60 bg-amber-500/10 p-2 text-[11px] text-amber-800 dark:text-amber-200 space-y-0.5"
           data-testid="denominator-notice"
         >
-          기간 손익은 확정입니다(예수금의 상수 오차는 손익에서 상쇄됩니다). 다만 수익률 분모인 시작
-          총자산의 예수금에 계좌 이전 때의 추정 청산 대금이 섞여 있어, 수익률은 근사값입니다.
+          <p>
+            추정 청산대금의 오차는 이 구간의 손익에서 상쇄되는 것으로 입증됐습니다(구간이 원장 이후이거나,
+            청산 이후 새 현금 최저점이 없습니다). 다만 수익률 분모인 시작 총자산의 예수금에는 추정 대금이
+            섞여 있어 수익률은 근사값입니다.
+          </p>
+          {profitConfirmedStatement(r) ? (
+            <p data-testid="profit-confirmed">
+              보유수량·예수금이 모두 원장 기준이라, 기간 손익은 추정 청산대금과 무관하게 원장으로 계산된
+              값입니다.
+            </p>
+          ) : (
+            <p data-testid="profit-not-fully-confirmed">
+              그렇다고 기간 손익 전체가 확정인 것은 아닙니다 — 위에 표시된 예수금 품질·보유수량 출처의
+              한계는 그대로 남아 있습니다.
+            </p>
+          )}
         </div>
+      )}
+      {(r.estimated || r.denominatorEstimated) && (
+        <p className="text-[11px] text-muted-foreground" data-testid="income-separate-note">
+          미관측 현금수입(이자·분배금)의 불확실성은 추정 청산대금과 <strong>별개</strong>이며, 아래
+          &lsquo;미관측 현금수입&rsquo; 행에 따로 표시됩니다. 동기화 기록의 &lsquo;원장-관측 차이&rsquo;는
+          둘을 합친 설명되지 않은 잔차이지 청산대금 오차의 상한이 아닙니다.
+        </p>
       )}
       <div
         className={`space-y-0.5 tabular-nums border-t pt-1.5 ${r.estimated ? "text-muted-foreground" : ""}`}
@@ -346,6 +390,211 @@ function Row({
         {value}
       </span>
     </div>
+  );
+}
+
+/** 차트에 올리는 한 줄 — `bar` 는 확정 값(null = 막대 없음) */
+export type ChartRow = PeriodResult & { bar: number | null };
+
+/**
+ * Recharts 클릭/터치 이벤트에서 **선택할 구간 key** 를 찾는다.
+ *
+ * 값이 null 인 슬롯은 막대가 없으므로 `activePayload` 에 기대지 않는다 — 우선순위:
+ *   1. activePayload[0].payload.key
+ *   2. activeTooltipIndex (슬롯 순번 — 값과 무관하다)
+ *   3. activeLabel
+ */
+export function selectionKeyFromChartEvent(
+  e: unknown,
+  rows: readonly { key: string; label: string }[],
+): string | null {
+  const ev = e as {
+    activePayload?: { payload?: { key?: string } }[];
+    activeTooltipIndex?: number | string | null;
+    activeLabel?: string | number | null;
+  } | null;
+  const k = ev?.activePayload?.[0]?.payload?.key;
+  if (k) return k;
+  const raw = ev?.activeTooltipIndex;
+  const idx = raw === null || raw === undefined || raw === "" ? NaN : Number(raw);
+  if (Number.isInteger(idx) && idx >= 0 && idx < rows.length) return rows[idx].key;
+  if (ev?.activeLabel !== undefined && ev?.activeLabel !== null) {
+    const hit = rows.find((r) => r.label === String(ev.activeLabel));
+    if (hit) return hit.key;
+  }
+  return null;
+}
+
+/** 구간 선택 select 의 옵션 문구 — 막대가 없는 구간도 고를 수 있고, 왜 막대가 없는지 보인다 */
+export function periodOptionLabel(r: PeriodResult, metric: MetricId): string {
+  const bar = confirmedBarValue(r, metric);
+  const tag = r.estimated
+    ? " · 추정 포함(막대 없음)"
+    : bar === null
+      ? " · 계산 불가(막대 없음)"
+      : r.denominatorEstimated
+        ? " · 분모 추정"
+        : "";
+  return `${r.label}${tag}`;
+}
+
+/**
+ * 막대 차트 + 구간 선택 + 상세 카드.
+ *
+ * 선택은 두 경로다: 차트 클릭/터치(위 `selectionKeyFromChartEvent`)와, 차트의 hit-testing 에 기대지 않는
+ * **구간 선택 select**(키보드·스크린리더·터치 모두 가능). null 슬롯은 어느 쪽으로도 선택된다.
+ */
+export function ProfitResultsPanel({
+  period,
+  metric,
+  results,
+  up,
+  down,
+  selectedKey,
+  onSelect,
+}: {
+  period: PeriodId;
+  metric: MetricId;
+  results: readonly PeriodResult[];
+  up: string;
+  down: string;
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
+}) {
+  // 막대 값: 계산 불가(null)·추정 포함 구간은 0 이 아니라 null 이다 — 막대를 그리지 않는다.
+  // 진짜 0 은 0 으로 남고, BarShape 가 높이 0 이어도 얇은 선으로 그려 null(생략)과 구별한다.
+  const chartData = useMemo<ChartRow[]>(
+    () => results.map((r) => ({ ...r, bar: confirmedBarValue(r, metric) })),
+    [results, metric],
+  );
+  const onChartClick = (e: unknown) => {
+    const k = selectionKeyFromChartEvent(e, chartData);
+    if (k) onSelect(k);
+  };
+  const selected = useMemo(
+    () => results.find((r) => r.key === selectedKey) ?? results[results.length - 1] ?? null,
+    [results, selectedKey],
+  );
+  const yDomain = useMemo(() => barYDomain(chartData.map((d) => d.bar)), [chartData]);
+
+  // ── 일간 가로 스크롤 ────────────────────────────────────────────────────────
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // **스크롤 컨테이너 자체**를 관측한다. 바깥 wrapper 를 재면 레이아웃이 잡히기 전에 0 이
+  // 나와 slot 이 최소값으로 굳는다(375px 실측에서 18개만 보였다). 0 은 무시하고 직전 값을
+  // 유지하고, 폭이 정해진 뒤 slot 을 다시 계산한다.
+  const [viewWidth, setViewWidth] = useState(0);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => setViewWidth((prev) => (el.clientWidth > 0 ? el.clientWidth : prev));
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [period]);
+  const slot =
+    viewWidth > 0
+      ? Math.max(DAILY_MIN_SLOT, Math.floor(viewWidth / DAILY_VISIBLE_DAYS))
+      : DAILY_MIN_SLOT;
+  const dailyWidth = Math.max(viewWidth, Math.max(1, chartData.length) * slot);
+
+  // 진입 시 **가장 최근 구간**이 보이게 오른쪽 끝으로
+  useEffect(() => {
+    if (period !== "daily") return;
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollLeft = el.scrollWidth;
+  }, [period, chartData.length, slot, viewWidth]);
+
+  const cells = chartData.map((d) => (
+    <Cell
+      key={d.key}
+      fill={d.bar !== null && d.bar < 0 ? down : up}
+      opacity={selectedKey && selectedKey !== d.key ? 0.45 : 1}
+    />
+  ));
+  const yTick = (v: number) => (metric === "pct" ? `${v.toFixed(1)}%` : fmtAxisAmount(v));
+
+  return (
+    <>
+      {period === "daily" ? (
+        <div className="flex" style={{ touchAction: "pan-x pan-y" }}>
+          {/* 고정 Y축 — 스크롤과 함께 움직이면 막대 크기를 비교할 수 없다 */}
+          <div style={{ width: AXIS_WIDTH }} className="shrink-0 h-52">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData} margin={{ top: 8, right: 0, left: 0, bottom: 18 }}>
+                <YAxis domain={yDomain} tick={{ fontSize: 11 }} width={AXIS_WIDTH} tickFormatter={yTick} />
+                <Bar dataKey="bar" fill="transparent" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div
+            ref={scrollRef}
+            data-testid="daily-scroll"
+            className="overflow-x-auto overscroll-x-contain flex-1 [-webkit-overflow-scrolling:touch]"
+          >
+            <div style={{ width: dailyWidth }} className="h-52">
+              <BarChart
+                width={dailyWidth}
+                height={208}
+                data={chartData}
+                margin={{ top: 8, right: 4, left: 0, bottom: 0 }}
+                onClick={onChartClick}
+              >
+                <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
+                <XAxis dataKey="label" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
+                <YAxis domain={yDomain} hide />
+                <ReferenceLine y={0} stroke="currentColor" opacity={0.35} />
+                <Tooltip content={() => null} cursor={{ fillOpacity: 0.08 }} />
+                <Bar dataKey="bar" radius={[2, 2, 0, 0]} shape={BarShape} isAnimationActive={false}>
+                  {cells}
+                </Bar>
+              </BarChart>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="h-52">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} onClick={onChartClick}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
+              <XAxis dataKey="label" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
+              <YAxis
+                domain={yDomain}
+                tick={{ fontSize: 11 }}
+                width={metric === "pct" ? 44 : 56}
+                tickFormatter={yTick}
+              />
+              <ReferenceLine y={0} stroke="currentColor" opacity={0.35} />
+              <Tooltip content={() => null} cursor={{ fillOpacity: 0.08 }} />
+              <Bar dataKey="bar" radius={[3, 3, 0, 0]} shape={BarShape} isAnimationActive={false}>
+                {cells}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        <span className="shrink-0">구간 선택</span>
+        <select
+          aria-label="구간 선택"
+          data-testid="period-picker"
+          className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 text-xs text-foreground"
+          value={selected?.key ?? ""}
+          onChange={(e) => onSelect(e.target.value)}
+        >
+          {results.map((r) => (
+            <option key={r.key} value={r.key}>
+              {periodOptionLabel(r, metric)}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <PeriodDetail r={selected} />
+    </>
   );
 }
 
@@ -527,24 +776,6 @@ export function ProfitAnalysisSection() {
     [model, scopeIds, period, estimatedDays],
   );
 
-  // 막대 값: 계산 불가(null)·추정 포함 구간은 0 이 아니라 null 이다 — 막대를 그리지 않는다.
-  // 진짜 0 은 0 으로 남고, BarShape 가 높이 0 이어도 얇은 선으로 그려 null(생략)과 구별한다.
-  const chartData = useMemo(
-    () => results.map((r) => ({ ...r, bar: confirmedBarValue(r, metric) })),
-    [results, metric],
-  );
-
-  /** Recharts 의 click payload 는 라이브러리 타입이 느슨하다 — 필요한 필드만 좁혀 읽는다. */
-  const onBarClick = (e: { activePayload?: { payload?: { key?: string } }[] }) => {
-    const k = e?.activePayload?.[0]?.payload?.key;
-    if (k) setSelectedKey(k);
-  };
-
-  const selected = useMemo(
-    () => results.find((r) => r.key === selectedKey) ?? results[results.length - 1] ?? null,
-    [results, selectedKey],
-  );
-
   // 품질 요약 배지
   const summary = useMemo(() => {
     const nonExact = results.filter((r) => !r.exact).length;
@@ -555,37 +786,6 @@ export function ProfitAnalysisSection() {
     const unknown = results.some((r) => r.cashQuality === "unknown");
     return { nonExact, estimated, denominatorEstimated, anchorUsed, pending, unknown, total: results.length };
   }, [results]);
-
-  const yDomain = useMemo(() => barYDomain(chartData.map((d) => d.bar)), [chartData]);
-
-  // ── 일간 가로 스크롤 ────────────────────────────────────────────────────────
-  const scrollRef = useRef<HTMLDivElement>(null);
-  // **스크롤 컨테이너 자체**를 관측한다. 바깥 wrapper 를 재면 레이아웃이 잡히기 전에 0 이
-  // 나와 slot 이 최소값으로 굳는다(375px 실측에서 18개만 보였다). 0 은 무시하고 직전 값을
-  // 유지하고, 폭이 정해진 뒤 slot 을 다시 계산한다.
-  const [viewWidth, setViewWidth] = useState(0);
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const measure = () => setViewWidth((prev) => (el.clientWidth > 0 ? el.clientWidth : prev));
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    measure();
-    return () => ro.disconnect();
-  }, [period]);
-  const slot =
-    viewWidth > 0
-      ? Math.max(DAILY_MIN_SLOT, Math.floor(viewWidth / DAILY_VISIBLE_DAYS))
-      : DAILY_MIN_SLOT;
-  const dailyWidth = Math.max(viewWidth, Math.max(1, chartData.length) * slot);
-
-  // 진입 시 **가장 최근 구간**이 보이게 오른쪽 끝으로
-  useEffect(() => {
-    if (period !== "daily") return;
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollLeft = el.scrollWidth;
-  }, [period, chartData.length, slot, viewWidth]);
 
   const isLoading = ledger.isLoading || prices.isLoading;
   const unavailable = ledger.data?.unavailable;
@@ -614,7 +814,7 @@ export function ProfitAnalysisSection() {
           {summary.denominatorEstimated > 0 && (
             <Badge
               tone="slate"
-              title="수익금은 확정이고 막대도 그립니다. 수익률 분모의 예수금에 추정 청산 대금이 섞여 있어 수익률만 근사값입니다."
+              title="추정 청산대금의 오차가 손익에서 상쇄된다고 입증된 구간입니다(막대는 그립니다). 수익률 분모의 예수금에는 추정 대금이 섞여 있어 수익률은 근사값입니다. 현금 품질·보유수량 출처는 별도로 표시됩니다."
             >
               분모 추정 {summary.denominatorEstimated}개 구간
             </Badge>
@@ -693,7 +893,7 @@ export function ProfitAnalysisSection() {
             </p>
           </div>
         </div>
-      ) : chartData.length === 0 ? (
+      ) : results.length === 0 ? (
         <div className="h-52 rounded-xl border border-dashed grid place-items-center text-center px-4">
           <div className="space-y-1">
             <BarChart3 className="w-6 h-6 text-muted-foreground/40 mx-auto" />
@@ -709,89 +909,15 @@ export function ProfitAnalysisSection() {
         </div>
       ) : (
         <>
-          {period === "daily" ? (
-            <div className="flex" style={{ touchAction: "pan-x pan-y" }}>
-              {/* 고정 Y축 — 스크롤과 함께 움직이면 막대 크기를 비교할 수 없다 */}
-              <div style={{ width: AXIS_WIDTH }} className="shrink-0 h-52">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={chartData} margin={{ top: 8, right: 0, left: 0, bottom: 18 }}>
-                    <YAxis
-                      domain={yDomain}
-                      tick={{ fontSize: 11 }}
-                      width={AXIS_WIDTH}
-                      tickFormatter={(v: number) =>
-                        metric === "pct" ? `${v.toFixed(1)}%` : fmtAxisAmount(v)
-                      }
-                    />
-                    <Bar dataKey="bar" fill="transparent" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-              <div
-                ref={scrollRef}
-                className="overflow-x-auto overscroll-x-contain flex-1 [-webkit-overflow-scrolling:touch]"
-              >
-                <div style={{ width: dailyWidth }} className="h-52">
-                  <BarChart
-                    width={dailyWidth}
-                    height={208}
-                    data={chartData}
-                    margin={{ top: 8, right: 4, left: 0, bottom: 0 }}
-                    onClick={onBarClick}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
-                    <XAxis dataKey="label" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
-                    <YAxis domain={yDomain} hide />
-                    <ReferenceLine y={0} stroke="currentColor" opacity={0.35} />
-                    <Tooltip content={() => null} cursor={{ fillOpacity: 0.08 }} />
-                    <Bar dataKey="bar" radius={[2, 2, 0, 0]} shape={BarShape} isAnimationActive={false}>
-                      {chartData.map((d) => (
-                        <Cell
-                          key={d.key}
-                          fill={d.bar !== null && d.bar < 0 ? down : up}
-                          opacity={selectedKey && selectedKey !== d.key ? 0.45 : 1}
-                        />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="h-52">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={chartData}
-                  margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
-                  onClick={onBarClick}
-                >
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.3} />
-                  <XAxis dataKey="label" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
-                  <YAxis
-                    domain={yDomain}
-                    tick={{ fontSize: 11 }}
-                    width={metric === "pct" ? 44 : 56}
-                    tickFormatter={(v: number) =>
-                      metric === "pct" ? `${v.toFixed(1)}%` : fmtAxisAmount(v)
-                    }
-                  />
-                  <ReferenceLine y={0} stroke="currentColor" opacity={0.35} />
-                  <Tooltip content={() => null} cursor={{ fillOpacity: 0.08 }} />
-                  <Bar dataKey="bar" radius={[3, 3, 0, 0]} shape={BarShape} isAnimationActive={false}>
-                    {chartData.map((d) => (
-                      <Cell
-                        key={d.key}
-                        fill={d.bar !== null && d.bar < 0 ? down : up}
-                        opacity={selectedKey && selectedKey !== d.key ? 0.45 : 1}
-                      />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-
-          <PeriodDetail r={selected} />
+          <ProfitResultsPanel
+            period={period}
+            metric={metric}
+            results={results}
+            up={up}
+            down={down}
+            selectedKey={selectedKey}
+            onSelect={setSelectedKey}
+          />
 
           <p className="text-[11px] text-muted-foreground/80 leading-relaxed">
             <strong>일간</strong>은 그 거래일 시가 → 종가, <strong>월간</strong>은 그 달 첫 거래일

@@ -1,4 +1,7 @@
-// 추정 거래 provenance — 수익 분석의 exact / estimated / denominatorEstimated 판정과 막대 값(0% vs null)
+// 추정 거래 provenance — 식별, 불확실 창의 시작 근거, 그리고 완성된 valuation 위의 구간 판정/막대 값(0% vs null)
+//
+// 현금 생성 경로(buildDerivedCash → buildCashSeries → valuateAccountDays)를 직접 쓰는 회귀는
+// estimate-cash-path.test.ts 에 있다.
 import { describe, it, expect } from "vitest";
 import type { AccountId } from "./constants";
 import type { LedgerTransaction, TransactionCorrection } from "./ledger";
@@ -22,6 +25,8 @@ function tx(over: Partial<LedgerTransaction>): LedgerTransaction {
     postQuantity: null, source: PROXY, ...over,
   };
 }
+const buy = (over: Partial<LedgerTransaction>) =>
+  tx({ side: "buy", source: MIRAE, tradeDate: over.eventDate ?? "2026-10-02", tradeDateEvidence: "broker-order-date", ...over });
 
 describe("estimatedExitDays — 추정 청산 식별", () => {
   it("가격 대용 추정 매도만 식별하고, 날짜 미확인 사유를 함께 남긴다 (같은 날 두 종목은 한 날짜)", () => {
@@ -29,7 +34,7 @@ describe("estimatedExitDays — 추정 청산 식별", () => {
     expect(days).toEqual([
       {
         accountId: "pension", date: "2026-10-13",
-        reasons: ["exit_price_proxy", "exit_date_unconfirmed"], windowFrom: null,
+        reasons: ["exit_price_proxy", "exit_date_unconfirmed"], windowStart: null,
       },
     ]);
   });
@@ -42,22 +47,10 @@ describe("estimatedExitDays — 추정 청산 식별", () => {
     expect(days).toEqual([]);
   });
 
-  it("보고된 매도일이 있으면 날짜 미확인 사유를 붙이지 않는다 (가격 추정 사유만, 불확실 창 없음)", () => {
+  it("보고된 매도일이 있으면 날짜 미확인 사유를 붙이지 않는다 (가격 추정 사유만, 창은 그 날 하나)", () => {
     const days = estimatedExitDays([tx({ id: "a", tradeDate: "2026-10-13" })]);
     expect(days[0].reasons).toEqual(["exit_price_proxy"]);
-    expect(days[0].windowFrom).toBe("2026-10-13");
-  });
-
-  it("불확실 창의 시작은 같은 계좌의 '추정이 아닌' 직전 원장 거래일이다 (다른 계좌·추정·이후 거래는 무관)", () => {
-    const days = estimatedExitDays([
-      tx({ id: "m1", source: MIRAE, eventDate: "2026-10-02", side: "buy" }),
-      tx({ id: "m0", source: MIRAE, eventDate: "2026-09-25", side: "buy" }),
-      tx({ id: "other", accountId: "isa", source: MIRAE, eventDate: "2026-10-09", side: "buy" }),
-      tx({ id: "p" }),
-      tx({ id: "k", side: "buy", source: KIS, tradeDate: "2026-10-14", eventDate: "2026-10-14" }),
-    ]);
-    expect(days).toHaveLength(1);
-    expect(days[0].windowFrom).toBe("2026-10-02");
+    expect(days[0].windowStart).toBe("2026-10-13");
   });
 
   it("사용자가 제외한 거래는 보지 않고, 정정된 실효 거래일을 따른다", () => {
@@ -70,7 +63,88 @@ describe("estimatedExitDays — 추정 청산 식별", () => {
   });
 });
 
-// ── 구간 판정 ───────────────────────────────────────────────────────────────
+describe("estimatedExitDays — 불확실 창의 시작은 '매도 종목의 보유를 확인한 근거'다", () => {
+  const sell = (over: Partial<LedgerTransaction> = {}) => tx({ id: "s", ticker: "AAA", quantity: 10, ...over });
+
+  it("같은 종목의 직전 비추정 거래가 수량까지 확인하면 시작점이 된다. 같은 날 보유(종가)는 입증되지 않아 그 날 자체가 창에 든다", () => {
+    const d = estimatedExitDays([buy({ id: "b", ticker: "AAA", quantity: 10, eventDate: "2026-10-02" }), sell()]);
+    expect(d[0].windowStart).toBe("2026-10-02"); // postQuantity 없음 → 10-02 종가 보유는 미입증
+  });
+
+  it("증권사가 보고한 거래 후 보유수량(postQuantity)이 있으면 그 날 종가 보유까지 입증 — 창은 다음 날부터", () => {
+    const d = estimatedExitDays([
+      buy({ id: "b", ticker: "AAA", quantity: 10, eventDate: "2026-10-02", postQuantity: 10 }), sell(),
+    ]);
+    expect(d[0].windowStart).toBe("2026-10-03");
+  });
+
+  it("postQuantity 가 매도 수량보다 작으면 종가 보유를 입증하지 못한다", () => {
+    const d = estimatedExitDays([
+      buy({ id: "b", ticker: "AAA", quantity: 10, eventDate: "2026-10-02", postQuantity: 4 }), sell(),
+    ]);
+    expect(d[0].windowStart).toBe("2026-10-02");
+  });
+
+  it("★ 반례: 다른 종목의 거래는 매도 종목의 보유를 확인하지 못한다 — 창이 좁아지지 않는다", () => {
+    const only = estimatedExitDays([buy({ id: "b", ticker: "AAA", quantity: 10, eventDate: "2026-10-02" }), sell()]);
+    const withOther = estimatedExitDays([
+      buy({ id: "b", ticker: "AAA", quantity: 10, eventDate: "2026-10-02" }),
+      buy({ id: "o", ticker: "ZZZ", quantity: 5, eventDate: "2026-10-09", postQuantity: 5 }), // 다른 종목, 더 늦은 거래
+      sell(),
+    ]);
+    expect(only[0].windowStart).toBe("2026-10-02");
+    expect(withOther[0].windowStart).toBe("2026-10-02");
+  });
+
+  it("보유 수량이 매도 수량에 못 미치는 거래는 근거가 아니다 — 더 이른, 수량을 확인하는 거래를 찾는다", () => {
+    const d = estimatedExitDays([
+      buy({ id: "b1", ticker: "AAA", quantity: 10, eventDate: "2026-09-20" }),
+      // 10-01 에 일부를 팔아 보유가 4주로 줄었다 → 10주 매도를 확인하지 못한다
+      tx({ id: "p", ticker: "AAA", side: "sell", quantity: 6, source: MIRAE, tradeDate: "2026-10-01", eventDate: "2026-10-01", tradeDateEvidence: "broker-order-date" }),
+      sell(),
+    ]);
+    // 10-01 시점 보유 4주 < 10 → 근거 아님. 9-20(보유 10주) 이 근거 (종가 미입증 → 그 날부터)
+    expect(d[0].windowStart).toBe("2026-09-20");
+  });
+
+  it("매도 종목 중 하나라도 근거가 없으면 시작을 알 수 없다(null) — 창을 줄이지 않는다", () => {
+    const d = estimatedExitDays([
+      buy({ id: "b", ticker: "AAA", quantity: 10, eventDate: "2026-10-02" }),
+      tx({ id: "s1", ticker: "AAA", quantity: 10 }),
+      tx({ id: "s2", ticker: "BBB", quantity: 3 }), // BBB 의 비추정 거래가 없다
+    ]);
+    expect(d[0].windowStart).toBeNull();
+  });
+
+  it("여러 종목이면 가장 이른 근거가 시작점이다 (가장 불확실한 종목 기준)", () => {
+    const d = estimatedExitDays([
+      buy({ id: "a", ticker: "AAA", quantity: 10, eventDate: "2026-10-09" }),
+      buy({ id: "b", ticker: "BBB", quantity: 3, eventDate: "2026-10-02" }),
+      tx({ id: "s1", ticker: "AAA", quantity: 10 }),
+      tx({ id: "s2", ticker: "BBB", quantity: 3 }),
+    ]);
+    expect(d[0].windowStart).toBe("2026-10-02");
+  });
+
+  it("추정 거래·제외된 거래·다른 계좌의 거래는 근거가 아니다", () => {
+    const corr = new Map<string, TransactionCorrection>([
+      ["ex", { transactionId: "ex", excluded: true } as TransactionCorrection],
+    ]);
+    const d = estimatedExitDays(
+      [
+        buy({ id: "ex", ticker: "AAA", quantity: 10, eventDate: "2026-10-09" }), // 제외됨
+        buy({ id: "isa", accountId: "isa", ticker: "AAA", quantity: 10, eventDate: "2026-10-08" }), // 다른 계좌
+        tx({ id: "est", ticker: "AAA", side: "buy", quantity: 10, eventDate: "2026-10-07" }), // 추정 거래
+        sell(),
+      ],
+      corr,
+    );
+    expect(d.find((x) => x.date === "2026-10-13")!.windowStart).toBeNull();
+  });
+});
+
+// ── 완성된 valuation 위의 구간 판정 ─────────────────────────────────────────
+// (현금 경로 없이 valuation 을 직접 넘긴다 — derived 가 없으므로 '상쇄 입증'은 불가능하다)
 
 const cov = (id: string): AccountCoverage => ({
   accountId: id as AccountId, inception: "2026-10-01", strategyStart: "2026-10-01",
@@ -80,7 +154,6 @@ const val = (date: string, accountId: string, vOpen: number, vClose: number): Ac
   date, accountId, vOpen, vClose, term1: vClose - vOpen, term2: 0, costs: 0,
   holdingsSource: "ledger", cashQuality: "derived", usable: true, missing: [],
 });
-// 10-02: 마지막 확정 거래(미래에셋) / 10-13: 추정 청산 / 10-14: KIS 확정 매수
 const DATES = [
   "2026-10-01", "2026-10-02", "2026-10-05", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15",
   "2026-11-02", "2026-11-03",
@@ -90,8 +163,8 @@ const valuations: AccountDayValuation[] = DATES.flatMap((d) => [
   val(d, "retirement", 70_000_000, 70_700_000),
 ]);
 const estimatedDays = estimatedExitDays([
-  tx({ id: "m", side: "buy", source: MIRAE, eventDate: "2026-10-02" }),
-  tx({ id: "a" }),
+  buy({ id: "m", ticker: "360750", quantity: 1, eventDate: "2026-10-02" }),
+  tx({ id: "a" }), // 360750 1주 추정 매도 — 10-02 거래가 근거 (종가 미입증 → 창은 10-02 부터)
   tx({ id: "k", side: "buy", source: KIS, tradeDate: "2026-10-14", eventDate: "2026-10-14" }),
 ]);
 const base = {
@@ -106,7 +179,7 @@ const run = (scope: string[], period: Period, withEst = true, vals = valuations)
   });
 const byKey = (rs: ReturnType<typeof run>) => Object.fromEntries(rs.map((r) => [r.key, r]));
 
-describe("computeProfitAnalysis — 손익 provenance 와 수익률(분모) provenance", () => {
+describe("computeProfitAnalysis — 추정 청산 provenance (valuation 직접 입력)", () => {
   it("추정 청산일 당일: 가격·날짜 사유가 모두 붙고 exact=false", () => {
     const r = byKey(run(["pension"], "daily"))["2026-10-13"];
     expect(r.estimated).toBe(true);
@@ -115,55 +188,25 @@ describe("computeProfitAnalysis — 손익 provenance 와 수익률(분모) prov
     expect(r.estimatedDates).toEqual(["2026-10-13"]);
   });
 
-  it("실제 매도일이 불확실한 창 (10-02, 10-13] 의 일간 구간은 보유 노출이 불확실해 estimated — 날짜 사유만", () => {
+  it("실제 매도일이 불확실한 창 [10-02, 10-13] 의 일간 구간은 estimated(날짜 사유). 창 이전은 영향 없다", () => {
     const d = byKey(run(["pension"], "daily"));
-    for (const k of ["2026-10-05", "2026-10-12"]) {
+    for (const k of ["2026-10-02", "2026-10-05", "2026-10-12"]) {
       expect(d[k].estimated).toBe(true);
-      expect(d[k].exact).toBe(false);
       expect(d[k].estimateReasons).toEqual(["exit_date_unconfirmed"]);
     }
-    // 창이 시작되기 전(마지막 확정 거래일까지)은 영향 없음 — 무조건 번지지 않는다
-    for (const k of ["2026-10-01", "2026-10-02"]) {
-      expect(d[k].estimated).toBe(false);
-      expect(d[k].denominatorEstimated).toBe(false);
-      expect(d[k].exact).toBe(true);
-    }
+    expect(d["2026-10-01"].estimated).toBe(false);
+    expect(d["2026-10-01"].exact).toBe(true);
   });
 
-  it("2026-10-14: KIS 확정 매수일 — 손익은 확정(estimated=false), 분모만 추정, exact=false", () => {
+  it("★ 상쇄를 입증할 수 없으면(현금 경로 없음) 추정일 뒤 구간도 손익이 참고값이다 — '분모만 추정'으로 두지 않는다", () => {
     const r = byKey(run(["pension"], "daily"))["2026-10-14"];
-    expect(r.estimated).toBe(false);
-    expect(r.denominatorEstimated).toBe(true);
-    expect(r.exact).toBe(false); // 원장이 정확하다는 이유로 exact 가 되지 않는다
-    expect(r.estimateReasons).toEqual([]);
-    expect(confirmedBarValue(r, "amount")).toBe(100_000); // 손익 막대는 그대로 그린다
-    expect(confirmedBarValue(r, "pct")).not.toBeNull();
-  });
-
-  it("예수금의 상수 오차는 손익에서 상쇄되고 분모에만 들어간다 (손익 불변, 분모·수익률만 변함)", () => {
-    const eps = 16_078; // 운영 실측: KIS 관측 예수금 − 원장 유도 예수금
-    const shifted = valuations.map((v) =>
-      v.accountId === "pension" ? { ...v, vOpen: v.vOpen + eps, vClose: v.vClose + eps } : v);
-    const a = byKey(run(["pension"], "daily", true, valuations))["2026-10-14"];
-    const b = byKey(run(["pension"], "daily", true, shifted))["2026-10-14"];
-    expect(b.knownProfit).toBe(a.knownProfit);
-    expect(b.averageCapital).toBe(a.averageCapital + eps);
-    expect(b.returnPctLow).not.toBe(a.returnPctLow);
-    // 수익률의 상대 오차 ≈ ε / V_open (여기서는 약 0.16%) — 수익률 자신의 크기에 비례해 작다
-    expect(Math.abs(b.returnPctLow! - a.returnPctLow!) / a.returnPctLow!).toBeCloseTo(eps / 10_000_000, 4);
-    expect(a.denominatorEstimated && b.denominatorEstimated).toBe(true);
-  });
-
-  it("추정 청산 이후의 월간도 분모 추정이다 (예수금은 관측으로 재정렬되지 않는다). 손익 막대는 유지", () => {
-    const m = byKey(run(["pension"], "monthly"));
-    expect(m["2026-10"].estimated).toBe(true); // 창·추정일이 구간 안
-    expect(m["2026-11"].estimated).toBe(false);
-    expect(m["2026-11"].denominatorEstimated).toBe(true);
-    expect(m["2026-11"].exact).toBe(false);
-    expect(confirmedBarValue(m["2026-11"], "amount")).not.toBeNull();
-    const y = run(["pension"], "yearly");
-    expect(y).toHaveLength(1);
-    expect(y[0].estimated).toBe(true);
+    expect(r.estimated).toBe(true);
+    expect(r.denominatorEstimated).toBe(false);
+    expect(r.estimateReasons).toEqual(["cash_error_not_cancelled"]);
+    expect(r.exact).toBe(false);
+    expect(confirmedBarValue(r, "amount")).toBeNull();
+    expect(confirmedBarValue(r, "pct")).toBeNull();
+    expect(r.knownProfit).toBe(100_000); // 참고값 자체는 지우거나 보정하지 않는다
   });
 
   it("다른 계좌 scope 는 어떤 provenance 도 받지 않는다 (불변)", () => {
@@ -179,7 +222,7 @@ describe("computeProfitAnalysis — 손익 provenance 와 수익률(분모) prov
     const all = byKey(run(["pension", "retirement"], "daily"));
     for (const k of Object.keys(one)) {
       expect(all[k].estimated).toBe(one[k].estimated);
-      expect(all[k].denominatorEstimated).toBe(one[k].denominatorEstimated);
+      expect(all[k].estimateReasons).toEqual(one[k].estimateReasons);
     }
   });
 
@@ -204,8 +247,8 @@ describe("confirmedBarValue — 0% 와 null 의 구분", () => {
   });
 
   it("확정 구간은 값을 그대로 낸다", () => {
-    expect(confirmedBarValue(days["2026-10-02"], "pct")).toBeCloseTo(1, 6);
-    expect(confirmedBarValue(days["2026-10-02"], "amount")).toBe(100_000);
+    expect(confirmedBarValue(days["2026-10-01"], "pct")).toBeCloseTo(1, 6);
+    expect(confirmedBarValue(days["2026-10-01"], "amount")).toBe(100_000);
   });
 
   it("실제 계산 결과 0% 는 0 으로 남는다", () => {

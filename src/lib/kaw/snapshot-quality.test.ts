@@ -9,7 +9,13 @@ import {
   computePeriodPerformance,
   type DailySnapshotRow,
 } from "./performance";
-import { buildPerformanceTimeline, buildReconstructedRows, mergeTimeline } from "./historical-performance";
+import {
+  buildPerformanceTimeline,
+  buildReconstructedRows,
+  mergeTimeline,
+  reconstructionAnchors,
+  validAnchors,
+} from "./historical-performance";
 
 const APPROVED_AT = "2026-10-20T12:24:53.030Z";
 const sync = (over: Record<string, unknown> = {}) => ({
@@ -296,5 +302,53 @@ describe("boundary 날짜를 가로지르는 구간은 제외 없이도 unconfir
     for (const d of ["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20"]) {
       expect(r.unconfirmedReason).toContain(d);
     }
+  });
+});
+
+// ── 전량 0주 broker_sync 경계 ───────────────────────────────────────────────
+
+describe("복원 엔진 — 전량 0주 동기화는 경계로 남는다 (옛 수량으로 되돌아가지 않는다)", () => {
+  const library = [{ defaultEtf: "ETF-A", ticker: "AAA" }];
+  const dates = ["2026-10-01", "2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"];
+  const priceSeries = { AAA: Object.fromEntries(dates.map((d) => [d, 1000])) };
+  const positive = { id: "h1", date: "2026-10-01", rowQuantitiesSnap: { a: 10 }, rowEtfSnap: { a: "ETF-A" } };
+  const zeroSync = {
+    id: "bsync:1", date: "2026-10-05", source: "broker_sync",
+    rowQuantitiesSnap: { a: 0 }, rowEtfSnap: { a: "ETF-A" },
+  };
+  const rowsFor = (history: object[], extra: Record<string, unknown> = {}) =>
+    buildReconstructedRows({
+      accounts: [{ accountId: "pension", history: history as never }], library,
+      actualSnapshots: [], priceSeries, ...extra,
+    }).map((r) => r.snapshotDate);
+
+  it("reconstructionAnchors 는 양수 history 와 전량 0주 동기화를 함께 남긴다 (validAnchors 는 그대로)", () => {
+    expect(reconstructionAnchors([positive, zeroSync] as never).map((a) => a.date)).toEqual(["2026-10-01", "2026-10-05"]);
+    expect(validAnchors([positive, zeroSync] as never).map((a) => a.date)).toEqual(["2026-10-01"]);
+  });
+
+  it("★ 양수 history → 전량 0주 동기화 → 이후 날짜: 동기화 날짜부터 옛 수량 복원 행이 생기지 않는다", () => {
+    expect(rowsFor([positive, zeroSync])).toEqual(["2026-10-01", "2026-10-02"]);
+    // 대조: 경계가 없으면 옛 수량이 계속 복원된다 — 이것이 막으려는 사고다
+    expect(rowsFor([positive])).toEqual(dates);
+  });
+
+  it("일반 리밸런싱 history 의 0주 기록은 기존대로 무시된다 (정책 변경 없음)", () => {
+    const zeroRebalance = { id: "h2", date: "2026-10-05", rowQuantitiesSnap: { a: 0 }, rowEtfSnap: { a: "ETF-A" } };
+    expect(rowsFor([positive, zeroRebalance])).toEqual(dates);
+  });
+
+  it("경계 이후에 양수 동기화가 다시 와도 동기화 anchor 는 행을 만들지 않는다 (예수금 미상)", () => {
+    const later = { id: "bsync:2", date: "2026-10-07", source: "broker_sync", rowQuantitiesSnap: { a: 3 }, rowEtfSnap: { a: "ETF-A" } };
+    expect(rowsFor([positive, zeroSync, later])).toEqual(["2026-10-01", "2026-10-02"]);
+  });
+
+  it("원본 스냅샷 기준 상한과 제외 키 재생성 금지는 경계가 있어도 유지된다", () => {
+    const actual = ["2026-10-02"].map((d) => ({
+      snapshotDate: d, accountId: "pension", marketValue: 1, cashBalance: 0, totalAssetValue: 1,
+    }));
+    // 상한 10-02 → 10-01 만. 제외 키(10-01) 는 복원하지 않는다.
+    expect(rowsFor([positive, zeroSync], { actualSnapshots: actual })).toEqual(["2026-10-01"]);
+    expect(rowsFor([positive, zeroSync], { actualSnapshots: actual, excluded: [{ accountId: "pension", date: "2026-10-01" }] })).toEqual([]);
   });
 });

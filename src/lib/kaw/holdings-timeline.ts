@@ -38,7 +38,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { resolveEtfTicker, type AssetLibraryEntry } from "./benchmark-series";
-import { anchorAsOf, validAnchors } from "./historical-performance";
+import { anchorAsOf, reconstructionAnchors, validAnchors } from "./historical-performance";
 import type { DailyHoldingsDelta } from "./ledger";
 import type { AccountCoverage, HoldingsSource } from "./ledger-coverage";
 import type { SnapshotHistoryLike } from "./snapshot";
@@ -156,7 +156,9 @@ export function buildAccountTimeline(
 ): HoldingsDay[] {
   const { coverage, ledgerDays } = input;
   if (!coverage.performanceStart) return [];
-  const anchors = validAnchors(input.history);
+  // 전량 0주 계좌 동기화(broker_sync)도 anchor 로 남긴다 — "이 날짜부터 보유 없음"은 확정 경계이고,
+  // 버리면 cutoff 이후 날짜가 이전 history 의 옛 수량으로 되돌아간다. 일반 history 의 0주 기록은 기존대로 무시된다.
+  const anchors = reconstructionAnchors(input.history);
   const byDate = new Map(ledgerDays.map((d) => [d.date, d]));
   const out: HoldingsDay[] = [];
 

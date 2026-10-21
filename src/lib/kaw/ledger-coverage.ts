@@ -39,7 +39,7 @@
 
 import { ACCOUNT_IDS, type AccountId } from "./constants";
 import type { SnapshotHistoryLike } from "./snapshot";
-import { validAnchors } from "./historical-performance";
+import { reconstructionAnchors, validAnchors } from "./historical-performance";
 
 /**
  * K-올웨더 **전략** 시작일. 계좌 개시일(첫 입금)과 다르다 — 그 앞의 거래는 원장에
@@ -106,14 +106,16 @@ const maxOf = (xs: readonly string[]): string | null => {
 /** 계좌 하나의 구간 판정. `performanceStart` 는 보유수량이 필요하므로 뒤에서 채운다. */
 export function accountCoverage(input: CoverageInput): AccountCoverage {
   const anchors = validAnchors(input.history);
-  const anchorDates = anchors.map((a) => a.date);
+  // anchorDates 에는 전량 0주 동기화 경계도 넣는다 — 최신 anchor 판정(미관측 수입 상한 R 의 유효성)이 그 경계를 알아야 한다.
+  // seam(첫 유효 anchor, reconciliation 대상)은 양수 보유 anchor 기준 그대로다.
+  const anchorDates = reconstructionAnchors(input.history).map((a) => a.date);
   return {
     accountId: input.accountId,
     inception: minOf([...input.cashflowDates, ...input.ledgerDates]),
     strategyStart: STRATEGY_START_DATES[input.accountId],
     performanceStart: null,
     strategyStartIsTransition: false,
-    seam: anchorDates.length ? anchorDates[0] : null,
+    seam: anchors.length ? anchors[0].date : null,
     ledgerCutoff: maxOf(input.ledgerDates),
     anchorDates,
   };

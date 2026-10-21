@@ -122,6 +122,26 @@ export function validAnchors(
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+/**
+ * 복원용 anchor — `validAnchors` + **전량 0주인 계좌 동기화(broker_sync) 기록**.
+ *
+ * `validAnchors` 는 양수 보유가 하나도 없는 기록을 버린다. 그런데 전량 0주 동기화는 "이 날짜부터 보유가 없다"는
+ * **확정 경계**다. 버리면 그 날짜 이후가 이전 history 의 옛 수량으로 되돌아가 청산한 종목을 계속 보유한 것처럼 복원된다.
+ * 그래서 복원은 이 경계를 anchor 로 **남긴다**(행은 만들지 않는다 — 아래 `buildReconstructedRows`).
+ * 일반 리밸런싱 history 의 0주 기록은 기존대로 버린다(정책 변경 없음). `validAnchors` 자체는 바꾸지 않는다.
+ */
+export function reconstructionAnchors(
+  history: readonly SnapshotHistoryLike[],
+): SnapshotHistoryLike[] {
+  const boundaries = history.filter((h) => {
+    if (!h || typeof h.date !== "string" || !h.date) return false;
+    if ((h as { source?: string }).source !== "broker_sync") return false;
+    const qty = h.rowQuantitiesSnap;
+    return !!qty && Object.keys(qty).length > 0 && !Object.values(qty).some((q) => Number(q ?? 0) > 0);
+  });
+  return [...validAnchors(history), ...boundaries].sort((a, b) => a.date.localeCompare(b.date));
+}
+
 /** `date` 이하에서 가장 최근인 anchor. 없으면 undefined. (anchor 날짜 당일도 포함한다) */
 export function anchorAsOf(
   anchors: readonly SnapshotHistoryLike[],
@@ -196,7 +216,7 @@ export function reconstructionPlan(
   let toDate = "";
 
   for (const acc of accounts) {
-    const anchors = validAnchors(acc.history);
+    const anchors = reconstructionAnchors(acc.history);
     if (!anchors.length) continue;
     const start = anchors[0].date;
     // 복원 상한: 첫 실제 스냅샷 이전까지만. 실제 스냅샷이 없는 계좌는 오늘까지.
@@ -228,7 +248,6 @@ export function tradingDatesOf(priceSeries: PriceSeriesByTicker): string[] {
 export interface BuildReconstructedOptions {
   accounts: readonly ReconstructionAccountInput[];
   library: readonly AssetLibraryEntry[];
-  /** 실제 스냅샷 — 계좌별 복원 상한을 정하는 데만 쓴다 */
   /** 실제 스냅샷 **원본**. 제외 대상도 지우지 않고 그대로 넘긴다(상한 계산에 쓴다) */
   actualSnapshots: readonly DailySnapshotRow[];
   priceSeries: PriceSeriesByTicker;
@@ -251,7 +270,8 @@ export function buildReconstructedRows(
 
   const out: PerformanceTimelineRow[] = [];
   for (const acc of o.accounts) {
-    const anchors = validAnchors(acc.history);
+    // 전량 0주 동기화 경계를 남긴다 — 버리면 그 이후가 이전 history 의 옛 수량으로 되돌아간다
+    const anchors = reconstructionAnchors(acc.history);
     if (!anchors.length) continue;
     const start = anchors[0].date;
     const limit = firstActual.get(acc.accountId); // 있으면 이 날짜 **미만**만 복원
@@ -265,6 +285,7 @@ export function buildReconstructedRows(
       const anchor = anchorAsOf(anchors, date);
       if (!anchor) continue;
       // 계좌 동기화 anchor: 예수금을 모른다. 0원으로 두고 확정 총자산을 만들지 않는다.
+      // (전량 0주 동기화도 여기서 막힌다 — 경계는 남기되 행은 만들지 않는다)
       if ((anchor as { source?: string }).source === "broker_sync") continue;
 
       const qty = anchor.rowQuantitiesSnap ?? {};
