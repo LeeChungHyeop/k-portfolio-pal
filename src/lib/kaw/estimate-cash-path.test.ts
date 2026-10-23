@@ -250,7 +250,7 @@ describe("구간 경계와 scope", () => {
 
   it("추정 정보를 빼면 숫자(손익·수익률·분모)는 그대로다 — 원본 금액을 보정하지 않는다", () => {
     const strip = (rs: PeriodResult[]) =>
-      rs.map(({ estimated, denominatorEstimated, estimateReasons, estimatedDates, exact, ...n }) => n);
+      rs.map(({ estimated, denominatorEstimated, estimateReasons, estimatedDates, exact, partial, ...n }) => n);
     for (const p of ["daily", "monthly", "yearly"] as const) {
       expect(strip(analyze([pension], ["pension"], p, true))).toEqual(strip(analyze([pension], ["pension"], p, false)));
     }

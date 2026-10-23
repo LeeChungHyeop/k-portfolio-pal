@@ -228,7 +228,7 @@ describe("computeProfitAnalysis — 추정 청산 provenance (valuation 직접 �
 
   it("estimatedDays 를 주지 않으면 기존 계산과 숫자가 완전히 같다 (손익·수익률·분모 불변)", () => {
     const strip = (rs: ReturnType<typeof run>) =>
-      rs.map(({ estimated, denominatorEstimated, estimateReasons, estimatedDates, exact, ...n }) => n);
+      rs.map(({ estimated, denominatorEstimated, estimateReasons, estimatedDates, exact, partial, ...n }) => n);
     for (const p of ["daily", "monthly", "yearly"] as const) {
       expect(strip(run(["pension", "retirement"], p, true))).toEqual(strip(run(["pension", "retirement"], p, false)));
       expect(run(["pension"], p, false).every((r) => r.exact && !r.estimated && !r.denominatorEstimated)).toBe(true);

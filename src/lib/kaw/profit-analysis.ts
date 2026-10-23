@@ -469,6 +469,69 @@ export function buildSegments(dates: readonly string[], period: PeriodId): Segme
 
 // ── 구간 손익 ───────────────────────────────────────────────────────────────
 
+/** 부분 성과를 이루는 검증된 연속 구간(run) 하나 — 첫 거래일 시가 → 마지막 거래일 종가, 기존 `segmentProfit` 결과 */
+export interface PartialRun {
+  openDate: string;
+  closeDate: string;
+  /** 이 run 이 포함하는 거래일 수 */
+  tradingDays: number;
+  beginningTotal: number;
+  endingTotal: number;
+  netCashflow: number;
+  knownProfit: number;
+  averageCapital: number;
+  returnPctLow: number | null;
+  returnPctHigh: number | null;
+  denominatorEstimated: boolean;
+}
+
+/**
+ * 월간·연간 구간 전체는 미확정이지만 **확인 가능한 연속 구간만** 따로 모은 부분 성과.
+ *
+ * 구간 전체 결과(`PeriodResult`의 나머지 필드)를 **대체하지 않는다** — 전체가 미확정이면 그대로 미확정이고,
+ * 이 필드는 그와 별개의 지표다.
+ *
+ * ## 산식
+ *   · run 마다 기존 `segmentProfit`(첫 날 시가 → 마지막 날 종가, 구간 안 외부흐름·Modified Dietz 분모)
+ *   · 수익률  = Π(1 + r_i) − 1   (run 별 수익률의 **연결수익률**)
+ *   · 손익    = Σ P_i             (확인된 run 의 손익만)
+ *
+ * ## 읽는 법 (중요)
+ *   연결수익률은 **제외된 기간의 수익률을 0% 로 확정한 것이 아니다.** 제외 기간을 계산에서 뺀 값이고,
+ *   이 기간 전체를 대표하지 않는다. 제외 기간의 시작·종료 평가액을 직접 이은 값도 아니다.
+ *   run 하나라도 수익률이 계산 불가(null)이면 부분 수익률도 null 이다 — 0% 를 대입하지 않는다.
+ */
+export interface PartialPerformance {
+  runs: readonly PartialRun[];
+  /** 부분 성과에 포함된 거래일 / 제외된 거래일 (오름차순) */
+  includedDates: readonly string[];
+  excludedDays: readonly { date: string; reasons: readonly EstimateReason[] }[];
+  /**
+   * 커버리지 분자·분모 — **가격이 확인돼 평가할 수 있었던** 거래일 기준이다 (전체 거래일 기준이 아니다).
+   * 가격이 없어 평가하지 못한 날(`unpricedDays`)과 가격이 전혀 없는 날은 분모에 들어 있지 않다.
+   * 전체 거래일을 정확히 판별할 근거가 없으므로 화면에서는 반드시 "가격 확인일 기준"이라고 쓴다.
+   */
+  measuredDays: number;
+  totalDays: number;
+  /**
+   * 이 구간 안에서 평가 불가(가격 누락 등)라 거래일 목록에서 빠진 날짜. 분모에 없으므로 따로 알린다.
+   * 평가 행이 있는 날만 알 수 있다 — 어떤 종목도 가격이 없는 날은 휴장일과 구별할 수 없어 여기에도 없다.
+   */
+  unpricedDays: readonly string[];
+  /**
+   * run 사이의 끊김 중 **제외된 거래일로 설명되지 않는** 곳의 수.
+   * 가격이 없어 평가하지 못한 날 등에 추정이 숨어 있어 run 이 갈라진 경우다 — 커버리지 분모(평가 가능한 거래일)에
+   * 들어 있지 않은 미확인 기간이 있다는 뜻이므로 그대로 알린다.
+   */
+  unmeasuredBreaks: number;
+  knownProfit: number;
+  returnPctLow: number | null;
+  returnPctHigh: number | null;
+  /** run 중 하나라도 수익률 분모가 추정에 기대면 true — 부분 수익률도 근사값이다 */
+  denominatorEstimated: boolean;
+  basis: "linked-modified-dietz";
+}
+
 export interface PeriodResult {
   key: string;
   label: string;
@@ -535,6 +598,11 @@ export interface PeriodResult {
   estimateReasons: readonly EstimateReason[];
   /** 구간 안의 추정 거래 날짜 (오름차순) */
   estimatedDates: readonly string[];
+  /**
+   * 구간 전체는 `estimated` 인데 확인 가능한 연속 구간이 있을 때의 부분 성과. 그 외에는 null.
+   * 월간·연간에서만 만든다(일간은 하루가 곧 구간이다).
+   */
+  partial: PartialPerformance | null;
 }
 
 /**
@@ -605,6 +673,23 @@ export function confirmedBarValue(r: PeriodResult, metric: "pct" | "amount"): nu
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+/**
+ * 차트에 그릴 값과 종류. 확정 막대가 있으면 `confirmed`, 구간 전체는 미확정이지만 부분 성과가 있으면 `partial`
+ * (값이 null 이면 그리지 않는다), 그 외는 막대 없음(`none`).
+ */
+export function chartBar(
+  r: PeriodResult,
+  metric: "pct" | "amount",
+): { value: number | null; kind: "confirmed" | "partial" | "none" } {
+  const confirmed = confirmedBarValue(r, metric);
+  if (confirmed !== null) return { value: confirmed, kind: "confirmed" };
+  if (r.estimated && r.partial) {
+    const v = metric === "pct" ? r.partial.returnPctLow : r.partial.knownProfit;
+    if (typeof v === "number" && Number.isFinite(v)) return { value: v, kind: "partial" };
+  }
+  return { value: null, kind: "none" };
+}
+
 const DAY_MS = 86_400_000;
 const dayDiff = (from: string, to: string): number => {
   const a = Date.parse(`${from}T00:00:00Z`);
@@ -617,6 +702,61 @@ export interface FlowPoint {
   /** 유효일 (거래일) */
   date: string;
   amount: number;
+}
+
+/**
+ * 구간이 추정의 영향을 받는가 — 서로 독립적으로 판정한다 (`segmentProfit` 과 부분 성과가 같은 판정을 쓴다).
+ *
+ *   · 추정 날짜가 구간 안에 있다 → 체결가 대용이 손익에 직접 들어간다
+ *   · 실제 매도일이 불확실한 창 [windowStart, date] 과 구간이 겹친다 → 그 사이 보유 노출이 불확실하다
+ *   · 추정 날짜가 구간 시작 전이다 → 시작 예수금에 추정 청산대금이 섞여 있다.
+ *       그 오차가 구간 손익에서 **상쇄된다는 근거가 있을 때만** 분모만 추정(denominatorEstimated),
+ *       근거가 없으면 손익도 참고값이다 (cash_error_not_cancelled)
+ */
+export function classifyEstimates(
+  seg: Segment,
+  estimates: readonly EstimatedDay[],
+  cancels: (accountId: string, lastEstimateDate: string, seg: Segment) => boolean,
+): {
+  estimated: boolean;
+  denominatorEstimated: boolean;
+  estimateReasons: EstimateReason[];
+  estimatedDates: string[];
+} {
+  const reasons = new Set<EstimateReason>();
+  const dates = new Set<string>();
+  const priorByAccount = new Map<string, string>(); // 계좌 → 구간 시작 전 마지막 추정 날짜
+  for (const e of estimates) {
+    const inside = e.date >= seg.openDate && e.date <= seg.closeDate;
+    const dateOpen = e.reasons.includes("exit_date_unconfirmed");
+    const inWindow =
+      dateOpen &&
+      seg.openDate <= e.date &&
+      (e.windowStart === null || seg.closeDate >= e.windowStart);
+    if (inside || inWindow) {
+      (inside ? e.reasons : (["exit_date_unconfirmed"] as const)).forEach((r) => reasons.add(r));
+      dates.add(e.date);
+    } else if (e.date < seg.openDate) {
+      const prev = priorByAccount.get(e.accountId);
+      if (!prev || e.date > prev) priorByAccount.set(e.accountId, e.date);
+    }
+  }
+  let denominatorEstimated = false;
+  if (reasons.size === 0) {
+    for (const [accountId, lastDate] of priorByAccount) {
+      if (cancels(accountId, lastDate, seg)) {
+        denominatorEstimated = true;
+      } else {
+        reasons.add("cash_error_not_cancelled");
+        dates.add(lastDate);
+      }
+    }
+    if (reasons.size > 0) denominatorEstimated = false; // 한 계좌라도 입증 못 하면 손익이 참고값이다
+  }
+  const estimated = reasons.size > 0;
+  const estimateReasons = [...reasons];
+  const estimatedDates = [...dates].sort();
+  return { estimated, denominatorEstimated, estimateReasons, estimatedDates };
 }
 
 /**
@@ -672,45 +812,9 @@ export function segmentProfit(
   const cashQuality = worstCashQuality(
     seg.dates.map((d) => byDate.get(d)?.cashQuality ?? "unknown"),
   );
-  // 구간이 추정의 영향을 받는 경우 (서로 독립적으로 판정한다):
-  //   · 추정 날짜가 구간 안에 있다 → 체결가 대용이 손익에 직접 들어간다
-  //   · 실제 매도일이 불확실한 창 [windowStart, date] 과 구간이 겹친다 → 그 사이 보유 노출이 불확실하다
-  //   · 추정 날짜가 구간 시작 전이다 → 시작 예수금에 추정 청산대금이 섞여 있다.
-  //       그 오차가 구간 손익에서 **상쇄된다는 근거가 있을 때만** 분모만 추정(denominatorEstimated),
-  //       근거가 없으면 손익도 참고값이다 (cash_error_not_cancelled)
-  const reasons = new Set<EstimateReason>();
-  const dates = new Set<string>();
-  const priorByAccount = new Map<string, string>(); // 계좌 → 구간 시작 전 마지막 추정 날짜
-  for (const e of estimates) {
-    const inside = e.date >= seg.openDate && e.date <= seg.closeDate;
-    const dateOpen = e.reasons.includes("exit_date_unconfirmed");
-    const inWindow =
-      dateOpen &&
-      seg.openDate <= e.date &&
-      (e.windowStart === null || seg.closeDate >= e.windowStart);
-    if (inside || inWindow) {
-      (inside ? e.reasons : (["exit_date_unconfirmed"] as const)).forEach((r) => reasons.add(r));
-      dates.add(e.date);
-    } else if (e.date < seg.openDate) {
-      const prev = priorByAccount.get(e.accountId);
-      if (!prev || e.date > prev) priorByAccount.set(e.accountId, e.date);
-    }
-  }
-  let denominatorEstimated = false;
-  if (reasons.size === 0) {
-    for (const [accountId, lastDate] of priorByAccount) {
-      if (cancels(accountId, lastDate, seg)) {
-        denominatorEstimated = true;
-      } else {
-        reasons.add("cash_error_not_cancelled");
-        dates.add(lastDate);
-      }
-    }
-    if (reasons.size > 0) denominatorEstimated = false; // 한 계좌라도 입증 못 하면 손익이 참고값이다
-  }
-  const estimated = reasons.size > 0;
-  const estimateReasons = [...reasons];
-  const estimatedDates = [...dates].sort();
+  const { estimated, denominatorEstimated, estimateReasons, estimatedDates } = classifyEstimates(
+    seg, estimates, cancels,
+  );
   const exact =
     sources.every((s) => s === "ledger") && cashQuality === "derived" && !estimated && !denominatorEstimated;
 
@@ -740,6 +844,7 @@ export function segmentProfit(
     denominatorEstimated,
     estimateReasons,
     estimatedDates,
+    partial: null,
   };
 }
 
@@ -825,7 +930,9 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
       seg.closeDate,
     );
 
-  return segments.map((seg) => {
+  const scopeDaySet = new Set(dates);
+  /** 한 구간(또는 run)을 기존 계산식으로 평가한다 — 구간 전체와 부분 성과의 run 이 같은 함수를 쓴다 */
+  const resultFor = (seg: Segment): PeriodResult => {
     let recognized = 0;
     let capSum = 0;
     let anyCapMissing = false;
@@ -845,7 +952,117 @@ export function computeProfitAnalysis(input: ComputeInput): PeriodResult[] {
       estimates,
       cancels,
     );
+  };
+
+  return segments.map((seg) => {
+    const result = resultFor(seg);
+    // 월간·연간에서 구간 전체가 미확정이면 확인 가능한 연속 구간만 따로 모은다 (구간 전체 결과는 그대로 둔다)
+    if (input.period === "daily" || !result.estimated) return result;
+    // 평가 불가라 거래일 목록에서 빠진 날 — 부분 성과 커버리지 분모에 없다는 사실을 알리기 위해 따로 모은다
+    const unpriced = [
+      ...new Set(
+        input.valuations
+          .filter((v) => inScope.has(v.accountId) && v.date >= seg.openDate && v.date <= seg.closeDate && !scopeDaySet.has(v.date))
+          .map((v) => v.date),
+      ),
+    ];
+    return { ...result, partial: computePartialPerformance(seg, resultFor, unpriced) };
   });
+}
+
+/**
+ * 구간 안의 **검증된 연속 거래일(run)** 을 찾아 부분 성과를 만든다. 확인 가능한 run 이 없으면 null.
+ *
+ * 탐욕적 확장 — 날짜를 앞에서부터 보면서:
+ *   1. 그 하루 구간 [d, d] 가 추정의 영향을 받으면 **제외 일자**(사유 기록)
+ *   2. 아니면 새 run 을 시작하고, 다음 거래일을 붙여도 **run 전체를 다시 검증했을 때** 추정이 아닌 동안만 확장한다.
+ *      하루씩은 정상이어도 합친 구간이 검증에 실패하면(예: 현금 상쇄를 입증하지 못함) 거기서 run 을 끊는다.
+ * 추정은 구간이 넓어질수록 단조롭게 늘어난다(창·추정일이 구간에 걸리거나, 새 현금 최저점이 생기면 하루에서도 실패한다).
+ * 그래서 확장에 성공한 run 의 모든 날은 개별로도 정상이다.
+ *
+ * run 사이의 제외 기간은 평가액을 직접 이어 계산하지 않는다 — 각 run 이 자기 시가·종가로 독립 계산된다.
+ */
+export function computePartialPerformance(
+  seg: Segment,
+  resultFor: (seg: Segment) => PeriodResult,
+  /** 이 구간에서 평가 불가라 거래일 목록에서 빠진 날짜 (커버리지 분모에 없는 날) */
+  unpricedDays: readonly string[] = [],
+): PartialPerformance | null {
+  const dates = seg.dates;
+  const asSeg = (from: number, to: number): Segment => ({
+    key: seg.key, label: seg.label, openDate: dates[from], closeDate: dates[to], dates: dates.slice(from, to + 1),
+  });
+
+  const runs: PartialRun[] = [];
+  const excludedDays: { date: string; reasons: readonly EstimateReason[] }[] = [];
+  const includedDates: string[] = [];
+
+  let i = 0;
+  while (i < dates.length) {
+    const single = resultFor(asSeg(i, i));
+    if (single.estimated) {
+      excludedDays.push({ date: dates[i], reasons: single.estimateReasons });
+      i += 1;
+      continue;
+    }
+    let j = i;
+    let accepted = single;
+    while (j + 1 < dates.length) {
+      const next = resultFor(asSeg(i, j + 1));
+      if (next.estimated) break;
+      accepted = next;
+      j += 1;
+    }
+    runs.push({
+      openDate: dates[i],
+      closeDate: dates[j],
+      tradingDays: j - i + 1,
+      beginningTotal: accepted.beginningTotal,
+      endingTotal: accepted.endingTotal,
+      netCashflow: accepted.netCashflow,
+      knownProfit: accepted.knownProfit,
+      averageCapital: accepted.averageCapital,
+      returnPctLow: accepted.returnPctLow,
+      returnPctHigh: accepted.returnPctHigh,
+      denominatorEstimated: accepted.denominatorEstimated,
+    });
+    includedDates.push(...dates.slice(i, j + 1));
+    i = j + 1;
+  }
+  if (!runs.length) return null;
+
+  // run 사이 끊김 중 제외된 (평가 가능한) 거래일로 설명되지 않는 곳 — 평가 불가일에 숨은 추정 등
+  let unmeasuredBreaks = 0;
+  for (let k = 0; k + 1 < runs.length; k++) {
+    const between = excludedDays.some((e) => e.date > runs[k].closeDate && e.date < runs[k + 1].openDate);
+    if (!between) unmeasuredBreaks += 1;
+  }
+
+  // 연결수익률 — run 하나라도 null 이면 null (0% 를 대입하지 않는다)
+  const link = (get: (r: PartialRun) => number | null): number | null => {
+    let acc = 1;
+    for (const r of runs) {
+      const v = get(r);
+      if (v === null || !Number.isFinite(v)) return null;
+      acc *= 1 + v / 100;
+    }
+    return (acc - 1) * 100;
+  };
+
+  return {
+    runs,
+    includedDates,
+    excludedDays,
+    measuredDays: includedDates.length,
+    totalDays: dates.length,
+    unmeasuredBreaks,
+    unpricedDays: [...unpricedDays].sort(),
+    knownProfit: runs.reduce((a, r) => a + r.knownProfit, 0),
+    returnPctLow: link((r) => r.returnPctLow),
+    returnPctHigh: link((r) => r.returnPctHigh),
+    denominatorEstimated: runs.some((r) => r.denominatorEstimated),
+    basis: "linked-modified-dietz",
+  };
 }
 
 /**

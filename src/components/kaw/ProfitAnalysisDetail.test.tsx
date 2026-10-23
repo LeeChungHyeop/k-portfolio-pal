@@ -22,7 +22,7 @@ const base: PeriodResult = {
   beginningTotal: 10_000_000, endingTotal: 10_100_000, netCashflow: 0, knownProfit: 100_000,
   incomeLowerBound: 0, incomeUpperBound: 0, incomeHeadroom: 0, averageCapital: 10_000_000,
   returnPctLow: 1, returnPctHigh: 1, holdingsSources: ["ledger"], cashQuality: "derived",
-  span: "full", exact: true, estimated: false, denominatorEstimated: false, estimateReasons: [], estimatedDates: [],
+  span: "full", exact: true, estimated: false, denominatorEstimated: false, estimateReasons: [], estimatedDates: [], partial: null,
 };
 
 const mounted: { root: Root; el: HTMLElement }[] = [];

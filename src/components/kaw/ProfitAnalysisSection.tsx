@@ -22,7 +22,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { holdingsAnchorsOf } from "@/lib/kaw/broker-sync-basis";
-import { ESTIMATE_REASON_LABEL, estimatedExitDays } from "@/lib/kaw/estimate-provenance";
+import { ESTIMATE_REASON_LABEL, estimatedExitDays, type EstimateReason } from "@/lib/kaw/estimate-provenance";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BarChart,
@@ -66,9 +66,10 @@ import {
   valuateAccountDays,
   computeProfitAnalysis,
   barYDomain,
-  confirmedBarValue,
+  chartBar,
   type AccountDayValuation,
   type PeriodId,
+  type PartialPerformance,
   type PeriodResult,
 } from "@/lib/kaw/profit-analysis";
 
@@ -170,13 +171,40 @@ function Badge({
 }
 
 /**
- * 막대 모양. 값이 null(계산 불가·추정 포함)이면 **아무것도 그리지 않고**, 실제 0 이면 높이가 0 이어도
- * 얇은 선으로 그린다 — "0% 로 계산됨"과 "확정 수익률 없음"이 차트에서도 다르게 보인다.
+ * 막대 모양.
+ *   · 값이 null(계산 불가·추정 포함·부분 성과 없음)이면 **아무것도 그리지 않는다**
+ *   · 실제 0 이면 높이가 0 이어도 얇은 선으로 그린다 — "0% 로 계산됨"과 "확정 수익률 없음"이 차트에서도 다르게 보인다
+ *   · `barKind === "partial"` 이면 **확인된 구간만의 부분 성과**다 — 반투명 + 점선 외곽 + '부분' 표시로
+ *     확정 막대와 구분한다 (기간 전체의 수익률이 아니다)
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function BarShape(props: any) {
   const { x, y, width, height, fill, payload } = props;
   if (payload?.bar === null || payload?.bar === undefined) return <g />;
+  if (payload?.barKind === "partial") {
+    const negative = payload.bar < 0;
+    return (
+      <g data-testid="partial-bar">
+        {height ? (
+          <Rectangle {...props} fillOpacity={0.3} stroke={fill} strokeWidth={1.5} strokeDasharray="4 3" />
+        ) : (
+          <rect x={x} y={y - 1} width={width} height={2} fill={fill} opacity={0.6} />
+        )}
+        {width >= 22 && (
+          <text
+            x={x + width / 2}
+            y={negative ? y + height + 11 : y - 4}
+            textAnchor="middle"
+            fontSize={9}
+            fill="currentColor"
+            opacity={0.65}
+          >
+            부분
+          </text>
+        )}
+      </g>
+    );
+  }
   if (!height) return <rect x={x} y={y - 1} width={width} height={2} fill={fill} />;
   return <Rectangle {...props} />;
 }
@@ -192,71 +220,138 @@ export function profitConfirmedStatement(r: PeriodResult): boolean {
   return !r.estimated && r.cashQuality === "derived" && r.holdingsSources.every((s) => s === "ledger");
 }
 
-/** 선택된 구간 상세 — 모바일에서 손가락이 툴팁을 가리는 문제를 피해 차트 아래 고정 표시 */
-export function PeriodDetail({ r }: { r: PeriodResult | null }) {
-  if (!r) {
-    return (
-      <p className="text-[11px] text-muted-foreground/70 flex items-center gap-1">
-        <Info className="w-3 h-3" /> 막대를 누르면 그 구간의 근거가 여기 표시됩니다
-      </p>
-    );
+/** 상세 카드에서 월/연 문구를 고른다 — 구간 key 는 월간 `YYYY-MM`, 연간 `YYYY` 다 */
+const periodNoun = (r: PeriodResult): string => (r.key.length === 4 ? "연" : "월");
+
+const REASON_SHORT: Record<EstimateReason, string> = {
+  exit_price_proxy: "추정 청산가",
+  exit_date_unconfirmed: "매도일 불확실",
+  cash_error_not_cancelled: "현금 오차 상쇄 불가",
+};
+
+/**
+ * 상세 카드 첫 줄의 상태 — 기본 화면에서는 이 한 문장만 강조하고, 나머지 경고는 '근거 자세히'로 접는다.
+ *   confirmed   : 원장 기준 확정 (기존 UI 그대로)
+ *   approx      : 근사값 (분모 추정 · 예수금 품질 · 보유수량 출처)
+ *   partial     : 전체는 미확정, 확인 구간 성과가 있음
+ *   unconfirmed : 전체 미확정, 확인 가능한 연속 구간 없음
+ */
+export function detailStatus(r: PeriodResult): {
+  level: "confirmed" | "approx" | "partial" | "unconfirmed";
+  headline: string;
+} {
+  if (r.estimated) {
+    if (r.partial) {
+      return {
+        level: "partial",
+        headline: `전체 ${periodNoun(r)} 기간은 미확정 — 미확정 구간을 제외한 부분 성과만 따로 표시합니다 (가격 확인일 기준 ${r.partial.measuredDays}/${r.partial.totalDays})`,
+      };
+    }
+    return {
+      level: "unconfirmed",
+      headline: `전체 ${periodNoun(r)} 기간은 미확정 — 확인 가능한 연속 구간이 없어 참고값만 있습니다`,
+    };
   }
-  const rangeLow = r.returnPctLow;
-  const rangeHigh = r.returnPctHigh;
-  const hasRange = rangeHigh !== null && Math.abs((rangeHigh ?? 0) - (rangeLow ?? 0)) >= 0.005;
+  if (r.exact) return { level: "confirmed", headline: "원장 기준 확정" };
+  return {
+    level: "approx",
+    headline: "근사값 — 분모·예수금·보유수량 중 일부가 원장만으로 확정되지 않았습니다",
+  };
+}
+
+/** 제외 날짜를 (사유가 같고 사이에 확인된 날이 없는) 연속 묶음으로 줄인다 */
+export function groupExcludedDays(
+  p: PartialPerformance,
+): { from: string; to: string; days: number; reasons: readonly EstimateReason[] }[] {
+  const all = [
+    ...p.includedDates.map((date) => ({ date, reasons: null as readonly EstimateReason[] | null })),
+    ...p.excludedDays.map((e) => ({ date: e.date, reasons: e.reasons as readonly EstimateReason[] | null })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+  const out: { from: string; to: string; days: number; reasons: readonly EstimateReason[] }[] = [];
+  let cur: (typeof out)[number] | null = null;
+  for (const d of all) {
+    if (d.reasons === null) {
+      cur = null;
+      continue;
+    }
+    const key = [...d.reasons].sort().join("|");
+    if (cur && [...cur.reasons].sort().join("|") === key) {
+      cur.to = d.date;
+      cur.days += 1;
+    } else {
+      cur = { from: d.date, to: d.date, days: 1, reasons: d.reasons };
+      out.push(cur);
+    }
+  }
+  return out;
+}
+
+const md = (d: string) => d.slice(5).replace("-", "/");
+const fmtPct = (v: number | null) => (v === null ? "계산 불가" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`);
+const fmtSigned = (v: number) => `${v >= 0 ? "+" : "-"}${formatKRW(Math.abs(v))}`;
+
+/** 경고 badge 들 — 서로 독립이다. 하나가 켜졌다고 다른 것을 가리지 않는다. */
+function ProvenanceBadges({ r, only }: { r: PeriodResult; only?: "span" }) {
+  const span = (
+    <>
+      {r.span === "account-inception" && (
+        <Badge tone="slate" title="계좌·전략이 기간 중간에 시작했습니다">
+          기간 일부
+        </Badge>
+      )}
+      {r.span === "in-progress" && (
+        <Badge tone="slate" title="아직 진행 중인 기간입니다">
+          진행 중
+        </Badge>
+      )}
+    </>
+  );
+  if (only === "span") return span;
   return (
-    <div className="rounded-xl border bg-muted/30 p-3 text-xs space-y-1.5">
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="font-semibold">{r.label}</span>
-        <span className="text-[11px] text-muted-foreground">
-          {r.openDate} 시가 → {r.closeDate} 종가
-        </span>
-        {/* 경고는 서로 독립이다 — 하나가 켜졌다고 다른 것을 가리지 않는다. 여러 개가 동시에 보일 수 있다. */}
-        {r.exact && (
-          <Badge tone="violet" title="원장 거래와 유도 예수금만으로 계산되고 추정이 없는 구간입니다">
-            원장 기준
-          </Badge>
-        )}
-        {r.estimated && (
-          <Badge
-            tone="amber"
-            title="추정 청산 거래가 이 구간 손익에 영향을 줄 수 있습니다. 아래 수치는 확정값이 아니라 계산 참고값입니다."
-          >
-            추정 포함 · 미확정
-          </Badge>
-        )}
-        {r.denominatorEstimated && (
-          <Badge
-            tone="amber"
-            title="추정 청산대금의 오차는 이 구간 손익에서 상쇄된다고 입증됐지만, 수익률 분모(시작 총자산)에는 추정 대금이 섞여 있습니다."
-          >
-            분모 추정
-          </Badge>
-        )}
-        {r.cashQuality !== "derived" && (
-          <Badge tone="amber" title={`예수금 품질: ${CASH_QUALITY_LABEL[r.cashQuality]}`}>
-            {CASH_QUALITY_LABEL[r.cashQuality]}
-          </Badge>
-        )}
-        {r.holdingsSources.includes("anchor") && (
-          <Badge
-            tone="amber"
-            title="이 구간 일부는 리밸런싱 기록의 보유수량을 씁니다. 체결가를 모르므로 당일 매매 손익을 0 으로 둡니다."
-          >
-            리밸런싱 기록 보유수량
-          </Badge>
-        )}
-        {r.span === "account-inception" && (
-          <Badge tone="slate" title="계좌·전략이 기간 중간에 시작했습니다">
-            기간 일부
-          </Badge>
-        )}
-        {r.span === "in-progress" && (
-          <Badge tone="slate" title="아직 진행 중인 기간입니다">
-            진행 중
-          </Badge>
-        )}
-      </div>
+    <>
+      {r.exact && (
+        <Badge tone="violet" title="원장 거래와 유도 예수금만으로 계산되고 추정이 없는 구간입니다">
+          원장 기준
+        </Badge>
+      )}
+      {r.estimated && (
+        <Badge
+          tone="amber"
+          title="추정 청산 거래가 이 구간 손익에 영향을 줄 수 있습니다. 아래 수치는 확정값이 아니라 계산 참고값입니다."
+        >
+          추정 포함 · 미확정
+        </Badge>
+      )}
+      {r.denominatorEstimated && (
+        <Badge
+          tone="amber"
+          title="추정 청산대금의 오차는 이 구간 손익에서 상쇄된다고 입증됐지만, 수익률 분모(시작 총자산)에는 추정 대금이 섞여 있습니다."
+        >
+          분모 추정
+        </Badge>
+      )}
+      {r.cashQuality !== "derived" && (
+        <Badge tone="amber" title={`예수금 품질: ${CASH_QUALITY_LABEL[r.cashQuality]}`}>
+          {CASH_QUALITY_LABEL[r.cashQuality]}
+        </Badge>
+      )}
+      {r.holdingsSources.includes("anchor") && (
+        <Badge
+          tone="amber"
+          title="이 구간 일부는 리밸런싱 기록의 보유수량을 씁니다. 체결가를 모르므로 당일 매매 손익을 0 으로 둡니다."
+        >
+          리밸런싱 기록 보유수량
+        </Badge>
+      )}
+      {span}
+    </>
+  );
+}
+
+/** 근거 문단들 (기존 안내 문구 그대로) — 기본 화면에서는 '근거 자세히' 안에 접힌다 */
+function ProvenanceNotices({ r }: { r: PeriodResult }) {
+  return (
+    <>
       {r.estimated && (
         <div
           className="rounded-lg border border-amber-300/60 dark:border-amber-800/60 bg-amber-500/10 p-2 text-[11px] text-amber-800 dark:text-amber-200 space-y-0.5"
@@ -302,68 +397,193 @@ export function PeriodDetail({ r }: { r: PeriodResult | null }) {
           둘을 합친 설명되지 않은 잔차이지 청산대금 오차의 상한이 아닙니다.
         </p>
       )}
-      <div
-        className={`space-y-0.5 tabular-nums border-t pt-1.5 ${r.estimated ? "text-muted-foreground" : ""}`}
-        data-testid={r.estimated ? "reference-values" : undefined}
-      >
-        <Row label="기초 총자산 (장 시작)" value={formatKRW(r.beginningTotal)} />
-        <Row label="기말 총자산 (장 마감)" value={formatKRW(r.endingTotal)} />
-        <Row
-          label="외부 입출금"
-          value={`${r.netCashflow >= 0 ? "+" : "-"}${formatKRW(Math.abs(r.netCashflow))}`}
-        />
-        <Row
-          label={r.estimated ? "기간 손익 (계산 참고값 · 미확정)" : "기간 손익"}
-          value={`${r.knownProfit >= 0 ? "+" : "-"}${formatKRW(Math.abs(r.knownProfit))}`}
-          strong={!r.estimated}
-          muted={r.estimated}
-          tone={r.estimated ? undefined : r.knownProfit >= 0 ? "up" : "down"}
-        />
-        {/* 아래 두 줄은 위 손익의 **내역**이다 — 더하는 값이 아니다.
-            기간 손익에는 보수 모델이 인정한 미관측 수입이 이미 들어 있다. */}
-        <Row
-          label="└ 그중 미관측 현금수입 (이자·분배금)"
-          value={`+${formatKRW(r.incomeLowerBound)}`}
-          muted
-        />
-        <Row
-          label="└ 더 있을 수 있는 미관측 수입"
-          value={
-            r.incomeHeadroom === null
-              ? "미정 (원장 최신화 필요)"
-              : `+${formatKRW(r.incomeHeadroom)}`
+    </>
+  );
+}
+
+/** 기간 손익·수익률 표 — 추정 포함이면 계산 참고값으로 표시한다 */
+function NumbersTable({ r }: { r: PeriodResult }) {
+  const rangeLow = r.returnPctLow;
+  const rangeHigh = r.returnPctHigh;
+  const hasRange = rangeHigh !== null && Math.abs((rangeHigh ?? 0) - (rangeLow ?? 0)) >= 0.005;
+  return (
+    <div
+      className={`space-y-0.5 tabular-nums border-t pt-1.5 ${r.estimated ? "text-muted-foreground" : ""}`}
+      data-testid={r.estimated ? "reference-values" : undefined}
+    >
+      <Row label="기초 총자산 (장 시작)" value={formatKRW(r.beginningTotal)} />
+      <Row label="기말 총자산 (장 마감)" value={formatKRW(r.endingTotal)} />
+      <Row label="외부 입출금" value={fmtSigned(r.netCashflow)} />
+      <Row
+        label={r.estimated ? "기간 손익 (계산 참고값 · 미확정)" : "기간 손익"}
+        value={fmtSigned(r.knownProfit)}
+        strong={!r.estimated}
+        muted={r.estimated}
+        tone={r.estimated ? undefined : r.knownProfit >= 0 ? "up" : "down"}
+      />
+      {/* 아래 두 줄은 위 손익의 **내역**이다 — 더하는 값이 아니다.
+          기간 손익에는 보수 모델이 인정한 미관측 수입이 이미 들어 있다. */}
+      <Row label="└ 그중 미관측 현금수입 (이자·분배금)" value={`+${formatKRW(r.incomeLowerBound)}`} muted />
+      <Row
+        label="└ 더 있을 수 있는 미관측 수입"
+        value={r.incomeHeadroom === null ? "미정 (원장 최신화 필요)" : `+${formatKRW(r.incomeHeadroom)}`}
+        muted
+      />
+      <div className="border-t pt-1 flex justify-between gap-3 font-semibold">
+        <span>
+          {r.estimated
+            ? "기간 수익률 (참고값 · 미확정)"
+            : r.denominatorEstimated
+              ? "기간 수익률 (분모 추정)"
+              : "기간 수익률"}
+        </span>
+        <span
+          className={
+            rangeLow === null || r.estimated
+              ? "text-muted-foreground"
+              : rangeLow >= 0
+                ? "text-emerald-500"
+                : "text-rose-500"
           }
-          muted
-        />
-        <div className="border-t pt-1 flex justify-between gap-3 font-semibold">
-          <span>
-            {r.estimated
-              ? "기간 수익률 (참고값 · 미확정)"
-              : r.denominatorEstimated
-                ? "기간 수익률 (분모 추정)"
-                : "기간 수익률"}
-          </span>
-          <span
-            className={
-              rangeLow === null || r.estimated
-                ? "text-muted-foreground"
-                : rangeLow >= 0
-                  ? "text-emerald-500"
-                  : "text-rose-500"
-            }
-          >
-            {rangeLow === null ? "계산 불가" : `${rangeLow >= 0 ? "+" : ""}${rangeLow.toFixed(2)}%`}
-            {hasRange && ` ~ ${rangeHigh! >= 0 ? "+" : ""}${rangeHigh!.toFixed(2)}%`}
-            {/* 숫자 뒤에 "이상"을 붙이지 않는다 — 정확도는 badge·tooltip·아래 설명으로만
-                표현한다(상한 미정이면 "더 있을 수 있는 미관측 수입" 행이 그것을 말해준다). */}
-          </span>
-        </div>
+        >
+          {fmtPct(rangeLow)}
+          {hasRange && ` ~ ${rangeHigh! >= 0 ? "+" : ""}${rangeHigh!.toFixed(2)}%`}
+          {/* 숫자 뒤에 "이상"을 붙이지 않는다 — 정확도는 badge·tooltip·아래 설명으로만
+              표현한다(상한 미정이면 "더 있을 수 있는 미관측 수입" 행이 그것을 말해준다). */}
+        </span>
+      </div>
+      <Row
+        label="평균투자원금 (분모 = 기초자산 + 기간가중 입출금)"
+        value={formatKRW(r.averageCapital)}
+        muted
+      />
+    </div>
+  );
+}
+
+/** 확인 구간 성과 — 전체 기간 결과와 분리된 별도 지표. 월/연 전체를 대표하지 않는다. */
+function PartialBox({ r, p }: { r: PeriodResult; p: PartialPerformance }) {
+  const noun = periodNoun(r);
+  const pctOfDays = p.totalDays > 0 ? Math.round((p.measuredDays / p.totalDays) * 100) : 0;
+  return (
+    <div
+      className="rounded-lg border border-dashed border-violet-300/70 dark:border-violet-700/60 p-2 space-y-1"
+      data-testid="partial-box"
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="font-semibold">확인 구간 성과</span>
+        <Badge tone="violet" title={`미확정 구간을 제외하고 확인된 연속 구간만 연결한 별도 지표입니다. ${noun} 전체 수익률이 아닙니다.`}>
+          부분 성과 · 미확정 구간 제외 · {noun} 전체 수익률 아님
+        </Badge>
+      </div>
+      <div className="space-y-0.5 tabular-nums">
         <Row
-          label="평균투자원금 (분모 = 기초자산 + 기간가중 입출금)"
-          value={formatKRW(r.averageCapital)}
+          label={p.denominatorEstimated ? "확인 구간 연결수익률 (분모 근사)" : "확인 구간 연결수익률"}
+          value={fmtPct(p.returnPctLow)}
+          strong
+        />
+        <Row label="확인 구간 손익 합계" value={fmtSigned(p.knownProfit)} />
+        <Row
+          label="커버리지 (가격 확인일 기준)"
+          value={`확인 ${p.measuredDays}/${p.totalDays} (${pctOfDays}%) · 제외 ${p.totalDays - p.measuredDays}일`}
           muted
         />
       </div>
+      <ul className="text-[11px] text-muted-foreground space-y-0.5" data-testid="partial-runs">
+        {p.runs.map((run) => (
+          <li key={run.openDate}>
+            확인 {md(run.openDate)}
+            {run.closeDate !== run.openDate ? ` ~ ${md(run.closeDate)}` : ""} ({run.tradingDays}일) · 손익{" "}
+            {fmtSigned(run.knownProfit)} · 수익률 {fmtPct(run.returnPctLow)}
+            {run.denominatorEstimated ? " (분모 근사)" : ""}
+          </li>
+        ))}
+        {groupExcludedDays(p).map((g) => (
+          <li key={g.from}>
+            제외 {md(g.from)}
+            {g.to !== g.from ? ` ~ ${md(g.to)}` : ""} ({g.days}일) · {g.reasons.map((x) => REASON_SHORT[x]).join(" · ")}
+          </li>
+        ))}
+      </ul>
+      <p className="text-[11px] text-muted-foreground" data-testid="partial-disclaimer">
+        미확정 구간을 제외하고 확인된 구간만 연결한 별도 지표이며, {noun} 전체 수익률이 아닙니다. 제외된 기간은
+        계산에 넣지 않았을 뿐 수익률 0% 로 가정하거나 확정한 것이 아닙니다.
+        {p.denominatorEstimated && " 분모(시작 총자산)에 추정 청산대금이 섞여 있어 수익률은 근사값입니다."}
+        {" "}커버리지는 전체 거래일이 아니라 가격이 확인된 거래일 기준입니다.
+        {p.unpricedDays.length > 0 &&
+          ` 가격이 없어 평가하지 못한 ${p.unpricedDays.length}일(${p.unpricedDays.map(md).join(", ")})은 분모에 들어 있지 않아, 실제 거래일 기준 커버리지는 이보다 낮을 수 있습니다.`}
+        {p.measuredDays === 1 && " 확인된 거래일이 하루뿐이라 대표성이 매우 낮습니다."}
+        {p.unmeasuredBreaks > 0 &&
+          ` 확인 구간 사이에 제외 날짜로 표시되지 않은 미확인 구간이 ${p.unmeasuredBreaks}곳 있습니다(가격이 없어 평가하지 못한 날에 추정이 걸린 경우).`}
+      </p>
+    </div>
+  );
+}
+
+/** 선택된 구간 상세 — 모바일에서 손가락이 툴팁을 가리는 문제를 피해 차트 아래 고정 표시 */
+export function PeriodDetail({ r }: { r: PeriodResult | null }) {
+  if (!r) {
+    return (
+      <p className="text-[11px] text-muted-foreground/70 flex items-center gap-1">
+        <Info className="w-3 h-3" /> 막대를 누르면 그 구간의 근거가 여기 표시됩니다
+      </p>
+    );
+  }
+  const status = detailStatus(r);
+  const header = (
+    <>
+      <span className="font-semibold">{r.label}</span>
+      <span className="text-[11px] text-muted-foreground">
+        {r.openDate} 시가 → {r.closeDate} 종가
+      </span>
+    </>
+  );
+
+  // 정상(원장 기준 확정) 구간은 기존 UI 그대로 — 배지 한 줄 + 숫자 표.
+  if (status.level === "confirmed") {
+    return (
+      <div className="rounded-xl border bg-muted/30 p-3 text-xs space-y-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {header}
+          <ProvenanceBadges r={r} />
+        </div>
+        <NumbersTable r={r} />
+      </div>
+    );
+  }
+
+  // 그 외: 상태 한 문장만 기본 화면에 두고, 경고 종류와 근거는 접는다.
+  return (
+    <div className="rounded-xl border bg-muted/30 p-3 text-xs space-y-1.5" data-testid="period-detail">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {header}
+        <ProvenanceBadges r={r} only="span" />
+      </div>
+      <p className="text-[11px] text-amber-700 dark:text-amber-300" data-testid="status-headline">
+        {status.headline}
+      </p>
+      {r.estimated && (
+        <p className="tabular-nums" data-testid="whole-period">
+          <span className="text-muted-foreground">전체 {periodNoun(r)} 수익률 </span>
+          <span className="font-semibold">미확정</span>
+          <span className="text-[11px] text-muted-foreground">
+            {" "}
+            · {r.estimateReasons.map((x) => REASON_SHORT[x]).join(" · ")}
+          </span>
+        </p>
+      )}
+      {r.partial && <PartialBox r={r} p={r.partial} />}
+      {!r.estimated && <NumbersTable r={r} />}
+      <details className="text-[11px]" data-testid="provenance-details">
+        <summary className="cursor-pointer text-muted-foreground select-none">근거 자세히</summary>
+        <div className="mt-1.5 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <ProvenanceBadges r={r} />
+          </div>
+          <ProvenanceNotices r={r} />
+          {r.estimated && <NumbersTable r={r} />}
+        </div>
+      </details>
     </div>
   );
 }
@@ -393,8 +613,11 @@ function Row({
   );
 }
 
-/** 차트에 올리는 한 줄 — `bar` 는 확정 값(null = 막대 없음) */
-export type ChartRow = PeriodResult & { bar: number | null };
+/** 차트에 올리는 한 줄 — `bar` 는 그릴 값(null = 막대 없음), `barKind` 는 확정/부분 성과 구분 */
+export type ChartRow = PeriodResult & {
+  bar: number | null;
+  barKind: "confirmed" | "partial" | "none";
+};
 
 /**
  * Recharts 클릭/터치 이벤트에서 **선택할 구간 key** 를 찾는다.
@@ -427,10 +650,12 @@ export function selectionKeyFromChartEvent(
 
 /** 구간 선택 select 의 옵션 문구 — 막대가 없는 구간도 고를 수 있고, 왜 막대가 없는지 보인다 */
 export function periodOptionLabel(r: PeriodResult, metric: MetricId): string {
-  const bar = confirmedBarValue(r, metric);
+  const bar = chartBar(r, metric);
   const tag = r.estimated
-    ? " · 추정 포함(막대 없음)"
-    : bar === null
+    ? bar.kind === "partial" && r.partial
+      ? ` · 부분 성과(미확정 구간 제외, 가격 확인일 ${r.partial.measuredDays}/${r.partial.totalDays})`
+      : " · 추정 포함(막대 없음)"
+    : bar.value === null
       ? " · 계산 불가(막대 없음)"
       : r.denominatorEstimated
         ? " · 분모 추정"
@@ -464,7 +689,11 @@ export function ProfitResultsPanel({
   // 막대 값: 계산 불가(null)·추정 포함 구간은 0 이 아니라 null 이다 — 막대를 그리지 않는다.
   // 진짜 0 은 0 으로 남고, BarShape 가 높이 0 이어도 얇은 선으로 그려 null(생략)과 구별한다.
   const chartData = useMemo<ChartRow[]>(
-    () => results.map((r) => ({ ...r, bar: confirmedBarValue(r, metric) })),
+    () =>
+      results.map((r) => {
+        const b = chartBar(r, metric);
+        return { ...r, bar: b.value, barKind: b.kind };
+      }),
     [results, metric],
   );
   const onChartClick = (e: unknown) => {
@@ -576,6 +805,13 @@ export function ProfitResultsPanel({
         </div>
       )}
 
+      {chartData.some((d) => d.barKind === "partial") && (
+        <p className="text-[11px] text-muted-foreground" data-testid="partial-legend">
+          점선·반투명 막대(&lsquo;부분&rsquo;)는 <strong>미확정 구간을 제외한 부분 성과</strong>입니다 — 월/연 전체
+          수익률이 아닙니다. 분모 추정이 포함되면 근사값입니다.
+        </p>
+      )}
+
       <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
         <span className="shrink-0">구간 선택</span>
         <select
@@ -595,6 +831,61 @@ export function ProfitResultsPanel({
 
       <PeriodDetail r={selected} />
     </>
+  );
+}
+
+export interface ProfitSummary {
+  nonExact: number;
+  estimated: number;
+  partial: number;
+  denominatorEstimated: number;
+  anchorUsed: boolean;
+  pending: boolean;
+  unknown: boolean;
+  total: number;
+}
+
+/**
+ * 헤더의 요약 상태 — 경고 배지를 여러 개 늘어놓지 않고 하나만 둔다. 종류별 내역은 펼쳐서 본다.
+ * 작은 테두리 칩이라 그래프보다 눈에 띄지 않는다(모바일).
+ */
+export function ProfitSummaryChip({ summary }: { summary: ProfitSummary }) {
+  if (summary.total === 0) return null;
+  const items: string[] = [];
+  if (summary.estimated > 0) {
+    items.push(
+      `추정 포함 ${summary.estimated}개 구간 — 전체 수익률은 미확정입니다${
+        summary.partial > 0
+          ? `. 그중 ${summary.partial}개 구간은 미확정 구간을 제외한 부분 성과(월/연 전체 수익률 아님)를 별도 스타일로 표시합니다`
+          : ". 확인 가능한 연속 구간이 없는 구간은 막대를 그리지 않습니다"
+      }`,
+    );
+  }
+  if (summary.denominatorEstimated > 0) {
+    items.push(
+      `분모 추정 ${summary.denominatorEstimated}개 구간 — 추정 청산대금의 오차는 손익에서 상쇄된다고 입증됐고, 수익률 분모만 근사값입니다`,
+    );
+  }
+  if (summary.anchorUsed) {
+    items.push("리밸런싱 기록 구간 포함 — 원장이 끝난 뒤에는 리밸런싱 기록의 보유수량을 쓰고, 당일 매매 손익은 0 으로 둡니다");
+  }
+  if (summary.pending) items.push("입금 반영 대기 — 입금은 장부에 있는데 그 돈으로 한 매수가 아직 원장에 없습니다");
+  if (summary.unknown) items.push("예수금 미확인 구간 — 그 구간 예수금을 원장·장부로 설명할 수 없습니다");
+  if (items.length === 0) return null;
+  const label = summary.estimated > 0 ? "일부 구간 미확정" : "일부 근사값";
+  return (
+    <details className="text-[11px]" data-testid="summary-chip">
+      <summary className="inline-flex cursor-pointer select-none items-center gap-1 rounded-full border px-2 py-0.5 text-muted-foreground list-none">
+        <Info className="w-3 h-3" />
+        {label}
+        <span className="text-muted-foreground/70">· 자세히</span>
+      </summary>
+      <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-muted-foreground" data-testid="summary-details">
+        {items.map((t) => (
+          <li key={t}>{t}</li>
+        ))}
+      </ul>
+    </details>
   );
 }
 
@@ -781,10 +1072,11 @@ export function ProfitAnalysisSection() {
     const nonExact = results.filter((r) => !r.exact).length;
     const estimated = results.filter((r) => r.estimated).length;
     const denominatorEstimated = results.filter((r) => r.denominatorEstimated).length;
+    const partial = results.filter((r) => r.estimated && r.partial).length;
     const anchorUsed = results.some((r) => r.holdingsSources.includes("anchor"));
     const pending = results.some((r) => r.cashQuality === "cashflow-pending");
     const unknown = results.some((r) => r.cashQuality === "unknown");
-    return { nonExact, estimated, denominatorEstimated, anchorUsed, pending, unknown, total: results.length };
+    return { nonExact, estimated, partial, denominatorEstimated, anchorUsed, pending, unknown, total: results.length };
   }, [results]);
 
   const isLoading = ledger.isLoading || prices.isLoading;
@@ -795,43 +1087,6 @@ export function ProfitAnalysisSection() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-semibold">수익 분석</h3>
-          {summary.total > 0 && summary.anchorUsed && (
-            <Badge
-              tone="amber"
-              title="원장이 끝난 뒤 구간은 리밸런싱 기록의 보유수량을 씁니다. 그 구간은 체결가를 모르므로 당일 매매 손익을 0 으로 둡니다."
-            >
-              리밸런싱 기록 구간 포함
-            </Badge>
-          )}
-          {summary.estimated > 0 && (
-            <Badge
-              tone="amber"
-              title="계좌 이전 때 사용자가 승인한 추정 청산가가 들어 있는 구간입니다. 확정 수익률로 표시하지 않고 막대를 생략합니다. 구간을 누르면 계산 참고값과 사유를 볼 수 있습니다."
-            >
-              추정 포함 {summary.estimated}개 구간 · 막대 생략
-            </Badge>
-          )}
-          {summary.denominatorEstimated > 0 && (
-            <Badge
-              tone="slate"
-              title="추정 청산대금의 오차가 손익에서 상쇄된다고 입증된 구간입니다(막대는 그립니다). 수익률 분모의 예수금에는 추정 대금이 섞여 있어 수익률은 근사값입니다. 현금 품질·보유수량 출처는 별도로 표시됩니다."
-            >
-              분모 추정 {summary.denominatorEstimated}개 구간
-            </Badge>
-          )}
-          {summary.pending && (
-            <Badge
-              tone="amber"
-              title="입금은 장부에 있는데 그 돈으로 한 매수가 아직 원장에 없습니다."
-            >
-              입금 반영 대기
-            </Badge>
-          )}
-          {summary.unknown && (
-            <Badge tone="amber" title="그 구간 예수금을 원장·장부로 설명할 수 없습니다.">
-              예수금 미확인 구간
-            </Badge>
-          )}
         </div>
         <Tabs
           value={period}
@@ -849,6 +1104,8 @@ export function ProfitAnalysisSection() {
           strong
         />
       </div>
+
+      <ProfitSummaryChip summary={summary} />
 
       <div className="flex flex-wrap items-center gap-2">
         <Tabs
@@ -928,7 +1185,7 @@ export function ProfitAnalysisSection() {
             {summary.nonExact > 0 &&
               ` 전체 ${summary.total}개 구간 중 ${summary.nonExact}개는 예수금이나 보유수량을 원장만으로 확정하지 못했거나 추정 거래를 포함해 '원장 기준'이 아닙니다.`}
             {summary.estimated > 0 &&
-              ` 추정 거래가 포함된 ${summary.estimated}개 구간은 확정 수익률이 아니어서 막대를 그리지 않습니다(0% 가 아닙니다).`}
+              ` 추정 거래가 포함된 ${summary.estimated}개 구간은 확정 수익률이 아닙니다. 확인 가능한 연속 구간이 있으면 '부분 성과' 막대로 따로 표시하고, 없으면 막대를 그리지 않습니다(0% 가 아닙니다).`}
           </p>
         </>
       )}
